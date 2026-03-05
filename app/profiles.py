@@ -19,10 +19,8 @@ _raw_profiles: dict[str, dict[str, Any]] = {}
 _type_map: dict[str, str] = {}
 # Memoized resolved profiles
 _resolved_cache: dict[str, dict[str, Any]] = {}
-# Index: {vendor_slug (e.g. "BBL.GM014"): name}
+# Index: {setting_id (e.g. "GM014"): name}
 _setting_id_index: dict[str, str] = {}
-# Vendor map: {profile_name: vendor_name}
-_vendor_map: dict[str, str] = {}
 
 
 class ProfileNotFoundError(Exception):
@@ -68,13 +66,11 @@ def _load_user_profiles() -> int:
         category = _detect_profile_type(data)
         _raw_profiles[name] = data
         _type_map[name] = category
-        _vendor_map[name] = "user"
 
         # Use setting_id if present, otherwise use name as identifier
         if "setting_id" not in data:
             data["setting_id"] = name
-        slug = _vendor_slug("user", data["setting_id"])
-        _setting_id_index[slug] = name
+        _setting_id_index[data["setting_id"]] = name
 
         count += 1
         logger.info("Loaded user %s profile: %s", category, name)
@@ -137,18 +133,12 @@ def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
     return profiles, type_map
 
 
-def _vendor_slug(vendor_name: str, setting_id: str) -> str:
-    """Build a vendor-prefixed slug like 'BBL.GM014'."""
-    return f"{vendor_name}.{setting_id}"
-
-
 def load_all_profiles() -> None:
     """Read all vendor profile JSONs into memory at startup."""
     _raw_profiles.clear()
     _type_map.clear()
     _resolved_cache.clear()
     _setting_id_index.clear()
-    _vendor_map.clear()
 
     vendor_dirs: list[tuple[str, str]] = []  # (vendor_name, vendor_dir)
 
@@ -169,16 +159,12 @@ def load_all_profiles() -> None:
         v_profiles, v_type_map = _load_vendor_profiles(vendor_dir, index)
         _raw_profiles.update(v_profiles)
         _type_map.update(v_type_map)
-        for name in v_profiles:
-            _vendor_map[name] = vendor_name
         vendor_dirs.append((vendor_name, vendor_dir))
 
-    # Build setting_id index with vendor-prefixed slugs
+    # Build setting_id index
     for name, data in _raw_profiles.items():
         if "setting_id" in data:
-            vendor = _vendor_map.get(name, "unknown")
-            slug = _vendor_slug(vendor, data["setting_id"])
-            _setting_id_index[slug] = name
+            _setting_id_index[data["setting_id"]] = name
 
     # Follow inherits chains to discover unlisted base profiles
     # Search across ALL vendor dirs for parent profiles
@@ -200,10 +186,8 @@ def load_all_profiles() -> None:
                     actual_name = data.get("name", parent_name)
                     _raw_profiles[actual_name] = data
                     _type_map[actual_name] = ptype
-                    _vendor_map[actual_name] = vendor_name
                     if "setting_id" in data:
-                        slug = _vendor_slug(vendor_name, data["setting_id"])
-                        _setting_id_index[slug] = actual_name
+                        _setting_id_index[data["setting_id"]] = actual_name
                     next_batch.append(actual_name)
                     break
         pending = next_batch
@@ -255,16 +239,14 @@ def _clean_profile(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def _slug_for_profile(name: str) -> str:
-    """Return the vendor-prefixed slug for a profile name."""
+    """Return the setting_id for a profile name."""
     data = _raw_profiles.get(name, {})
-    vendor = _vendor_map.get(name, "unknown")
-    sid = data.get("setting_id", "")
-    return _vendor_slug(vendor, sid)
+    return data.get("setting_id", "")
 
 
-def _name_for_slug(slug: str) -> str | None:
-    """Look up a profile name by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
-    return _setting_id_index.get(slug)
+def _name_for_slug(setting_id: str) -> str | None:
+    """Look up a profile name by its setting_id (e.g. 'GM014')."""
+    return _setting_id_index.get(setting_id)
 
 
 def _machine_names_for_slug(machine_slug: str) -> set[str]:

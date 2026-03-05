@@ -66,17 +66,17 @@ async def list_machines():
 
 @app.get("/profiles/processes", response_model=list[ProcessProfile], tags=["Profiles"])
 async def list_processes(
-    machine: str | None = Query(None, description="Filter by machine slug (e.g. BBL.GM014)."),
+    machine: str | None = Query(None, description="Filter by machine setting_id (e.g. GM014)."),
 ):
-    """List process profiles, optionally filtered by a machine slug."""
+    """List process profiles, optionally filtered by a machine setting_id."""
     return get_process_profiles(machine_id=machine)
 
 
 @app.get("/profiles/filaments", response_model=list[FilamentProfile], tags=["Profiles"])
 async def list_filaments(
-    machine: str | None = Query(None, description="Filter by machine slug (e.g. BBL.GM014)."),
+    machine: str | None = Query(None, description="Filter by machine setting_id (e.g. GM014)."),
 ):
-    """List filament profiles, optionally filtered by a machine slug."""
+    """List filament profiles, optionally filtered by a machine setting_id."""
     return get_filament_profiles(machine_id=machine)
 
 
@@ -95,11 +95,11 @@ async def list_filaments(
 )
 async def slice_file(
     file: UploadFile = File(description="A `.3mf` file to slice."),
-    machine_profile: str = Form(description="Machine slug (e.g. BBL.GM014).", examples=["BBL.GM014"]),
-    process_profile: str = Form(description="Process slug (e.g. BBL.GP004).", examples=["BBL.GP004"]),
+    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
+    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
     filament_profiles: str = Form(
-        description='JSON array of filament slugs, e.g. `["BBL.GFL99"]`.',
-        examples=['["BBL.GFL99"]'],
+        description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
+        examples=['["GFL99"]'],
     ),
 ):
     """Slice a `.3mf` file using the specified machine, process, and filament profiles.

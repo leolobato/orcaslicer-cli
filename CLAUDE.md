@@ -30,7 +30,7 @@ Requires example `.3mf` files in `../bambu-poc/` (not included in this repo). Th
 
 **`app/main.py`** — FastAPI app. Endpoints: `GET /health`, `GET /profiles/{machines,processes,filaments}`, `POST /slice`. The `/slice` endpoint accepts multipart form data with a `.3mf` file and profile setting_ids.
 
-**`app/profiles.py`** — Profile loading and inheritance resolution. At startup (`lifespan`), reads all vendor JSON profiles from disk into memory (`_raw_profiles`). Profiles have an `inherits` chain that gets recursively resolved and memoized. Profiles are identified by vendor-prefixed slugs (e.g., `BBL.GM014` for P1S 0.4 nozzle) to avoid collisions across vendors. Only profiles with `instantiation: "true"` are exposed as leaf/selectable profiles. The `compatible_printers` field is mapped from profile names to slugs in API responses.
+**`app/profiles.py`** — Profile loading and inheritance resolution. At startup (`lifespan`), reads all vendor JSON profiles from disk into memory (`_raw_profiles`). Profiles have an `inherits` chain that gets recursively resolved and memoized. Profiles are identified by their `setting_id` (e.g., `GM014` for P1S 0.4 nozzle). Only profiles with `instantiation: "true"` are exposed as leaf/selectable profiles. The `compatible_printers` field is mapped from profile names to setting_ids in API responses.
 
 **`app/slicer.py`** — Slicing orchestration. Resolves profiles, writes them as temp JSON files, sanitizes the input 3MF (clamps invalid parameter values), overlays 3MF project settings onto the process profile, then shells out to `orca-slicer` CLI. Serialized to one concurrent slice via `asyncio.Semaphore(1)`.
 
@@ -43,4 +43,4 @@ Requires example `.3mf` files in `../bambu-poc/` (not included in this repo). Th
 - The `"from"` key in profiles must NOT be stripped during resolution — OrcaSlicer CLI requires it.
 - The slicer injects `G92 E0` into `layer_change_gcode` if not already present (workaround for extrusion issues).
 - 3MF project settings are overlaid onto the process profile to preserve user choices embedded in the file.
-- Profile slugs (`Vendor.SettingID`, e.g. `BBL.GM014`) are the stable identifiers used across the API (not profile names or raw setting_ids). This prevents collisions when multiple vendors reuse the same setting_id.
+- Profile `setting_id` values (e.g. `GM014`) are the stable identifiers used across the API (not profile names).
