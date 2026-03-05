@@ -1,32 +1,42 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
-    status: str
-    version: str
+    """Health check response."""
+
+    status: str = Field(examples=["ok"])
+    version: str = Field(description="OrcaSlicer version and API revision.", examples=["2.3.1-1"])
 
 
 class MachineProfile(BaseModel):
-    setting_id: str
-    name: str
-    nozzle_diameter: str
-    printer_model: str
+    """A printer/machine profile."""
+
+    setting_id: str = Field(description="Stable identifier for this profile.", examples=["GM014"])
+    name: str = Field(examples=["Bambu Lab P1S 0.4 nozzle"])
+    nozzle_diameter: str = Field(examples=["0.4"])
+    printer_model: str = Field(examples=["Bambu Lab P1S"])
 
 
 class ProcessProfile(BaseModel):
-    setting_id: str
-    name: str
-    compatible_printers: list[str]
-    layer_height: str
+    """A print process (quality/speed) profile."""
+
+    setting_id: str = Field(description="Stable identifier for this profile.", examples=["GP004"])
+    name: str = Field(examples=["0.20mm Standard @BBL P1S"])
+    compatible_printers: list[str] = Field(description="Machine setting_ids this process is compatible with.")
+    layer_height: str = Field(examples=["0.2"])
 
 
 class FilamentProfile(BaseModel):
-    setting_id: str
-    name: str
-    compatible_printers: list[str]
-    filament_type: str
+    """A filament material profile."""
+
+    setting_id: str = Field(description="Stable identifier for this profile.", examples=["GFL99"])
+    name: str = Field(examples=["Bambu PLA Basic @BBL P1S"])
+    compatible_printers: list[str] = Field(description="Machine setting_ids this filament is compatible with.")
+    filament_type: str = Field(examples=["PLA"])
 
 
 class SliceError(BaseModel):
-    error: str
-    orca_output: str | None = None
+    """Error response from the slicing endpoint."""
+
+    error: str = Field(description="Human-readable error message.")
+    orca_output: str | None = Field(default=None, description="Raw output from OrcaSlicer, if available.")
