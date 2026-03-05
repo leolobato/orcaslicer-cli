@@ -1,7 +1,12 @@
 """FastAPI app exposing OrcaSlicer as a REST API."""
 
 import json
+import logging
+import os
 from contextlib import asynccontextmanager
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse, Response

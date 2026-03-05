@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -10,6 +11,8 @@ from typing import Any
 
 from .config import ORCA_BINARY
 from .profiles import ProfileNotFoundError, get_profile
+
+logger = logging.getLogger(__name__)
 
 # Serialize slicing requests — CPU-heavy
 _slice_semaphore = asyncio.Semaphore(1)
@@ -98,16 +101,27 @@ async def slice_3mf(
     filament_profile_ids: list[str],
 ) -> bytes:
     """Slice a 3MF file and return the sliced result as bytes."""
+    logger.info(
+        "Slice request: machine=%s process=%s filaments=%s file_size=%d",
+        machine_profile_id, process_profile_id, filament_profile_ids, len(file_bytes),
+    )
+
     # Resolve profiles
     machine_profile = get_profile("machine", machine_profile_id)
     process_profile = get_profile("process", process_profile_id)
     filament_profiles = [
         get_profile("filament", fid) for fid in filament_profile_ids
     ]
+    logger.info(
+        "Resolved profiles: machine=%s process=%s filaments=%s",
+        machine_profile.get("name"), process_profile.get("name"),
+        [fp.get("name") for fp in filament_profiles],
+    )
 
     # G92 E0 workaround
     lcg = machine_profile.get("layer_change_gcode", "")
     if "G92 E0" not in lcg:
+        logger.debug("Injecting G92 E0 into layer_change_gcode")
         machine_profile = {**machine_profile, "layer_change_gcode": "G92 E0\n" + lcg}
 
     async with _slice_semaphore:
@@ -134,14 +148,17 @@ async def _do_slice(
             with zipfile.ZipFile(input_path, "r") as zf:
                 raw = zf.read("Metadata/project_settings.config").decode()
                 threemf_settings = json.loads(raw)
-        except (KeyError, json.JSONDecodeError, zipfile.BadZipFile):
-            pass
+                logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
+        except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            logger.debug("No project settings in 3MF: %s", exc)
 
         # Overlay 3MF settings onto process profile
         process_profile = _overlay_3mf_settings(process_profile, threemf_settings)
 
         # Sanitize 3MF
         slice_filepath = _sanitize_3mf(input_path, tmpdir)
+        if slice_filepath != input_path:
+            logger.debug("3MF was sanitized (clamped invalid parameter values)")
 
         # Write profile temp files
         machine_path = os.path.join(tmpdir, "machine.json")
@@ -175,27 +192,40 @@ async def _do_slice(
         ]
 
         # Run OrcaSlicer
+        logger.info("Running: %s", " ".join(cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
-        orca_output = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
+        stdout_text = stdout.decode(errors="replace").strip()
+        stderr_text = stderr.decode(errors="replace").strip()
+        orca_output = (stdout_text + "\n" + stderr_text).strip()
 
         if proc.returncode != 0:
+            logger.error(
+                "OrcaSlicer failed (code %d)\nstdout: %s\nstderr: %s",
+                proc.returncode, stdout_text, stderr_text,
+            )
             raise SlicingError(
                 f"OrcaSlicer exited with code {proc.returncode}",
                 orca_output=orca_output,
             )
 
+        logger.info("OrcaSlicer finished successfully")
+        logger.debug("OrcaSlicer output: %s", orca_output)
+
         # Read result
         result_path = os.path.join(tmpdir, "result.3mf")
         if not os.path.isfile(result_path):
+            logger.error("Output file not found at %s", result_path)
             raise SlicingError(
                 "OrcaSlicer did not produce output file",
                 orca_output=orca_output,
             )
 
+        result_size = os.path.getsize(result_path)
+        logger.info("Sliced output: %s (%d bytes)", result_path, result_size)
         with open(result_path, "rb") as f:
             return f.read()

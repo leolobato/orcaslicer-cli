@@ -9,3 +9,4 @@ services:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
       - PROFILES_DIR=/opt/orcaslicer/profiles
       - USER_PROFILES_DIR=/data
+      - LOG_LEVEL=DEBUG
