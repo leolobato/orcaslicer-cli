@@ -5,4 +5,4 @@ services:
       - "8000:8000"
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
-      - PROFILES_DIR=/opt/orcaslicer/profiles/BBL
+      - PROFILES_DIR=/opt/orcaslicer/profiles

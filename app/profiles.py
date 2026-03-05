@@ -1,10 +1,13 @@
-"""Load and resolve BBL profiles from OrcaSlicer resources at runtime."""
+"""Load and resolve vendor profiles from OrcaSlicer resources at runtime."""
 
 import json
+import logging
 import os
 from typing import Any
 
 from .config import PROFILES_DIR
+
+logger = logging.getLogger(__name__)
 
 # Keys stripped from resolved profiles (inheritance metadata).
 # NOTE: "from" must NOT be stripped — OrcaSlicer CLI requires it.
@@ -24,65 +27,96 @@ class ProfileNotFoundError(Exception):
     pass
 
 
-def load_all_profiles() -> None:
-    """Read all BBL profile JSONs into memory at startup."""
-    _raw_profiles.clear()
-    _type_map.clear()
-    _resolved_cache.clear()
-    _setting_id_index.clear()
+def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
+    dict[str, dict[str, Any]], dict[str, str]
+]:
+    """Load all profiles for a single vendor directory.
 
-    bbl_dir = PROFILES_DIR
-    index_path = os.path.join(os.path.dirname(bbl_dir), "BBL.json")
-
-    with open(index_path) as f:
-        index = json.load(f)
+    Returns (profiles, type_map).
+    """
+    profiles: dict[str, dict[str, Any]] = {}
+    type_map: dict[str, str] = {}
 
     # Machine profiles — read every JSON in machine/
-    machine_dir = os.path.join(bbl_dir, "machine")
-    for fname in os.listdir(machine_dir):
-        if not fname.endswith(".json"):
-            continue
-        with open(os.path.join(machine_dir, fname)) as f:
-            data = json.load(f)
-        name = data.get("name", fname[:-5])
-        _raw_profiles[name] = data
-        _type_map[name] = "machine"
-        if "setting_id" in data:
-            _setting_id_index[data["setting_id"]] = name
+    machine_dir = os.path.join(vendor_dir, "machine")
+    if os.path.isdir(machine_dir):
+        for fname in sorted(os.listdir(machine_dir)):
+            if not fname.endswith(".json"):
+                continue
+            with open(os.path.join(machine_dir, fname)) as f:
+                data = json.load(f)
+            name = data.get("name", fname[:-5])
+            profiles[name] = data
+            type_map[name] = "machine"
 
     # Process profiles — from index
     for entry in index.get("process_list", []):
         sub_path = entry.get("sub_path", "")
         if not sub_path:
             continue
-        path = os.path.join(bbl_dir, sub_path)
+        path = os.path.join(vendor_dir, sub_path)
         if not os.path.isfile(path):
             continue
         with open(path) as f:
             data = json.load(f)
-        name = data.get("name", entry["name"])
-        _raw_profiles[name] = data
-        _type_map[name] = "process"
-        if "setting_id" in data:
-            _setting_id_index[data["setting_id"]] = name
+        name = data.get("name", entry.get("name", ""))
+        if name:
+            profiles[name] = data
+            type_map[name] = "process"
 
     # Filament profiles — from index
     for entry in index.get("filament_list", []):
         sub_path = entry.get("sub_path", "")
         if not sub_path:
             continue
-        path = os.path.join(bbl_dir, sub_path)
+        path = os.path.join(vendor_dir, sub_path)
         if not os.path.isfile(path):
             continue
         with open(path) as f:
             data = json.load(f)
-        name = data.get("name", entry["name"])
-        _raw_profiles[name] = data
-        _type_map[name] = "filament"
+        name = data.get("name", entry.get("name", ""))
+        if name:
+            profiles[name] = data
+            type_map[name] = "filament"
+
+    return profiles, type_map
+
+
+def load_all_profiles() -> None:
+    """Read all vendor profile JSONs into memory at startup."""
+    _raw_profiles.clear()
+    _type_map.clear()
+    _resolved_cache.clear()
+    _setting_id_index.clear()
+
+    vendor_dirs: list[str] = []
+
+    # Discover all vendor index files in PROFILES_DIR
+    for fname in sorted(os.listdir(PROFILES_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        vendor_name = fname[:-5]  # e.g. "BBL", "Creality"
+        vendor_dir = os.path.join(PROFILES_DIR, vendor_name)
+        index_path = os.path.join(PROFILES_DIR, fname)
+
+        if not os.path.isdir(vendor_dir):
+            continue
+
+        with open(index_path) as f:
+            index = json.load(f)
+
+        v_profiles, v_type_map = _load_vendor_profiles(vendor_dir, index)
+        _raw_profiles.update(v_profiles)
+        _type_map.update(v_type_map)
+        vendor_dirs.append(vendor_dir)
+
+    # Build setting_id index
+    for name, data in _raw_profiles.items():
         if "setting_id" in data:
             _setting_id_index[data["setting_id"]] = name
 
     # Follow inherits chains to discover unlisted base profiles
+    # Search across ALL vendor dirs for parent profiles
     pending = list(_raw_profiles.keys())
     while pending:
         next_batch = []
@@ -93,18 +127,30 @@ def load_all_profiles() -> None:
             ptype = _type_map.get(name, "")
             if not ptype:
                 continue
-            path = os.path.join(bbl_dir, ptype, f"{parent_name}.json")
-            if not os.path.isfile(path):
-                continue
-            with open(path) as f:
-                data = json.load(f)
-            actual_name = data.get("name", parent_name)
-            _raw_profiles[actual_name] = data
-            _type_map[actual_name] = ptype
-            if "setting_id" in data:
-                _setting_id_index[data["setting_id"]] = actual_name
-            next_batch.append(actual_name)
+            for vdir in vendor_dirs:
+                path = os.path.join(vdir, ptype, f"{parent_name}.json")
+                if os.path.isfile(path):
+                    with open(path) as f:
+                        data = json.load(f)
+                    actual_name = data.get("name", parent_name)
+                    _raw_profiles[actual_name] = data
+                    _type_map[actual_name] = ptype
+                    if "setting_id" in data:
+                        _setting_id_index[data["setting_id"]] = actual_name
+                    next_batch.append(actual_name)
+                    break
         pending = next_batch
+
+    counts: dict[str, int] = {}
+    for cat in _type_map.values():
+        counts[cat] = counts.get(cat, 0) + 1
+    logger.info(
+        "Loaded %d machine, %d process, %d filament profiles from %d vendors",
+        counts.get("machine", 0),
+        counts.get("process", 0),
+        counts.get("filament", 0),
+        len(vendor_dirs),
+    )
 
 
 def resolve_profile_by_name(name: str) -> dict[str, Any] | None:

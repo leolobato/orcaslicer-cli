@@ -86,9 +86,8 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 # Copy OrcaSlicer binary and libraries
 COPY --from=builder /build/OrcaSlicer/build/package/ /opt/orcaslicer/
 
-# Copy BBL profiles
-COPY --from=builder /build/OrcaSlicer/resources/profiles/BBL.json /opt/orcaslicer/profiles/BBL.json
-COPY --from=builder /build/OrcaSlicer/resources/profiles/BBL/ /opt/orcaslicer/profiles/BBL/
+# Copy all vendor profiles
+COPY --from=builder /build/OrcaSlicer/resources/profiles/ /opt/orcaslicer/profiles/
 
 # Make binary executable and add to PATH
 RUN chmod +x /opt/orcaslicer/bin/orca-slicer
