@@ -1,0 +1,8 @@
+services:
+  orcaslicer-cli:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
+      - PROFILES_DIR=/opt/orcaslicer/profiles/BBL
