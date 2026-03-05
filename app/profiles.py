@@ -19,8 +19,10 @@ _raw_profiles: dict[str, dict[str, Any]] = {}
 _type_map: dict[str, str] = {}
 # Memoized resolved profiles
 _resolved_cache: dict[str, dict[str, Any]] = {}
-# Index: {setting_id: name}
+# Index: {vendor_slug (e.g. "BBL.GM014"): name}
 _setting_id_index: dict[str, str] = {}
+# Vendor map: {profile_name: vendor_name}
+_vendor_map: dict[str, str] = {}
 
 
 class ProfileNotFoundError(Exception):
@@ -66,12 +68,13 @@ def _load_user_profiles() -> int:
         category = _detect_profile_type(data)
         _raw_profiles[name] = data
         _type_map[name] = category
+        _vendor_map[name] = "user"
 
         # Use setting_id if present, otherwise use name as identifier
-        sid = data.get("setting_id", name)
-        _setting_id_index[sid] = name
         if "setting_id" not in data:
             data["setting_id"] = name
+        slug = _vendor_slug("user", data["setting_id"])
+        _setting_id_index[slug] = name
 
         count += 1
         logger.info("Loaded user %s profile: %s", category, name)
@@ -134,14 +137,20 @@ def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
     return profiles, type_map
 
 
+def _vendor_slug(vendor_name: str, setting_id: str) -> str:
+    """Build a vendor-prefixed slug like 'BBL.GM014'."""
+    return f"{vendor_name}.{setting_id}"
+
+
 def load_all_profiles() -> None:
     """Read all vendor profile JSONs into memory at startup."""
     _raw_profiles.clear()
     _type_map.clear()
     _resolved_cache.clear()
     _setting_id_index.clear()
+    _vendor_map.clear()
 
-    vendor_dirs: list[str] = []
+    vendor_dirs: list[tuple[str, str]] = []  # (vendor_name, vendor_dir)
 
     # Discover all vendor index files in PROFILES_DIR
     for fname in sorted(os.listdir(PROFILES_DIR)):
@@ -160,12 +169,16 @@ def load_all_profiles() -> None:
         v_profiles, v_type_map = _load_vendor_profiles(vendor_dir, index)
         _raw_profiles.update(v_profiles)
         _type_map.update(v_type_map)
-        vendor_dirs.append(vendor_dir)
+        for name in v_profiles:
+            _vendor_map[name] = vendor_name
+        vendor_dirs.append((vendor_name, vendor_dir))
 
-    # Build setting_id index
+    # Build setting_id index with vendor-prefixed slugs
     for name, data in _raw_profiles.items():
         if "setting_id" in data:
-            _setting_id_index[data["setting_id"]] = name
+            vendor = _vendor_map.get(name, "unknown")
+            slug = _vendor_slug(vendor, data["setting_id"])
+            _setting_id_index[slug] = name
 
     # Follow inherits chains to discover unlisted base profiles
     # Search across ALL vendor dirs for parent profiles
@@ -179,7 +192,7 @@ def load_all_profiles() -> None:
             ptype = _type_map.get(name, "")
             if not ptype:
                 continue
-            for vdir in vendor_dirs:
+            for vendor_name, vdir in vendor_dirs:
                 path = os.path.join(vdir, ptype, f"{parent_name}.json")
                 if os.path.isfile(path):
                     with open(path) as f:
@@ -187,8 +200,10 @@ def load_all_profiles() -> None:
                     actual_name = data.get("name", parent_name)
                     _raw_profiles[actual_name] = data
                     _type_map[actual_name] = ptype
+                    _vendor_map[actual_name] = vendor_name
                     if "setting_id" in data:
-                        _setting_id_index[data["setting_id"]] = actual_name
+                        slug = _vendor_slug(vendor_name, data["setting_id"])
+                        _setting_id_index[slug] = actual_name
                     next_batch.append(actual_name)
                     break
         pending = next_batch
@@ -239,39 +254,47 @@ def _clean_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in profile.items() if k not in STRIP_KEYS}
 
 
-def _name_for_setting_id(setting_id: str) -> str | None:
-    """Look up a profile name by its setting_id."""
-    return _setting_id_index.get(setting_id)
+def _slug_for_profile(name: str) -> str:
+    """Return the vendor-prefixed slug for a profile name."""
+    data = _raw_profiles.get(name, {})
+    vendor = _vendor_map.get(name, "unknown")
+    sid = data.get("setting_id", "")
+    return _vendor_slug(vendor, sid)
 
 
-def _machine_names_for_setting_id(machine_setting_id: str) -> set[str]:
-    """Return all machine profile names matching a machine setting_id.
+def _name_for_slug(slug: str) -> str | None:
+    """Look up a profile name by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
+    return _setting_id_index.get(slug)
 
-    A single setting_id (e.g. GM030) maps to one machine name like
+
+def _machine_names_for_slug(machine_slug: str) -> set[str]:
+    """Return all machine profile names matching a machine slug.
+
+    A single slug (e.g. BBL.GM030) maps to one machine name like
     "Bambu Lab A1 0.4 nozzle". But for filtering compatible_printers we
     return all machine names that share the same printer_model+nozzle combo.
     """
-    name = _name_for_setting_id(machine_setting_id)
+    name = _name_for_slug(machine_slug)
     if not name:
         return set()
     return {name}
 
 
-def get_profile(category: str, setting_id: str) -> dict[str, Any]:
-    """Return a fully-resolved profile by its setting_id."""
-    name = _name_for_setting_id(setting_id)
+def get_profile(category: str, slug: str) -> dict[str, Any]:
+    """Return a fully-resolved profile by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
+    name = _name_for_slug(slug)
     if not name:
         raise ProfileNotFoundError(
-            f"{category} profile with setting_id '{setting_id}' not found"
+            f"{category} profile with id '{slug}' not found"
         )
     if _type_map.get(name) != category:
         raise ProfileNotFoundError(
-            f"'{setting_id}' is not a {category} profile"
+            f"'{slug}' is not a {category} profile"
         )
     resolved = resolve_profile_by_name(name)
     if resolved is None:
         raise ProfileNotFoundError(
-            f"Failed to resolve {category} profile '{setting_id}'"
+            f"Failed to resolve {category} profile '{slug}'"
         )
     return _clean_profile(resolved)
 
@@ -291,7 +314,7 @@ def get_machine_profiles() -> list[dict[str, Any]]:
         if isinstance(nozzle, list):
             nozzle = nozzle[0] if nozzle else "0.4"
         results.append({
-            "setting_id": resolved.get("setting_id", ""),
+            "setting_id": _slug_for_profile(name),
             "name": resolved.get("name", name),
             "nozzle_diameter": nozzle,
             "printer_model": resolved.get("printer_model", ""),
@@ -306,10 +329,10 @@ def get_process_profiles(
     """Return resolved leaf process profiles, optionally filtered by machine."""
     machine_names: set[str] | None = None
     if machine_id:
-        machine_names = _machine_names_for_setting_id(machine_id)
+        machine_names = _machine_names_for_slug(machine_id)
         if not machine_names:
             raise ProfileNotFoundError(
-                f"Machine with setting_id '{machine_id}' not found"
+                f"Machine with id '{machine_id}' not found"
             )
 
     results = []
@@ -327,21 +350,20 @@ def get_process_profiles(
             if not any(m in compat for m in machine_names):
                 continue
 
-        # Map compatible_printers names to setting_ids
-        compat_ids = []
+        # Map compatible_printers names to vendor-prefixed slugs
+        compat_slugs = []
         for cp_name in resolved.get("compatible_printers", []):
-            cp_raw = _raw_profiles.get(cp_name)
-            if cp_raw and "setting_id" in cp_raw:
-                compat_ids.append(cp_raw["setting_id"])
+            if cp_name in _raw_profiles:
+                compat_slugs.append(_slug_for_profile(cp_name))
 
         layer_height = resolved.get("layer_height", "")
         if isinstance(layer_height, list):
             layer_height = layer_height[0] if layer_height else ""
 
         results.append({
-            "setting_id": resolved.get("setting_id", ""),
+            "setting_id": _slug_for_profile(name),
             "name": resolved.get("name", name),
-            "compatible_printers": compat_ids,
+            "compatible_printers": compat_slugs,
             "layer_height": layer_height,
         })
     results.sort(key=lambda x: x["name"])
@@ -354,10 +376,10 @@ def get_filament_profiles(
     """Return resolved leaf filament profiles, optionally filtered by machine."""
     machine_names: set[str] | None = None
     if machine_id:
-        machine_names = _machine_names_for_setting_id(machine_id)
+        machine_names = _machine_names_for_slug(machine_id)
         if not machine_names:
             raise ProfileNotFoundError(
-                f"Machine with setting_id '{machine_id}' not found"
+                f"Machine with id '{machine_id}' not found"
             )
 
     results = []
@@ -375,21 +397,20 @@ def get_filament_profiles(
             if not any(m in compat for m in machine_names):
                 continue
 
-        # Map compatible_printers names to setting_ids
-        compat_ids = []
+        # Map compatible_printers names to vendor-prefixed slugs
+        compat_slugs = []
         for cp_name in resolved.get("compatible_printers", []):
-            cp_raw = _raw_profiles.get(cp_name)
-            if cp_raw and "setting_id" in cp_raw:
-                compat_ids.append(cp_raw["setting_id"])
+            if cp_name in _raw_profiles:
+                compat_slugs.append(_slug_for_profile(cp_name))
 
         filament_type = resolved.get("filament_type", [""])[0] if isinstance(
             resolved.get("filament_type"), list
         ) else resolved.get("filament_type", "")
 
         results.append({
-            "setting_id": resolved.get("setting_id", ""),
+            "setting_id": _slug_for_profile(name),
             "name": resolved.get("name", name),
-            "compatible_printers": compat_ids,
+            "compatible_printers": compat_slugs,
             "filament_type": filament_type,
         })
     results.sort(key=lambda x: x["name"])

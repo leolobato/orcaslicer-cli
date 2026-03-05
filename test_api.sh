@@ -36,22 +36,22 @@ echo "=== Machine Profiles ==="
 MACHINES=$(curl -sf "$BASE_URL/profiles/machines")
 COUNT=$(echo "$MACHINES" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
 check "returns machines (got $COUNT)" "$([ "$COUNT" -gt 0 ] && echo true || echo false)"
-check "A1 0.4 nozzle present (GM030)" "$(echo "$MACHINES" | python3 -c 'import sys,json; ms=json.load(sys.stdin); print("true" if any(m["setting_id"]=="GM030" for m in ms) else "false")')"
-check "P1S 0.4 nozzle present (GM014)" "$(echo "$MACHINES" | python3 -c 'import sys,json; ms=json.load(sys.stdin); print("true" if any(m["setting_id"]=="GM014" for m in ms) else "false")')"
+check "A1 0.4 nozzle present (BBL.GM030)" "$(echo "$MACHINES" | python3 -c 'import sys,json; ms=json.load(sys.stdin); print("true" if any(m["setting_id"]=="BBL.GM030" for m in ms) else "false")')"
+check "P1S 0.4 nozzle present (BBL.GM014)" "$(echo "$MACHINES" | python3 -c 'import sys,json; ms=json.load(sys.stdin); print("true" if any(m["setting_id"]=="BBL.GM014" for m in ms) else "false")')"
 
 echo ""
-echo "=== Process Profiles (filtered by P1S 0.4 = GM014) ==="
-PROCS=$(curl -sf "$BASE_URL/profiles/processes?machine=GM014")
+echo "=== Process Profiles (filtered by P1S 0.4 = BBL.GM014) ==="
+PROCS=$(curl -sf "$BASE_URL/profiles/processes?machine=BBL.GM014")
 PCOUNT=$(echo "$PROCS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
 check "returns processes for P1S ($PCOUNT)" "$([ "$PCOUNT" -gt 0 ] && echo true || echo false)"
-check "0.20mm Standard present (GP004)" "$(echo "$PROCS" | python3 -c 'import sys,json; ps=json.load(sys.stdin); print("true" if any(p["setting_id"]=="GP004" for p in ps) else "false")')"
+check "0.20mm Standard present (BBL.GP004)" "$(echo "$PROCS" | python3 -c 'import sys,json; ps=json.load(sys.stdin); print("true" if any(p["setting_id"]=="BBL.GP004" for p in ps) else "false")')"
 
 echo ""
-echo "=== Filament Profiles (filtered by A1 mini 0.4 = GM020) ==="
-FILS=$(curl -sf "$BASE_URL/profiles/filaments?machine=GM020")
+echo "=== Filament Profiles (filtered by A1 mini 0.4 = BBL.GM020) ==="
+FILS=$(curl -sf "$BASE_URL/profiles/filaments?machine=BBL.GM020")
 FCOUNT=$(echo "$FILS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
 check "returns filaments for A1M ($FCOUNT)" "$([ "$FCOUNT" -gt 0 ] && echo true || echo false)"
-check "Generic PLA present (GFSL99_02)" "$(echo "$FILS" | python3 -c 'import sys,json; fs=json.load(sys.stdin); print("true" if any(f["setting_id"]=="GFSL99_02" for f in fs) else "false")')"
+check "Generic PLA present (BBL.GFSL99_02)" "$(echo "$FILS" | python3 -c 'import sys,json; fs=json.load(sys.stdin); print("true" if any(f["setting_id"]=="BBL.GFSL99_02" for f in fs) else "false")')"
 
 echo ""
 echo "=== Error Handling ==="
@@ -64,9 +64,9 @@ if [ -f "$EXAMPLES_DIR/example3.3mf" ]; then
     SLICE_OUT="test_output_example3.3mf"
     HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
         -F "file=@$EXAMPLES_DIR/example3.3mf" \
-        -F "machine_profile=GM020" \
-        -F "process_profile=GP000" \
-        -F 'filament_profiles=["GFSL99_02"]' \
+        -F "machine_profile=BBL.GM020" \
+        -F "process_profile=BBL.GP000" \
+        -F 'filament_profiles=["BBL.GFSL99_02"]' \
         "$BASE_URL/slice")
     check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
     if [ "$HTTP_CODE" = "200" ]; then
@@ -94,9 +94,9 @@ if [ -f "$EXAMPLES_DIR/example.3mf" ]; then
     SLICE_OUT="test_output_example.3mf"
     HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
         -F "file=@$EXAMPLES_DIR/example.3mf" \
-        -F "machine_profile=GM014" \
-        -F "process_profile=GP004" \
-        -F 'filament_profiles=["GFSA00"]' \
+        -F "machine_profile=BBL.GM014" \
+        -F "process_profile=BBL.GP004" \
+        -F 'filament_profiles=["BBL.GFSA00"]' \
         "$BASE_URL/slice")
     check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
     if [ "$HTTP_CODE" = "200" ]; then
@@ -124,9 +124,9 @@ if [ -f "$EXAMPLES_DIR/example2.3mf" ]; then
     SLICE_OUT="test_output_example2.3mf"
     HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
         -F "file=@$EXAMPLES_DIR/example2.3mf" \
-        -F "machine_profile=GM014" \
-        -F "process_profile=GP006" \
-        -F 'filament_profiles=["GFSA00","GFSA00","GFSA00","GFSA00"]' \
+        -F "machine_profile=BBL.GM014" \
+        -F "process_profile=BBL.GP006" \
+        -F 'filament_profiles=["BBL.GFSA00","BBL.GFSA00","BBL.GFSA00","BBL.GFSA00"]' \
         "$BASE_URL/slice")
     check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
     if [ "$HTTP_CODE" = "200" ]; then
