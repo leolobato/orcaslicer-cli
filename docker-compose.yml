@@ -3,6 +3,9 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      - ./data:/data
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
       - PROFILES_DIR=/opt/orcaslicer/profiles
+      - USER_PROFILES_DIR=/data

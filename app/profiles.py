@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any
 
-from .config import PROFILES_DIR
+from .config import PROFILES_DIR, USER_PROFILES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,58 @@ _setting_id_index: dict[str, str] = {}
 
 class ProfileNotFoundError(Exception):
     pass
+
+
+def _detect_profile_type(data: dict[str, Any]) -> str:
+    """Detect whether a profile is machine, process, or filament."""
+    if "filament_type" in data or "filament_id" in data:
+        return "filament"
+    if "printer_model" in data or "machine_start_gcode" in data:
+        return "machine"
+    return "process"
+
+
+def _load_user_profiles() -> int:
+    """Load user-provided profile JSONs from USER_PROFILES_DIR.
+
+    Returns the number of profiles loaded.
+    """
+    if not os.path.isdir(USER_PROFILES_DIR):
+        return 0
+
+    count = 0
+    for fname in sorted(os.listdir(USER_PROFILES_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(USER_PROFILES_DIR, fname)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Skipping invalid user profile %s: %s", fname, e)
+            continue
+
+        name = data.get("name")
+        if not name:
+            logger.warning("Skipping user profile %s: missing 'name' field", fname)
+            continue
+
+        category = _detect_profile_type(data)
+        _raw_profiles[name] = data
+        _type_map[name] = category
+
+        # Use setting_id if present, otherwise use name as identifier
+        sid = data.get("setting_id", name)
+        _setting_id_index[sid] = name
+        if "setting_id" not in data:
+            data["setting_id"] = name
+
+        count += 1
+        logger.info("Loaded user %s profile: %s", category, name)
+
+    return count
 
 
 def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
@@ -141,15 +193,20 @@ def load_all_profiles() -> None:
                     break
         pending = next_batch
 
+    # Load user-provided profiles from USER_PROFILES_DIR
+    user_count = _load_user_profiles()
+
     counts: dict[str, int] = {}
     for cat in _type_map.values():
         counts[cat] = counts.get(cat, 0) + 1
     logger.info(
-        "Loaded %d machine, %d process, %d filament profiles from %d vendors",
+        "Loaded %d machine, %d process, %d filament profiles from %d vendors"
+        " (%d user profiles)",
         counts.get("machine", 0),
         counts.get("process", 0),
         counts.get("filament", 0),
         len(vendor_dirs),
+        user_count,
     )
 
 
