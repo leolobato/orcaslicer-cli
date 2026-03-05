@@ -1,60 +1,30 @@
-# Stage 1: Build OrcaSlicer from source
-FROM ubuntu:24.04 AS builder
+# Stage 1: Extract pre-built OrcaSlicer from AppImage
+FROM --platform=linux/amd64 ubuntu:24.04 AS builder
 
-RUN apt-get update && \
-    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
-
-RUN apt-get update && apt-get install -y \
-    autoconf \
-    build-essential \
-    cmake \
-    curl \
-    eglexternalplatform-dev \
-    extra-cmake-modules \
-    file \
-    git \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-libav \
-    libcairo2-dev \
-    libcurl4-openssl-dev \
-    libdbus-1-dev \
-    libglew-dev \
-    libglu1-mesa-dev \
-    libgstreamer1.0-dev \
-    libgstreamerd-3-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-good1.0-dev \
-    libgtk-3-dev \
-    libsecret-1-dev \
-    libsoup2.4-dev \
-    libssl3 \
-    libssl-dev \
-    libtool \
-    libudev-dev \
-    libwayland-dev \
-    libwebkit2gtk-4.1-dev \
-    libxkbcommon-dev \
-    locales \
-    locales-all \
-    m4 \
-    pkgconf \
-    sudo \
-    wayland-protocols \
-    wget
-
-ENV LC_ALL=en_US.utf8
-RUN locale-gen $LC_ALL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget squashfs-tools && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 --branch v2.3.1 https://github.com/SoftFever/OrcaSlicer.git
 
-WORKDIR /build/OrcaSlicer
-RUN ./build_linux.sh -u
-RUN ./build_linux.sh -dr
-RUN ./build_linux.sh -sr
+# Download AppImage
+RUN wget --max-redirect=10 -q "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.3.1/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.3.1.AppImage" \
+    -O orcaslicer.AppImage
+
+# Extract squashfs from AppImage by computing ELF end offset
+# (can't run --appimage-extract under QEMU emulation on arm64 host)
+RUN ELF_END=$( \
+      SHOFF=$(od -A n -t u8 -j 40 -N 8 orcaslicer.AppImage | tr -d ' ') && \
+      SHENTSIZE=$(od -A n -t u2 -j 58 -N 2 orcaslicer.AppImage | tr -d ' ') && \
+      SHNUM=$(od -A n -t u2 -j 60 -N 2 orcaslicer.AppImage | tr -d ' ') && \
+      echo $((SHOFF + SHENTSIZE * SHNUM)) \
+    ) && \
+    tail -c +$((ELF_END + 1)) orcaslicer.AppImage > squashfs.img && \
+    unsquashfs -d squashfs-root squashfs.img && \
+    rm orcaslicer.AppImage squashfs.img
 
 # Stage 2: Runtime
-FROM ubuntu:24.04
+FROM --platform=linux/amd64 ubuntu:24.04
 
 RUN apt-get update && \
     echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections && \
@@ -83,11 +53,9 @@ ENV LC_ALL=en_US.utf8
 RUN locale-gen $LC_ALL
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Copy OrcaSlicer binary and libraries
-COPY --from=builder /build/OrcaSlicer/build/package/ /opt/orcaslicer/
-
-# Copy all vendor profiles
-COPY --from=builder /build/OrcaSlicer/resources/profiles/ /opt/orcaslicer/profiles/
+# Copy OrcaSlicer binary and profiles from extracted AppImage
+COPY --from=builder /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
+COPY --from=builder /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
 
 # Make binary executable and add to PATH
 RUN chmod +x /opt/orcaslicer/bin/orca-slicer
