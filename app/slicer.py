@@ -283,16 +283,28 @@ async def _do_slice(
     filament_profiles: list[dict[str, Any]],
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Read 3MF project settings BEFORE multi-plate extraction (which creates
-        # a fresh 3MF without project_settings.config)
+        # Read project settings and thumbnails BEFORE multi-plate extraction
+        # (which creates a fresh 3MF without these files)
         threemf_settings = {}
+        original_thumbnails: dict[str, bytes] = {}
         try:
             with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
-                raw = zf.read("Metadata/project_settings.config").decode()
-                threemf_settings = json.loads(raw)
-                logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
-        except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
-            logger.debug("No project settings in 3MF: %s", exc)
+                try:
+                    raw = zf.read("Metadata/project_settings.config").decode()
+                    threemf_settings = json.loads(raw)
+                    logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
+                except (KeyError, json.JSONDecodeError):
+                    pass
+                # Extract plate 1 thumbnails for later injection into output
+                for name in zf.namelist():
+                    if name.endswith(".png") and (
+                        "plate_1" in name or "top_1." in name or "pick_1." in name
+                    ):
+                        original_thumbnails[name] = zf.read(name)
+        except (zipfile.BadZipFile,) as exc:
+            logger.debug("Could not read 3MF: %s", exc)
+        if original_thumbnails:
+            logger.debug("Extracted %d thumbnail(s) from original 3MF", len(original_thumbnails))
 
         # For multi-plate 3MFs, extract plate 1 into a fresh simple 3MF.
         # OrcaSlicer CLI crashes on multi-plate files due to geometry processing bugs.
@@ -415,6 +427,17 @@ async def _do_slice(
                 "OrcaSlicer did not produce output file",
                 orca_output=orca_output,
             )
+
+        # Inject original thumbnails if missing from output
+        if original_thumbnails:
+            with zipfile.ZipFile(result_path, "r") as zf:
+                existing = set(zf.namelist())
+            missing = {k: v for k, v in original_thumbnails.items() if k not in existing}
+            if missing:
+                with zipfile.ZipFile(result_path, "a") as zf:
+                    for name, data in missing.items():
+                        zf.writestr(name, data)
+                logger.info("Injected %d thumbnail(s) into output 3MF", len(missing))
 
         result_size = os.path.getsize(result_path)
         logger.info("Sliced output: %s (%d bytes)", result_path, result_size)
