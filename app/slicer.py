@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any
@@ -119,6 +121,96 @@ class SlicingError(Exception):
     def __init__(self, message: str, orca_output: str | None = None):
         super().__init__(message)
         self.orca_output = orca_output
+
+
+def _extract_plate_object_ids(model_settings_xml: str, plate_id: int = 1) -> set[str] | None:
+    """Parse model_settings.config XML and return object_ids assigned to the given plate.
+
+    Returns None if the plate is not found or has no objects.
+    """
+    try:
+        root = ET.fromstring(model_settings_xml)
+    except ET.ParseError:
+        return None
+
+    for plate in root.findall("plate"):
+        pid = None
+        for meta in plate.findall("metadata"):
+            if meta.get("key") == "plater_id":
+                pid = meta.get("value")
+                break
+        if pid == str(plate_id):
+            obj_ids = set()
+            for inst in plate.findall("model_instance"):
+                for meta in inst.findall("metadata"):
+                    if meta.get("key") == "object_id":
+                        obj_ids.add(meta.get("value"))
+            return obj_ids if obj_ids else None
+    return None
+
+
+def _strip_to_single_plate(filepath: str, tmpdir: str, plate_id: int = 1) -> str:
+    """Rewrite a multi-plate 3MF to contain only the items from the target plate.
+
+    This prevents OrcaSlicer from inferring a larger bed size from off-plate items.
+    Returns the original filepath if the 3MF has only one plate or can't be parsed.
+    """
+    model_settings_file = "Metadata/model_settings.config"
+    model_file = None
+
+    with zipfile.ZipFile(filepath, "r") as zf:
+        names = zf.namelist()
+        if model_settings_file not in names:
+            return filepath
+
+        for name in names:
+            if name.lower().endswith(".model") and name.startswith("3D/") and "/Objects/" not in name:
+                model_file = name
+                break
+        if model_file is None:
+            return filepath
+
+        model_settings_raw = zf.read(model_settings_file).decode()
+        plate_obj_ids = _extract_plate_object_ids(model_settings_raw, plate_id)
+        if plate_obj_ids is None:
+            return filepath
+
+        model_raw = zf.read(model_file).decode()
+
+        # Check if there are items outside the target plate
+        # Match <item objectid="N" .../>  in the <build> section
+        item_pattern = re.compile(r'<item\s[^>]*objectid="(\d+)"[^>]*/>', re.DOTALL)
+        all_item_ids = set(item_pattern.findall(model_raw))
+
+        if all_item_ids == plate_obj_ids or all_item_ids.issubset(plate_obj_ids):
+            # Single plate or all items already on target plate
+            return filepath
+
+        logger.info(
+            "Stripping 3MF to plate %d: keeping %d of %d build items (objects: %s)",
+            plate_id, len(plate_obj_ids), len(all_item_ids), sorted(plate_obj_ids),
+        )
+
+        # Remove <item> elements not on the target plate
+        def replace_build_items(match: re.Match) -> str:
+            obj_id = match.group(1)
+            if obj_id in plate_obj_ids:
+                return match.group(0)
+            return ""
+
+        new_model = item_pattern.sub(replace_build_items, model_raw)
+        # Clean up blank lines left by removed items
+        new_model = re.sub(r'\n\s*\n', '\n', new_model)
+
+        stripped = os.path.join(tmpdir, "single_plate.3mf")
+        with zipfile.ZipFile(stripped, "w") as zf_out:
+            with zipfile.ZipFile(filepath, "r") as zf_in:
+                for item in zf_in.infolist():
+                    if item.filename == model_file:
+                        zf_out.writestr(item, new_model)
+                    else:
+                        zf_out.writestr(item, zf_in.read(item.filename))
+        return stripped
 
 
 def _sanitize_3mf(filepath: str, tmpdir: str, machine_profile: dict[str, Any]) -> str:
@@ -322,10 +414,13 @@ async def _do_slice(
         process_profile = transfer_result[0]
         settings_transfer = transfer_result[1]
 
+        # Strip multi-plate layout to avoid bed size inference from off-plate items
+        current_filepath = _strip_to_single_plate(input_path, tmpdir)
+
         # Sanitize 3MF (also strips machine keys from the file for OrcaSlicer CLI)
-        slice_filepath = _sanitize_3mf(input_path, tmpdir, machine_profile)
+        slice_filepath = _sanitize_3mf(current_filepath, tmpdir, machine_profile)
         if slice_filepath != input_path:
-            logger.debug("3MF was sanitized (clamped invalid parameter values)")
+            logger.debug("3MF was sanitized")
 
         # Write profile temp files
         machine_path = os.path.join(tmpdir, "machine.json")
