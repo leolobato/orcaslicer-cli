@@ -20,7 +20,7 @@ from .models import (
     SliceError,
 )
 from .profiles import ProfileNotFoundError, get_filament_profiles, get_machine_profiles, get_process_profiles, load_all_profiles
-from .slicer import SlicingError, slice_3mf
+from .slicer import ModelTooBigError, SlicingError, slice_3mf
 
 
 @asynccontextmanager
@@ -41,6 +41,11 @@ app = FastAPI(
 
 @app.exception_handler(ProfileNotFoundError)
 async def profile_not_found_handler(request, exc: ProfileNotFoundError):
+    return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.exception_handler(ModelTooBigError)
+async def model_too_big_handler(request, exc: ModelTooBigError):
     return JSONResponse(status_code=400, content={"error": str(exc)})
 
 

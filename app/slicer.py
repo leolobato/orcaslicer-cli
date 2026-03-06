@@ -11,6 +11,7 @@ from typing import Any
 
 from .config import ORCA_BINARY
 from .profiles import ProfileNotFoundError, get_profile
+from .threemf import validate_model_fits
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ _CLAMP_RULES = {
     "sparse_infill_filament": 1,
     "wall_filament": 1,
 }
+
+
+class ModelTooBigError(Exception):
+    pass
 
 
 class SlicingError(Exception):
@@ -117,6 +122,11 @@ async def slice_3mf(
         machine_profile.get("name"), process_profile.get("name"),
         [fp.get("name") for fp in filament_profiles],
     )
+
+    # Validate model fits the build volume
+    fit_error = validate_model_fits(file_bytes, machine_profile)
+    if fit_error:
+        raise ModelTooBigError(fit_error)
 
     # G92 E0 workaround
     lcg = machine_profile.get("layer_change_gcode", "")
