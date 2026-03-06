@@ -264,7 +264,12 @@ async def slice_3mf(
         [fp.get("name") for fp in filament_profiles],
     )
 
-    # G92 E0 workaround
+    # OrcaSlicer enforces that G92 E0 exists in layer_change_gcode for printers
+    # using relative extrusion (all Bambu Lab printers). Without it, the CLI
+    # refuses to slice. The bundled profiles have it in the GUI, but when loaded
+    # via --load-settings the resolved JSON may not include it due to inheritance
+    # chain issues. Safe to inject unconditionally — it only resets the extruder
+    # position to prevent float precision drift on long prints.
     lcg = machine_profile.get("layer_change_gcode", "")
     if "G92 E0" not in lcg:
         logger.debug("Injecting G92 E0 into layer_change_gcode")
