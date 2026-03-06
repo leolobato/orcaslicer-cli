@@ -126,9 +126,15 @@ async def slice_file(
     if not file_bytes:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
 
-    result = await slice_3mf(file_bytes, machine_profile, process_profile, filament_ids)
+    result, settings_transfer = await slice_3mf(file_bytes, machine_profile, process_profile, filament_ids)
+    headers = {
+        "Content-Disposition": "attachment; filename=sliced.3mf",
+        "X-Settings-Transfer-Status": settings_transfer.status,
+    }
+    if settings_transfer.status == "applied" and settings_transfer.transferred:
+        headers["X-Settings-Transferred"] = json.dumps(settings_transfer.transferred)
     return Response(
         content=result,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": "attachment; filename=sliced.3mf"},
+        headers=headers,
     )

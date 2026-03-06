@@ -32,7 +32,7 @@ Requires example `.3mf` files in `../bambu-poc/` (not included in this repo). Th
 
 **`app/profiles.py`** — Profile loading and inheritance resolution. At startup (`lifespan`), reads all vendor JSON profiles from disk into memory (`_raw_profiles`). Profiles have an `inherits` chain that gets recursively resolved and memoized. Profiles are identified by their `setting_id` (e.g., `GM014` for P1S 0.4 nozzle). Only profiles with `instantiation: "true"` are exposed as leaf/selectable profiles. The `compatible_printers` field is mapped from profile names to setting_ids in API responses.
 
-**`app/slicer.py`** — Slicing orchestration. Resolves profiles, writes them as temp JSON files, sanitizes the input 3MF (clamps invalid parameter values), overlays 3MF project settings onto the process profile, then shells out to `orca-slicer` CLI. Serialized to one concurrent slice via `asyncio.Semaphore(1)`.
+**`app/slicer.py`** — Slicing orchestration. Resolves profiles, writes them as temp JSON files, sanitizes the input 3MF (clamps invalid parameter values), performs smart settings transfer from the 3MF onto the process profile, then shells out to `orca-slicer` CLI. Serialized to one concurrent slice via `asyncio.Semaphore(1)`.
 
 **`app/config.py`** — `ORCA_BINARY` and `PROFILES_DIR` paths, configurable via env vars.
 
@@ -42,5 +42,5 @@ Requires example `.3mf` files in `../bambu-poc/` (not included in this repo). Th
 
 - The `"from"` key in profiles must NOT be stripped during resolution — OrcaSlicer CLI requires it.
 - The slicer injects `G92 E0` into `layer_change_gcode` if not already present (workaround for extrusion issues).
-- 3MF project settings are overlaid onto the process profile to preserve user choices embedded in the file.
+- 3MF project settings use smart transfer: when a 3MF contains a `print_settings_id`, the slicer resolves the original profile and diffs the 3MF settings against it, then only transfers user customizations onto the target process profile. Falls back to full overlay when the original profile can't be resolved. The `/slice` response includes `X-Settings-Transfer-Status` (`applied`, `no_original_profile`, `no_customizations`, `no_3mf_settings`) and `X-Settings-Transferred` (JSON array of `{key, value, original}` objects when status is `applied`) headers.
 - Profile `setting_id` values (e.g. `GM014`) are the stable identifiers used across the API (not profile names).

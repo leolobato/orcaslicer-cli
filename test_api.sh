@@ -62,7 +62,8 @@ echo ""
 echo "=== Slice: example3.3mf (A1 mini, 0.20mm Standard, Generic PLA) ==="
 if [ -f "$EXAMPLES_DIR/example3.3mf" ]; then
     SLICE_OUT="test_output_example3.3mf"
-    HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
+    SLICE_HEADERS="test_headers_example3.txt"
+    HTTP_CODE=$(curl -s -o "$SLICE_OUT" -D "$SLICE_HEADERS" -w "%{http_code}" \
         -F "file=@$EXAMPLES_DIR/example3.3mf" \
         -F "machine_profile=GM020" \
         -F "process_profile=GP000" \
@@ -82,8 +83,10 @@ except:
     print('false')
 ")
         check "output contains gcode" "$HAS_GCODE"
+        TRANSFER_STATUS=$(grep -i 'x-settings-transfer-status' "$SLICE_HEADERS" | tr -d '\r' | awk '{print $2}')
+        check "has X-Settings-Transfer-Status header ($TRANSFER_STATUS)" "$([ -n "$TRANSFER_STATUS" ] && echo true || echo false)"
     fi
-    rm -f "$SLICE_OUT"
+    rm -f "$SLICE_OUT" "$SLICE_HEADERS"
 else
     red "  SKIP: $EXAMPLES_DIR/example3.3mf not found"
 fi

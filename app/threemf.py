@@ -162,22 +162,29 @@ def get_build_volume(machine_profile: dict[str, Any]) -> tuple[float, float, flo
     return (width, depth, float(height))
 
 
+class FitCheck(NamedTuple):
+    fits: bool
+    needs_arrange: bool
+    error: str | None
+
+
 def validate_model_fits(
     file_bytes: bytes, machine_profile: dict[str, Any],
-) -> str | None:
+) -> FitCheck:
     """Check that the 3MF model fits within the machine's build volume.
 
-    Returns an error message if it doesn't fit, or None if it's fine.
+    Returns a FitCheck indicating whether the model fits, needs rearranging,
+    or is too large entirely.
     """
     volume = get_build_volume(machine_profile)
     if volume is None:
         logger.debug("Cannot determine build volume from machine profile, skipping check")
-        return None
+        return FitCheck(fits=True, needs_arrange=False, error=None)
 
     bbox = get_bounding_box(file_bytes)
     if bbox is None:
         logger.debug("No geometry found in 3MF, skipping check")
-        return None
+        return FitCheck(fits=True, needs_arrange=False, error=None)
 
     bed_w, bed_d, bed_h = volume
     model_w = bbox.size_x
@@ -191,6 +198,8 @@ def validate_model_fits(
 
     # Allow 0.5mm tolerance for floating point
     tolerance = 0.5
+
+    # Check if the model dimensions are too large for the bed
     exceeded = []
     if model_w > bed_w + tolerance:
         exceeded.append(f"width {model_w:.1f}mm > {bed_w:.0f}mm")
@@ -200,8 +209,29 @@ def validate_model_fits(
         exceeded.append(f"height {model_h:.1f}mm > {bed_h:.0f}mm")
 
     if exceeded:
-        return (
-            f"Model does not fit the build volume ({bed_w:.0f}x{bed_d:.0f}x{bed_h:.0f}mm): "
-            + ", ".join(exceeded)
+        return FitCheck(
+            fits=False,
+            needs_arrange=False,
+            error=(
+                f"Model does not fit the build volume ({bed_w:.0f}x{bed_d:.0f}x{bed_h:.0f}mm): "
+                + ", ".join(exceeded)
+            ),
         )
-    return None
+
+    # Model dimensions fit — check if the position is outside the bed
+    position_ok = (
+        bbox.min_x >= -tolerance
+        and bbox.min_y >= -tolerance
+        and bbox.max_x <= bed_w + tolerance
+        and bbox.max_y <= bed_d + tolerance
+    )
+
+    if not position_ok:
+        logger.info(
+            "Model dimensions fit but position is off-plate "
+            "(x: %.1f..%.1f, y: %.1f..%.1f vs bed %.0fx%.0f), needs arrange",
+            bbox.min_x, bbox.max_x, bbox.min_y, bbox.max_y, bed_w, bed_d,
+        )
+        return FitCheck(fits=True, needs_arrange=True, error=None)
+
+    return FitCheck(fits=True, needs_arrange=False, error=None)

@@ -7,10 +7,11 @@ import os
 import shutil
 import tempfile
 import zipfile
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import ORCA_BINARY
-from .profiles import ProfileNotFoundError, get_profile
+from .profiles import ProfileNotFoundError, get_profile, resolve_profile_by_name
 from .threemf import validate_model_fits
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,83 @@ _CLAMP_RULES = {
     "sparse_infill_filament": 1,
     "wall_filament": 1,
 }
+
+
+@dataclass
+class SettingsTransferResult:
+    status: str  # "applied", "no_original_profile", "no_customizations", "no_3mf_settings"
+    transferred: list[dict[str, str]] = field(default_factory=list)
+
+
+def _normalize_for_comparison(value: Any) -> str:
+    """Normalize a value for comparison: float precision, type coercion."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        try:
+            f = float(value)
+            if f == int(f):
+                return str(int(f))
+            return f"{f:.10g}"
+        except (ValueError, OverflowError):
+            return str(value)
+    if isinstance(value, str):
+        try:
+            f = float(value)
+            if f == int(f):
+                return str(int(f))
+            return f"{f:.10g}"
+        except ValueError:
+            return value
+    if isinstance(value, list):
+        return json.dumps([_normalize_for_comparison(v) for v in value], separators=(",", ":"))
+    return str(value)
+
+
+def _diff_3mf_settings(
+    threemf_settings: dict[str, Any], original_profile: dict[str, Any],
+) -> dict[str, tuple[Any, Any]]:
+    """Compare 3MF settings against the resolved original profile.
+
+    Returns dict of {key: (threemf_val, original_val)} for settings that differ.
+    """
+    diffs: dict[str, tuple[Any, Any]] = {}
+    for key, tv in threemf_settings.items():
+        if key in _PROFILE_META_KEYS:
+            continue
+        if key not in original_profile:
+            # Setting exists in 3MF but not in original profile — treat as customization
+            diffs[key] = (tv, None)
+            continue
+        ov = original_profile[key]
+        if _normalize_for_comparison(tv) != _normalize_for_comparison(ov):
+            diffs[key] = (tv, ov)
+    return diffs
+
+
+def _apply_customizations(
+    process_profile: dict[str, Any],
+    threemf_settings: dict[str, Any],
+    customized_keys: set[str],
+) -> dict[str, Any]:
+    """Apply only the customized keys from 3MF settings onto the process profile."""
+    overrides = {}
+    for k in customized_keys:
+        if k not in threemf_settings or k not in process_profile or k in _PROFILE_META_KEYS:
+            continue
+        pv = process_profile[k]
+        tv = threemf_settings[k]
+        if type(pv) == type(tv):
+            overrides[k] = tv
+        elif isinstance(pv, list) and isinstance(tv, str):
+            overrides[k] = [tv] * len(pv) if pv else [tv]
+        elif isinstance(pv, str) and isinstance(tv, list):
+            overrides[k] = tv[0] if tv else pv
+        else:
+            overrides[k] = tv
+    if overrides:
+        return {**process_profile, **overrides}
+    return process_profile
 
 
 class ModelTooBigError(Exception):
@@ -99,13 +177,60 @@ def _overlay_3mf_settings(
     return process_profile
 
 
+def _smart_settings_transfer(
+    process_profile: dict[str, Any], threemf_settings: dict[str, Any],
+) -> tuple[dict[str, Any], SettingsTransferResult]:
+    """Transfer only user-customized settings from 3MF onto the process profile.
+
+    Falls back to full overlay when we can't determine the original profile.
+    """
+    if not threemf_settings:
+        logger.debug("No 3MF settings to transfer")
+        return process_profile, SettingsTransferResult(status="no_3mf_settings")
+
+    print_settings_id = threemf_settings.get("print_settings_id")
+    if not print_settings_id:
+        logger.debug("No print_settings_id in 3MF, falling back to full overlay")
+        return (
+            _overlay_3mf_settings(process_profile, threemf_settings),
+            SettingsTransferResult(status="no_3mf_settings"),
+        )
+
+    original_profile = resolve_profile_by_name(print_settings_id)
+    if original_profile is None:
+        logger.debug(
+            "Original profile %r not found, falling back to full overlay",
+            print_settings_id,
+        )
+        return (
+            _overlay_3mf_settings(process_profile, threemf_settings),
+            SettingsTransferResult(status="no_original_profile"),
+        )
+
+    diffs = _diff_3mf_settings(threemf_settings, original_profile)
+    if not diffs:
+        logger.info("No customizations detected in 3MF vs original profile %r", print_settings_id)
+        return process_profile, SettingsTransferResult(status="no_customizations")
+
+    logger.info(
+        "Detected %d customization(s) in 3MF vs original profile %r: %s",
+        len(diffs), print_settings_id, list(diffs.keys()),
+    )
+    transferred = [
+        {"key": k, "value": str(tv), "original": str(ov)}
+        for k, (tv, ov) in diffs.items()
+    ]
+    updated = _apply_customizations(process_profile, threemf_settings, set(diffs.keys()))
+    return updated, SettingsTransferResult(status="applied", transferred=transferred)
+
+
 async def slice_3mf(
     file_bytes: bytes,
     machine_profile_id: str,
     process_profile_id: str,
     filament_profile_ids: list[str],
-) -> bytes:
-    """Slice a 3MF file and return the sliced result as bytes."""
+) -> tuple[bytes, SettingsTransferResult]:
+    """Slice a 3MF file and return the sliced result as bytes + transfer info."""
     logger.info(
         "Slice request: machine=%s process=%s filaments=%s file_size=%d",
         machine_profile_id, process_profile_id, filament_profile_ids, len(file_bytes),
@@ -124,9 +249,9 @@ async def slice_3mf(
     )
 
     # Validate model fits the build volume
-    fit_error = validate_model_fits(file_bytes, machine_profile)
-    if fit_error:
-        raise ModelTooBigError(fit_error)
+    fit_check = validate_model_fits(file_bytes, machine_profile)
+    if not fit_check.fits:
+        raise ModelTooBigError(fit_check.error)
 
     # G92 E0 workaround
     lcg = machine_profile.get("layer_change_gcode", "")
@@ -137,6 +262,7 @@ async def slice_3mf(
     async with _slice_semaphore:
         return await _do_slice(
             file_bytes, machine_profile, process_profile, filament_profiles,
+            arrange=fit_check.needs_arrange,
         )
 
 
@@ -145,7 +271,9 @@ async def _do_slice(
     machine_profile: dict[str, Any],
     process_profile: dict[str, Any],
     filament_profiles: list[dict[str, Any]],
-) -> bytes:
+    *,
+    arrange: bool = False,
+) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
         # Write input 3MF
         input_path = os.path.join(tmpdir, "input.3mf")
@@ -162,8 +290,10 @@ async def _do_slice(
         except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
             logger.debug("No project settings in 3MF: %s", exc)
 
-        # Overlay 3MF settings onto process profile
-        process_profile = _overlay_3mf_settings(process_profile, threemf_settings)
+        # Smart settings transfer: only apply user customizations
+        transfer_result = _smart_settings_transfer(process_profile, threemf_settings)
+        process_profile = transfer_result[0]
+        settings_transfer = transfer_result[1]
 
         # Sanitize 3MF
         slice_filepath = _sanitize_3mf(input_path, tmpdir)
@@ -193,6 +323,9 @@ async def _do_slice(
         ]
         if filament_paths:
             cmd += ["--load-filaments", ";".join(filament_paths)]
+        if arrange:
+            logger.info("Adding --arrange 1 (model position is off-plate for target printer)")
+            cmd += ["--arrange", "1"]
         cmd += [
             "--slice", "1",
             "--export-3mf", "result.3mf",
@@ -238,4 +371,4 @@ async def _do_slice(
         result_size = os.path.getsize(result_path)
         logger.info("Sliced output: %s (%d bytes)", result_path, result_size)
         with open(result_path, "rb") as f:
-            return f.read()
+            return f.read(), settings_transfer
