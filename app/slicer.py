@@ -87,8 +87,11 @@ def _apply_customizations(
     process_profile: dict[str, Any],
     threemf_settings: dict[str, Any],
     customized_keys: set[str],
-) -> dict[str, Any]:
-    """Apply only the customized keys from 3MF settings onto the process profile."""
+) -> tuple[dict[str, Any], set[str]]:
+    """Apply only the customized keys from 3MF settings onto the process profile.
+
+    Returns (updated_profile, actually_applied_keys).
+    """
     overrides = {}
     for k in customized_keys:
         if k not in threemf_settings or k not in process_profile or k in _PROFILE_META_KEYS:
@@ -104,8 +107,8 @@ def _apply_customizations(
         else:
             overrides[k] = tv
     if overrides:
-        return {**process_profile, **overrides}
-    return process_profile
+        return {**process_profile, **overrides}, set(overrides.keys())
+    return process_profile, set()
 
 
 class ModelTooBigError(Exception):
@@ -118,8 +121,8 @@ class SlicingError(Exception):
         self.orca_output = orca_output
 
 
-def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
-    """Fix invalid parameter values in a 3MF's project_settings.config."""
+def _sanitize_3mf(filepath: str, tmpdir: str, machine_profile: dict[str, Any]) -> str:
+    """Fix invalid parameter values and strip machine metadata from a 3MF's project_settings."""
     settings_file = "Metadata/project_settings.config"
     with zipfile.ZipFile(filepath, "r") as zf:
         if settings_file not in zf.namelist():
@@ -129,6 +132,16 @@ def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
         settings = json.loads(raw)
 
         changed = False
+
+        # Strip keys that belong to the machine profile — we provide it separately
+        machine_keys = [k for k in settings if k in machine_profile and k not in _PROFILE_META_KEYS]
+        if machine_keys:
+            for k in machine_keys:
+                del settings[k]
+            changed = True
+            logger.debug("Stripped %d machine keys from 3MF settings", len(machine_keys))
+
+        # Clamp values that must meet minimums
         for key, min_val in _CLAMP_RULES.items():
             if key in settings:
                 val = settings[key]
@@ -212,15 +225,23 @@ def _smart_settings_transfer(
         logger.info("No customizations detected in 3MF vs original profile %r", print_settings_id)
         return process_profile, SettingsTransferResult(status="no_customizations")
 
+    updated, applied_keys = _apply_customizations(process_profile, threemf_settings, set(diffs.keys()))
+    if not applied_keys:
+        logger.info(
+            "Detected %d customization(s) in 3MF vs %r but none apply to the target profile",
+            len(diffs), print_settings_id,
+        )
+        return process_profile, SettingsTransferResult(status="no_customizations")
+
     logger.info(
-        "Detected %d customization(s) in 3MF vs original profile %r: %s",
-        len(diffs), print_settings_id, list(diffs.keys()),
+        "Applied %d customization(s) from 3MF (of %d detected) vs original profile %r: %s",
+        len(applied_keys), len(diffs), print_settings_id, list(applied_keys),
     )
     transferred = [
-        {"key": k, "value": str(tv), "original": str(ov)}
+        {"key": k, "value": json.dumps(tv), "original": json.dumps(ov)}
         for k, (tv, ov) in diffs.items()
+        if k in applied_keys
     ]
-    updated = _apply_customizations(process_profile, threemf_settings, set(diffs.keys()))
     return updated, SettingsTransferResult(status="applied", transferred=transferred)
 
 
@@ -290,13 +311,19 @@ async def _do_slice(
         except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
             logger.debug("No project settings in 3MF: %s", exc)
 
+        # Strip machine keys from 3MF settings before transfer/diff
+        threemf_settings = {
+            k: v for k, v in threemf_settings.items()
+            if k not in machine_profile or k in _PROFILE_META_KEYS
+        }
+
         # Smart settings transfer: only apply user customizations
         transfer_result = _smart_settings_transfer(process_profile, threemf_settings)
         process_profile = transfer_result[0]
         settings_transfer = transfer_result[1]
 
-        # Sanitize 3MF
-        slice_filepath = _sanitize_3mf(input_path, tmpdir)
+        # Sanitize 3MF (also strips machine keys from the file for OrcaSlicer CLI)
+        slice_filepath = _sanitize_3mf(input_path, tmpdir, machine_profile)
         if slice_filepath != input_path:
             logger.debug("3MF was sanitized (clamped invalid parameter values)")
 
