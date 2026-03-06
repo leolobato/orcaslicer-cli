@@ -1,6 +1,7 @@
 """Slicing logic adapted from bambu-poc/print_3mf.py."""
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -282,6 +283,17 @@ async def _do_slice(
     filament_profiles: list[dict[str, Any]],
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Read 3MF project settings BEFORE multi-plate extraction (which creates
+        # a fresh 3MF without project_settings.config)
+        threemf_settings = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
+                raw = zf.read("Metadata/project_settings.config").decode()
+                threemf_settings = json.loads(raw)
+                logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
+        except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            logger.debug("No project settings in 3MF: %s", exc)
+
         # For multi-plate 3MFs, extract plate 1 into a fresh simple 3MF.
         # OrcaSlicer CLI crashes on multi-plate files due to geometry processing bugs.
         plate_count = get_plate_count(file_bytes)
@@ -308,16 +320,6 @@ async def _do_slice(
         input_path = os.path.join(tmpdir, "input.3mf")
         with open(input_path, "wb") as f:
             f.write(file_bytes)
-
-        # Read 3MF project settings for overlay
-        threemf_settings = {}
-        try:
-            with zipfile.ZipFile(input_path, "r") as zf:
-                raw = zf.read("Metadata/project_settings.config").decode()
-                threemf_settings = json.loads(raw)
-                logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
-        except (KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
-            logger.debug("No project settings in 3MF: %s", exc)
 
         # Strip machine keys from 3MF settings before transfer/diff
         threemf_settings = {

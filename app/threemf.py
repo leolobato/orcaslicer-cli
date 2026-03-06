@@ -305,35 +305,20 @@ def _collect_mesh_data(
     zf: zipfile.ZipFile,
     root_model: str,
     object_ids: set[str],
-) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[float]]:
-    """Collect vertices, triangles, and the build-item transform for specified objects.
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Collect world-space vertices and triangles for all plate objects.
 
-    Follows component p:path references to sub-model files.
-    Returns (vertices, triangles, transform_12floats).
+    Iterates all build items matching object_ids, applies each item's
+    build transform, and follows component p:path references to sub-model files.
+    Returns (world_vertices, triangles).
     """
     ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
     root = ET.fromstring(root_model)
 
-    # Find the build item for the first plate object
-    build_transform = list(_IDENTITY)
-    target_obj_id = None
-    for item in root.findall("m:build/m:item", _NS):
-        if item.get("objectid") in object_ids:
-            target_obj_id = item.get("objectid")
-            build_transform = _parse_transform(item.get("transform"))
-            break
-
-    if target_obj_id is None:
-        return [], [], list(_IDENTITY)
-
-    obj_elem = None
-    for obj in root.findall(".//m:resources/m:object", _NS):
-        if obj.get("id") == target_obj_id:
-            obj_elem = obj
-            break
-
-    if obj_elem is None:
-        return [], [], build_transform
+    objects: dict[str, ET.Element] = {
+        obj.get("id"): obj
+        for obj in root.findall(".//m:resources/m:object", _NS)
+    }
 
     all_verts: list[tuple[float, float, float]] = []
     all_tris: list[tuple[int, int, int]] = []
@@ -368,8 +353,25 @@ def _collect_mesh_data(
                 except (KeyError, ET.ParseError):
                     pass
 
-    collect_from_element(obj_elem)
-    return all_verts, all_tris, build_transform
+    # Process ALL build items that match plate objects (not just the first)
+    for item in root.findall("m:build/m:item", _NS):
+        if item.get("objectid") not in object_ids:
+            continue
+        obj_elem = objects.get(item.get("objectid"))
+        if obj_elem is None:
+            continue
+
+        # Collect mesh in object-local space, then apply build-item transform
+        local_verts_start = len(all_verts)
+        collect_from_element(obj_elem)
+
+        # Apply this item's build transform to the vertices just collected
+        build_transform = _parse_transform(item.get("transform"))
+        for i in range(local_verts_start, len(all_verts)):
+            x, y, z = all_verts[i]
+            all_verts[i] = _apply_transform(x, y, z, build_transform)
+
+    return all_verts, all_tris
 
 
 def extract_first_plate(
@@ -401,17 +403,12 @@ def extract_first_plate(
                 return None
 
             root_model = zf.read(root_model_path).decode()
-            verts, tris, build_transform = _collect_mesh_data(
+            world_verts, tris = _collect_mesh_data(
                 zf, root_model, plate1_ids,
             )
 
-        if not verts or not tris:
+        if not world_verts or not tris:
             return None
-
-        # Apply build transform to get world-space vertices
-        world_verts = [
-            _apply_transform(x, y, z, build_transform) for x, y, z in verts
-        ]
 
         # Compute bounding box and center on target bed
         xs = [v[0] for v in world_verts]
