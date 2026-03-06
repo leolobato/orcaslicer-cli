@@ -4,17 +4,15 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import tempfile
-import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import ORCA_BINARY
 from .profiles import ProfileNotFoundError, get_profile, resolve_profile_by_name
-from .threemf import validate_model_fits
+from .threemf import extract_first_plate, get_build_volume, get_plate_count, validate_model_fits
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +27,7 @@ _CLAMP_RULES = {
     "raft_first_layer_expansion": 0,
     "solid_infill_filament": 1,
     "sparse_infill_filament": 1,
+    "tree_support_wall_count": 0,
     "wall_filament": 1,
 }
 
@@ -123,98 +122,8 @@ class SlicingError(Exception):
         self.orca_output = orca_output
 
 
-def _extract_plate_object_ids(model_settings_xml: str, plate_id: int = 1) -> set[str] | None:
-    """Parse model_settings.config XML and return object_ids assigned to the given plate.
-
-    Returns None if the plate is not found or has no objects.
-    """
-    try:
-        root = ET.fromstring(model_settings_xml)
-    except ET.ParseError:
-        return None
-
-    for plate in root.findall("plate"):
-        pid = None
-        for meta in plate.findall("metadata"):
-            if meta.get("key") == "plater_id":
-                pid = meta.get("value")
-                break
-        if pid == str(plate_id):
-            obj_ids = set()
-            for inst in plate.findall("model_instance"):
-                for meta in inst.findall("metadata"):
-                    if meta.get("key") == "object_id":
-                        obj_ids.add(meta.get("value"))
-            return obj_ids if obj_ids else None
-    return None
-
-
-def _strip_to_single_plate(filepath: str, tmpdir: str, plate_id: int = 1) -> str:
-    """Rewrite a multi-plate 3MF to contain only the items from the target plate.
-
-    This prevents OrcaSlicer from inferring a larger bed size from off-plate items.
-    Returns the original filepath if the 3MF has only one plate or can't be parsed.
-    """
-    model_settings_file = "Metadata/model_settings.config"
-    model_file = None
-
-    with zipfile.ZipFile(filepath, "r") as zf:
-        names = zf.namelist()
-        if model_settings_file not in names:
-            return filepath
-
-        for name in names:
-            if name.lower().endswith(".model") and name.startswith("3D/") and "/Objects/" not in name:
-                model_file = name
-                break
-        if model_file is None:
-            return filepath
-
-        model_settings_raw = zf.read(model_settings_file).decode()
-        plate_obj_ids = _extract_plate_object_ids(model_settings_raw, plate_id)
-        if plate_obj_ids is None:
-            return filepath
-
-        model_raw = zf.read(model_file).decode()
-
-        # Check if there are items outside the target plate
-        # Match <item objectid="N" .../>  in the <build> section
-        item_pattern = re.compile(r'<item\s[^>]*objectid="(\d+)"[^>]*/>', re.DOTALL)
-        all_item_ids = set(item_pattern.findall(model_raw))
-
-        if all_item_ids == plate_obj_ids or all_item_ids.issubset(plate_obj_ids):
-            # Single plate or all items already on target plate
-            return filepath
-
-        logger.info(
-            "Stripping 3MF to plate %d: keeping %d of %d build items (objects: %s)",
-            plate_id, len(plate_obj_ids), len(all_item_ids), sorted(plate_obj_ids),
-        )
-
-        # Remove <item> elements not on the target plate
-        def replace_build_items(match: re.Match) -> str:
-            obj_id = match.group(1)
-            if obj_id in plate_obj_ids:
-                return match.group(0)
-            return ""
-
-        new_model = item_pattern.sub(replace_build_items, model_raw)
-        # Clean up blank lines left by removed items
-        new_model = re.sub(r'\n\s*\n', '\n', new_model)
-
-        stripped = os.path.join(tmpdir, "single_plate.3mf")
-        with zipfile.ZipFile(stripped, "w") as zf_out:
-            with zipfile.ZipFile(filepath, "r") as zf_in:
-                for item in zf_in.infolist():
-                    if item.filename == model_file:
-                        zf_out.writestr(item, new_model)
-                    else:
-                        zf_out.writestr(item, zf_in.read(item.filename))
-        return stripped
-
-
-def _sanitize_3mf(filepath: str, tmpdir: str, machine_profile: dict[str, Any]) -> str:
-    """Fix invalid parameter values and strip machine metadata from a 3MF's project_settings."""
+def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
+    """Fix invalid parameter values in a 3MF's project_settings."""
     settings_file = "Metadata/project_settings.config"
     with zipfile.ZipFile(filepath, "r") as zf:
         if settings_file not in zf.namelist():
@@ -224,14 +133,6 @@ def _sanitize_3mf(filepath: str, tmpdir: str, machine_profile: dict[str, Any]) -
         settings = json.loads(raw)
 
         changed = False
-
-        # Strip keys that belong to the machine profile — we provide it separately
-        machine_keys = [k for k in settings if k in machine_profile and k not in _PROFILE_META_KEYS]
-        if machine_keys:
-            for k in machine_keys:
-                del settings[k]
-            changed = True
-            logger.debug("Stripped %d machine keys from 3MF settings", len(machine_keys))
 
         # Clamp values that must meet minimums
         for key, min_val in _CLAMP_RULES.items():
@@ -253,7 +154,8 @@ def _sanitize_3mf(filepath: str, tmpdir: str, machine_profile: dict[str, Any]) -
             with zipfile.ZipFile(filepath, "r") as zf_in:
                 for item in zf_in.infolist():
                     if item.filename == settings_file:
-                        zf_out.writestr(item, json.dumps(settings, indent=2))
+                        # Use filename instead of ZipInfo to avoid stale size metadata
+                        zf_out.writestr(item.filename, json.dumps(settings, indent=2))
                     else:
                         zf_out.writestr(item, zf_in.read(item.filename))
         return sanitized
@@ -361,11 +263,6 @@ async def slice_3mf(
         [fp.get("name") for fp in filament_profiles],
     )
 
-    # Validate model fits the build volume
-    fit_check = validate_model_fits(file_bytes, machine_profile)
-    if not fit_check.fits:
-        raise ModelTooBigError(fit_check.error)
-
     # G92 E0 workaround
     lcg = machine_profile.get("layer_change_gcode", "")
     if "G92 E0" not in lcg:
@@ -375,7 +272,6 @@ async def slice_3mf(
     async with _slice_semaphore:
         return await _do_slice(
             file_bytes, machine_profile, process_profile, filament_profiles,
-            arrange=fit_check.needs_arrange,
         )
 
 
@@ -384,10 +280,30 @@ async def _do_slice(
     machine_profile: dict[str, Any],
     process_profile: dict[str, Any],
     filament_profiles: list[dict[str, Any]],
-    *,
-    arrange: bool = False,
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
+        # For multi-plate 3MFs, extract plate 1 into a fresh simple 3MF.
+        # OrcaSlicer CLI crashes on multi-plate files due to geometry processing bugs.
+        plate_count = get_plate_count(file_bytes)
+        if plate_count > 1:
+            volume = get_build_volume(machine_profile)
+            if volume:
+                bed_cx, bed_cy = volume[0] / 2, volume[1] / 2
+            else:
+                bed_cx, bed_cy = 90.0, 90.0
+            rebuilt = extract_first_plate(file_bytes, bed_cx, bed_cy)
+            if rebuilt is not None:
+                logger.info(
+                    "Rebuilt multi-plate 3MF (%d plates) into single-plate for plate 1",
+                    plate_count,
+                )
+                file_bytes = rebuilt
+
+        # Validate model fits the build volume (after multi-plate extraction)
+        fit_check = validate_model_fits(file_bytes, machine_profile)
+        if not fit_check.fits:
+            raise ModelTooBigError(fit_check.error)
+
         # Write input 3MF
         input_path = os.path.join(tmpdir, "input.3mf")
         with open(input_path, "wb") as f:
@@ -414,11 +330,19 @@ async def _do_slice(
         process_profile = transfer_result[0]
         settings_transfer = transfer_result[1]
 
-        # Strip multi-plate layout to avoid bed size inference from off-plate items
-        current_filepath = _strip_to_single_plate(input_path, tmpdir)
+        # Clamp transferred values that must meet minimums
+        for key, min_val in _CLAMP_RULES.items():
+            if key in process_profile:
+                val = process_profile[key]
+                try:
+                    num = float(val) if isinstance(val, str) else val
+                    if num < min_val:
+                        process_profile[key] = str(min_val) if isinstance(val, str) else min_val
+                except (ValueError, TypeError):
+                    pass
 
-        # Sanitize 3MF (also strips machine keys from the file for OrcaSlicer CLI)
-        slice_filepath = _sanitize_3mf(current_filepath, tmpdir, machine_profile)
+        # Sanitize 3MF (clamps invalid values)
+        slice_filepath = _sanitize_3mf(input_path, tmpdir)
         if slice_filepath != input_path:
             logger.debug("3MF was sanitized")
 
@@ -445,8 +369,8 @@ async def _do_slice(
         ]
         if filament_paths:
             cmd += ["--load-filaments", ";".join(filament_paths)]
-        if arrange:
-            logger.info("Adding --arrange 1 (model position is off-plate for target printer)")
+        if fit_check.needs_arrange:
+            logger.info("Cross-printer detected: adding --arrange 1")
             cmd += ["--arrange", "1"]
         cmd += [
             "--slice", "1",

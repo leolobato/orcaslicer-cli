@@ -2,6 +2,7 @@
 
 import io
 import logging
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any, NamedTuple
@@ -71,57 +72,95 @@ def _chain_transforms(a: list[float], b: list[float]) -> list[float]:
     return result
 
 
+def _collect_vertices_recursive(
+    obj_elem: ET.Element,
+    transform: list[float],
+    objects: dict[str, ET.Element],
+    zf: zipfile.ZipFile | None = None,
+) -> list[tuple[float, float, float]]:
+    """Collect transformed vertices from an object, following component refs and sub-models."""
+    ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    points = []
+
+    mesh = obj_elem.find("m:mesh", _NS)
+    if mesh is not None:
+        for v in mesh.findall("m:vertices/m:vertex", _NS):
+            x = float(v.get("x"))
+            y = float(v.get("y"))
+            z = float(v.get("z"))
+            points.append(_apply_transform(x, y, z, transform))
+
+    for comp in obj_elem.findall("m:components/m:component", _NS):
+        comp_transform = _parse_transform(comp.get("transform"))
+        combined = _chain_transforms(transform, comp_transform)
+        comp_obj_id = comp.get("objectid")
+        path = comp.get(f"{{{ns_p}}}path")
+
+        if path and zf:
+            # Sub-model file reference
+            zip_path = path.lstrip("/")
+            try:
+                sub_data = zf.read(zip_path).decode()
+                sub_root = ET.fromstring(sub_data)
+                sub_objects = {
+                    o.get("id"): o
+                    for o in sub_root.findall(".//m:resources/m:object", _NS)
+                }
+                ref_obj = sub_objects.get(comp_obj_id)
+                if ref_obj is not None:
+                    points.extend(_collect_vertices_recursive(
+                        ref_obj, combined, sub_objects, zf,
+                    ))
+            except (KeyError, ET.ParseError):
+                pass
+        else:
+            ref_obj = objects.get(comp_obj_id)
+            if ref_obj is not None:
+                points.extend(_collect_vertices_recursive(
+                    ref_obj, combined, objects, zf,
+                ))
+
+    return points
+
+
 def get_bounding_box(file_bytes: bytes) -> BBox | None:
     """Return the overall bounding box of all build items in a 3MF file.
 
+    Follows component references to sub-model files.
     Returns None if no geometry is found.
     """
     with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
         model_path = None
         for name in zf.namelist():
-            if name.lower().endswith(".model"):
+            if name == "3D/3dmodel.model":
                 model_path = name
                 break
+        if model_path is None:
+            # Fallback: first .model file
+            for name in zf.namelist():
+                if name.lower().endswith(".model"):
+                    model_path = name
+                    break
         if model_path is None:
             return None
 
         tree = ET.parse(zf.open(model_path))
+        root = tree.getroot()
 
-    root = tree.getroot()
+        objects: dict[str, ET.Element] = {}
+        for obj in root.findall(".//m:resources/m:object", _NS):
+            objects[obj.get("id")] = obj
 
-    objects: dict[str, ET.Element] = {}
-    for obj in root.findall(".//m:resources/m:object", _NS):
-        objects[obj.get("id")] = obj
-
-    def collect_vertices(
-        obj_elem: ET.Element, transform: list[float],
-    ) -> list[tuple[float, float, float]]:
-        points = []
-        mesh = obj_elem.find("m:mesh", _NS)
-        if mesh is not None:
-            for v in mesh.findall("m:vertices/m:vertex", _NS):
-                x = float(v.get("x"))
-                y = float(v.get("y"))
-                z = float(v.get("z"))
-                points.append(_apply_transform(x, y, z, transform))
-
-        for comp in obj_elem.findall("m:components/m:component", _NS):
-            comp_transform = _parse_transform(comp.get("transform"))
-            combined = _chain_transforms(transform, comp_transform)
-            ref_obj = objects.get(comp.get("objectid"))
-            if ref_obj is not None:
-                points.extend(collect_vertices(ref_obj, combined))
-
-        return points
-
-    all_points: list[tuple[float, float, float]] = []
-    for item in root.findall("m:build/m:item", _NS):
-        obj_id = item.get("objectid")
-        obj_elem = objects.get(obj_id)
-        if obj_elem is None:
-            continue
-        item_transform = _parse_transform(item.get("transform"))
-        all_points.extend(collect_vertices(obj_elem, item_transform))
+        all_points: list[tuple[float, float, float]] = []
+        for item in root.findall("m:build/m:item", _NS):
+            obj_id = item.get("objectid")
+            obj_elem = objects.get(obj_id)
+            if obj_elem is None:
+                continue
+            item_transform = _parse_transform(item.get("transform"))
+            all_points.extend(_collect_vertices_recursive(
+                obj_elem, item_transform, objects, zf,
+            ))
 
     if not all_points:
         return None
@@ -235,3 +274,257 @@ def validate_model_fits(
         return FitCheck(fits=True, needs_arrange=True, error=None)
 
     return FitCheck(fits=True, needs_arrange=False, error=None)
+
+
+def get_plate_count(file_bytes: bytes) -> int:
+    """Return the number of plates in a 3MF file."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return 1
+            ms = zf.read("Metadata/model_settings.config").decode()
+            return len(re.findall(r'plater_id"\s+value="\d+"', ms))
+    except (zipfile.BadZipFile, KeyError):
+        return 1
+
+
+def _get_plate_object_ids(model_settings: str, plate_id: str = "1") -> set[str]:
+    """Extract object IDs assigned to a specific plate."""
+    pattern = (
+        r"<plate>\s*<metadata\s+key=\"plater_id\"\s+value=\""
+        + re.escape(plate_id)
+        + r"\".*?</plate>"
+    )
+    match = re.search(pattern, model_settings, re.DOTALL)
+    if not match:
+        return set()
+    return set(re.findall(r'object_id"\s+value="(\d+)"', match.group(0)))
+
+
+def _collect_mesh_data(
+    zf: zipfile.ZipFile,
+    root_model: str,
+    object_ids: set[str],
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]], list[float]]:
+    """Collect vertices, triangles, and the build-item transform for specified objects.
+
+    Follows component p:path references to sub-model files.
+    Returns (vertices, triangles, transform_12floats).
+    """
+    ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    root = ET.fromstring(root_model)
+
+    # Find the build item for the first plate object
+    build_transform = list(_IDENTITY)
+    target_obj_id = None
+    for item in root.findall("m:build/m:item", _NS):
+        if item.get("objectid") in object_ids:
+            target_obj_id = item.get("objectid")
+            build_transform = _parse_transform(item.get("transform"))
+            break
+
+    if target_obj_id is None:
+        return [], [], list(_IDENTITY)
+
+    obj_elem = None
+    for obj in root.findall(".//m:resources/m:object", _NS):
+        if obj.get("id") == target_obj_id:
+            obj_elem = obj
+            break
+
+    if obj_elem is None:
+        return [], [], build_transform
+
+    all_verts: list[tuple[float, float, float]] = []
+    all_tris: list[tuple[int, int, int]] = []
+
+    def collect_from_element(elem: ET.Element):
+        mesh = elem.find("m:mesh", _NS)
+        if mesh is not None:
+            offset = len(all_verts)
+            for v in mesh.findall("m:vertices/m:vertex", _NS):
+                all_verts.append((
+                    float(v.get("x")), float(v.get("y")), float(v.get("z")),
+                ))
+            for t in mesh.findall("m:triangles/m:triangle", _NS):
+                all_tris.append((
+                    int(t.get("v1")) + offset,
+                    int(t.get("v2")) + offset,
+                    int(t.get("v3")) + offset,
+                ))
+
+        for comp in elem.findall("m:components/m:component", _NS):
+            path = comp.get(f"{{{ns_p}}}path")
+            comp_obj_id = comp.get("objectid")
+            if path:
+                zip_path = path.lstrip("/")
+                try:
+                    sub_data = zf.read(zip_path).decode()
+                    sub_root = ET.fromstring(sub_data)
+                    for sub_obj in sub_root.findall(".//m:resources/m:object", _NS):
+                        if comp_obj_id is None or sub_obj.get("id") == comp_obj_id:
+                            collect_from_element(sub_obj)
+                            break
+                except (KeyError, ET.ParseError):
+                    pass
+
+    collect_from_element(obj_elem)
+    return all_verts, all_tris, build_transform
+
+
+def extract_first_plate(
+    file_bytes: bytes,
+    bed_center_x: float = 90.0,
+    bed_center_y: float = 90.0,
+) -> bytes | None:
+    """Extract plate 1 geometry from a multi-plate 3MF into a fresh simple 3MF.
+
+    Returns new 3MF bytes with a single inline mesh centered on the bed,
+    or None if extraction fails.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            if "Metadata/model_settings.config" not in zf.namelist():
+                return None
+
+            ms = zf.read("Metadata/model_settings.config").decode()
+            plate1_ids = _get_plate_object_ids(ms, "1")
+            if not plate1_ids:
+                return None
+
+            root_model_path = None
+            for name in zf.namelist():
+                if name == "3D/3dmodel.model":
+                    root_model_path = name
+                    break
+            if root_model_path is None:
+                return None
+
+            root_model = zf.read(root_model_path).decode()
+            verts, tris, build_transform = _collect_mesh_data(
+                zf, root_model, plate1_ids,
+            )
+
+        if not verts or not tris:
+            return None
+
+        # Apply build transform to get world-space vertices
+        world_verts = [
+            _apply_transform(x, y, z, build_transform) for x, y, z in verts
+        ]
+
+        # Compute bounding box and center on target bed
+        xs = [v[0] for v in world_verts]
+        ys = [v[1] for v in world_verts]
+        zs = [v[2] for v in world_verts]
+        cx = (min(xs) + max(xs)) / 2
+        cy = (min(ys) + max(ys)) / 2
+        min_z = min(zs)
+
+        tx = bed_center_x - cx
+        ty = bed_center_y - cy
+        tz = -min_z
+
+        final_verts = [(x + tx, y + ty, z + tz) for x, y, z in world_verts]
+        height = max(zs) - min(zs)
+
+        # Build minimal 3MF XML
+        v_xml = "".join(
+            f'    <vertex x="{v[0]}" y="{v[1]}" z="{v[2]}"/>\n'
+            for v in final_verts
+        )
+        t_xml = "".join(
+            f'    <triangle v1="{t[0]}" v2="{t[1]}" v3="{t[2]}"/>\n'
+            for t in tris
+        )
+
+        model_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<model unit="millimeter" xml:lang="en-US"'
+            ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
+            " <resources>\n"
+            '  <object id="1" type="model">\n'
+            "   <mesh>\n"
+            "    <vertices>\n" + v_xml + "    </vertices>\n"
+            "    <triangles>\n" + t_xml + "    </triangles>\n"
+            "   </mesh>\n"
+            "  </object>\n"
+            " </resources>\n"
+            " <build>\n"
+            '  <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+            " </build>\n"
+            "</model>"
+        )
+
+        ms_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<config>\n"
+            '  <object id="1">\n'
+            '    <metadata key="name" value="Model"/>\n'
+            '    <metadata key="extruder" value="1"/>\n'
+            '    <part id="1" subtype="normal_part">\n'
+            '      <metadata key="name" value="Model"/>\n'
+            '      <metadata key="matrix"'
+            ' value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+            '      <metadata key="source_object_id" value="0"/>\n'
+            '      <metadata key="source_volume_id" value="0"/>\n'
+            '      <metadata key="source_offset_x" value="0"/>\n'
+            '      <metadata key="source_offset_y" value="0"/>\n'
+            f'      <metadata key="source_offset_z" value="{-height / 2}"/>\n'
+            "    </part>\n"
+            "  </object>\n"
+            "  <plate>\n"
+            '    <metadata key="plater_id" value="1"/>\n'
+            '    <metadata key="plater_name" value=""/>\n'
+            '    <metadata key="locked" value="false"/>\n'
+            "    <model_instance>\n"
+            '      <metadata key="object_id" value="1"/>\n'
+            '      <metadata key="instance_id" value="0"/>\n'
+            '      <metadata key="identify_id" value="1"/>\n'
+            "    </model_instance>\n"
+            "  </plate>\n"
+            "  <assemble>\n"
+            '   <assemble_item object_id="1" instance_id="0"'
+            ' transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n'
+            "  </assemble>\n"
+            "</config>"
+        )
+
+        ct_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+            ' <Default ContentType='
+            '"application/vnd.openxmlformats-package.relationships+xml"'
+            ' Extension="rels"/>\n'
+            ' <Default ContentType='
+            '"application/vnd.ms-package.3dmanufacturing-3dmodel+xml"'
+            ' Extension="model"/>\n'
+            "</Types>"
+        )
+
+        rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<Relationships xmlns='
+            '"http://schemas.openxmlformats.org/package/2006/relationships">\n'
+            ' <Relationship Target="/3D/3dmodel.model" Id="rel-1"'
+            ' Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'
+            "</Relationships>"
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf_out:
+            zf_out.writestr("3D/3dmodel.model", model_xml)
+            zf_out.writestr("Metadata/model_settings.config", ms_xml)
+            zf_out.writestr("[Content_Types].xml", ct_xml)
+            zf_out.writestr("_rels/.rels", rels_xml)
+
+        result = buf.getvalue()
+        logger.info(
+            "Extracted plate 1 from multi-plate 3MF: %d vertices, %d triangles, %d bytes",
+            len(final_verts), len(tris), len(result),
+        )
+        return result
+
+    except (zipfile.BadZipFile, ET.ParseError, KeyError) as exc:
+        logger.warning("Failed to extract first plate from 3MF: %s", exc)
+        return None
