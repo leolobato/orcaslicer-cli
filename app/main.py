@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
+from starlette.responses import StreamingResponse
 
 from .config import VERSION
 from .models import (
@@ -20,7 +21,7 @@ from .models import (
     SliceError,
 )
 from .profiles import ProfileNotFoundError, get_filament_profiles, get_machine_profiles, get_process_profiles, load_all_profiles
-from .slicer import ModelTooBigError, SlicingError, slice_3mf
+from .slicer import ModelTooBigError, SlicingError, slice_3mf, slice_3mf_streaming
 
 
 @asynccontextmanager
@@ -137,4 +138,52 @@ async def slice_file(
         content=result,
         media_type="application/octet-stream",
         headers=headers,
+    )
+
+
+@app.post(
+    "/slice-stream",
+    tags=["Slicing"],
+    summary="Slice a 3MF file with streaming progress",
+    responses={
+        200: {
+            "description": "SSE stream with progress events, result (base64), and done.",
+            "content": {"text/event-stream": {}},
+        },
+        400: {"description": "Invalid input (bad profiles or file).", "model": SliceError},
+    },
+)
+async def slice_file_stream(
+    file: UploadFile = File(description="A `.3mf` file to slice."),
+    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
+    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
+    filament_profiles: str = Form(
+        description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
+        examples=['["GFL99"]'],
+    ),
+):
+    """Slice a `.3mf` file and stream progress via Server-Sent Events.
+
+    Returns an SSE stream with event types: `status`, `progress`, `result`, `error`, `done`.
+    The `result` event contains the sliced file as base64.
+    """
+    try:
+        filament_ids = json.loads(filament_profiles)
+        if not isinstance(filament_ids, list):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "filament_profiles must be a JSON-encoded list of setting_id strings"},
+        )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    generator = await slice_3mf_streaming(file_bytes, machine_profile, process_profile, filament_ids)
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
