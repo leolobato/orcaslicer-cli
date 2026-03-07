@@ -20,7 +20,14 @@ from .models import (
     ProcessProfile,
     SliceError,
 )
-from .profiles import ProfileNotFoundError, get_filament_profiles, get_machine_profiles, get_process_profiles, load_all_profiles
+from .profiles import (
+    ProfileNotFoundError,
+    get_filament_profiles,
+    get_machine_profiles,
+    get_process_profiles,
+    get_profile,
+    load_all_profiles,
+)
 from .slicer import ModelTooBigError, SlicingError, slice_3mf, slice_3mf_streaming
 
 
@@ -84,6 +91,15 @@ async def list_filaments(
 ):
     """List filament profiles, optionally filtered by a machine setting_id."""
     return get_filament_profiles(machine_id=machine)
+
+
+@app.get("/profiles/filaments/{setting_id}", tags=["Profiles"])
+async def get_filament_detail(setting_id: str):
+    """Return a fully-resolved filament profile with all fields."""
+    try:
+        return get_profile("filament", setting_id)
+    except ProfileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
 
 
 @app.post(
