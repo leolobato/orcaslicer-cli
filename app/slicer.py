@@ -257,6 +257,25 @@ def _parse_progress_percent(line: str) -> int | None:
     return None
 
 
+# Patterns in OrcaSlicer output that indicate a phase change.
+# Order matters — first match wins.
+_ORCA_PHASE_PATTERNS = [
+    (re.compile(r'Initializing StaticPrintConfigs', re.IGNORECASE), "initializing", "Initializing slicer"),
+    (re.compile(r'arrange.*object|auto_arrange|arranging', re.IGNORECASE), "arranging", "Arranging objects on plate"),
+    (re.compile(r'Slicing object|slice region|slice_region|slice objects', re.IGNORECASE), "slicing_objects", "Slicing objects"),
+    (re.compile(r'Generating (perimeters|infill|support|skirt|brim|raft)', re.IGNORECASE), "generating", "Generating toolpaths"),
+    (re.compile(r'Exporting G-code|export_gcode|gcode_export', re.IGNORECASE), "exporting_gcode", "Exporting G-code"),
+]
+
+
+def _detect_orca_phase(line: str) -> tuple[str, str] | None:
+    """Detect a slicer phase change from an OrcaSlicer output line."""
+    for pattern, phase, message in _ORCA_PHASE_PATTERNS:
+        if pattern.search(line):
+            return phase, message
+    return None
+
+
 @dataclass
 class SliceContext:
     tmpdir: str
@@ -510,7 +529,7 @@ async def slice_3mf_streaming(
     async def _generate():
         tmpdir = tempfile.mkdtemp()
         try:
-            yield _sse_event("status", {"phase": "preparing", "message": "Preparing slice inputs"})
+            yield _sse_event("status", {"phase": "reading_3mf", "message": "Reading 3MF file"})
             ctx = _prepare_slice(file_bytes, machine_profile, process_profile, filament_profiles, tmpdir)
 
             yield _sse_event("status", {"phase": "slicing", "message": "Starting OrcaSlicer"})
@@ -524,10 +543,15 @@ async def slice_3mf_streaming(
                 )
 
                 output_lines = []
+                current_phase = None
                 async for raw_line in proc.stdout:
                     line = raw_line.decode(errors="replace").rstrip()
                     if line:
                         output_lines.append(line)
+                        phase = _detect_orca_phase(line)
+                        if phase and phase[0] != current_phase:
+                            current_phase = phase[0]
+                            yield _sse_event("status", {"phase": current_phase, "message": phase[1]})
                         percent = _parse_progress_percent(line)
                         yield _sse_event("progress", {"line": line, "percent": percent})
 
@@ -543,6 +567,8 @@ async def slice_3mf_streaming(
                     return
 
                 logger.info("OrcaSlicer finished successfully")
+
+                yield _sse_event("status", {"phase": "packaging", "message": "Packaging result"})
 
                 try:
                     result_bytes = _post_process(ctx, orca_output=orca_output)
