@@ -18,6 +18,7 @@ from .models import (
     FilamentProfileImportResponse,
     HealthResponse,
     MachineProfile,
+    PlateTypeOption,
     ProcessProfile,
     ReloadResponse,
     SliceError,
@@ -30,7 +31,14 @@ from .profiles import (
     get_profile,
     load_all_profiles,
 )
-from .slicer import ModelTooBigError, SlicingError, slice_3mf, slice_3mf_streaming
+from .slicer import (
+    PLATE_TYPE_API_TO_ORCA,
+    SUPPORTED_PLATE_TYPES,
+    ModelTooBigError,
+    SlicingError,
+    slice_3mf,
+    slice_3mf_streaming,
+)
 
 
 @asynccontextmanager
@@ -93,6 +101,15 @@ async def list_filaments(
 ):
     """List filament profiles, optionally filtered by a machine setting_id."""
     return get_filament_profiles(machine_id=machine)
+
+
+@app.get("/profiles/plate-types", response_model=list[PlateTypeOption], tags=["Profiles"])
+async def list_plate_types():
+    """List supported bed surface types for slicing."""
+    return [
+        {"value": value, "label": label}
+        for value, label in PLATE_TYPE_API_TO_ORCA.items()
+    ]
 
 
 @app.post(
@@ -181,6 +198,15 @@ async def slice_file(
         description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
         examples=['["GFL99"]'],
     ),
+    plate_type: str | None = Form(
+        default=None,
+        description=(
+            "Optional bed surface type. "
+            "One of: cool_plate, engineering_plate, high_temp_plate, "
+            "textured_pei_plate, textured_cool_plate, supertack_plate."
+        ),
+        examples=["textured_pei_plate"],
+    ),
 ):
     """Slice a `.3mf` file using the specified machine, process, and filament profiles.
 
@@ -201,7 +227,24 @@ async def slice_file(
     if not file_bytes:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
 
-    result, settings_transfer = await slice_3mf(file_bytes, machine_profile, process_profile, filament_ids)
+    if plate_type is not None:
+        plate_type = plate_type.strip().lower()
+        if not plate_type:
+            plate_type = None
+    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": (
+                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
+                ),
+            },
+        )
+    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
+
+    result, settings_transfer = await slice_3mf(
+        file_bytes, machine_profile, process_profile, filament_ids, plate_type=orca_plate_type,
+    )
     headers = {
         "Content-Disposition": "attachment; filename=sliced.3mf",
         "X-Settings-Transfer-Status": settings_transfer.status,
@@ -235,6 +278,15 @@ async def slice_file_stream(
         description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
         examples=['["GFL99"]'],
     ),
+    plate_type: str | None = Form(
+        default=None,
+        description=(
+            "Optional bed surface type. "
+            "One of: cool_plate, engineering_plate, high_temp_plate, "
+            "textured_pei_plate, textured_cool_plate, supertack_plate."
+        ),
+        examples=["textured_pei_plate"],
+    ),
 ):
     """Slice a `.3mf` file and stream progress via Server-Sent Events.
 
@@ -255,7 +307,24 @@ async def slice_file_stream(
     if not file_bytes:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
 
-    generator = await slice_3mf_streaming(file_bytes, machine_profile, process_profile, filament_ids)
+    if plate_type is not None:
+        plate_type = plate_type.strip().lower()
+        if not plate_type:
+            plate_type = None
+    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": (
+                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
+                ),
+            },
+        )
+    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
+
+    generator = await slice_3mf_streaming(
+        file_bytes, machine_profile, process_profile, filament_ids, plate_type=orca_plate_type,
+    )
     return StreamingResponse(
         generator,
         media_type="text/event-stream",

@@ -35,6 +35,13 @@ class FilamentProfile(BaseModel):
     filament_type: str = Field(examples=["PLA"])
 
 
+class PlateTypeOption(BaseModel):
+    """A supported API plate type and its OrcaSlicer label."""
+
+    value: str = Field(description="API value for requests.", examples=["textured_pei_plate"])
+    label: str = Field(description="Human-readable OrcaSlicer plate name.", examples=["Textured PEI Plate"])
+
+
 class SliceError(BaseModel):
     """Error response from the slicing endpoint."""
 

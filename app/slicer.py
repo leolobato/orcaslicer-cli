@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 # Serialize slicing requests — CPU-heavy
 _slice_semaphore = asyncio.Semaphore(1)
 
+# API-facing plate type values mapped to OrcaSlicer curr_bed_type labels.
+PLATE_TYPE_API_TO_ORCA = {
+    "cool_plate": "Cool Plate",
+    "engineering_plate": "Engineering Plate",
+    "high_temp_plate": "High Temp Plate",
+    "textured_pei_plate": "Textured PEI Plate",
+    "textured_cool_plate": "Textured Cool Plate",
+    "supertack_plate": "Supertack Plate",
+}
+SUPPORTED_PLATE_TYPES = tuple(PLATE_TYPE_API_TO_ORCA.keys())
+
 # Keys that are profile metadata, not slicer settings
 _PROFILE_META_KEYS = {"name", "from", "inherits", "version", "type", "setting_id"}
 
@@ -290,6 +301,7 @@ def _prepare_slice(
     machine_profile: dict[str, Any],
     process_profile: dict[str, Any],
     filament_profiles: list[dict[str, Any]],
+    plate_type: str | None,
     tmpdir: str,
 ) -> SliceContext:
     """Prepare all inputs for slicing: extract settings, write temp files, build CLI command."""
@@ -344,6 +356,15 @@ def _prepare_slice(
     transfer_result = _smart_settings_transfer(process_profile, threemf_settings)
     process_profile = transfer_result[0]
     settings_transfer = transfer_result[1]
+
+    # Request value takes priority; otherwise preserve 3MF-selected bed type.
+    effective_plate_type = plate_type
+    if not effective_plate_type:
+        bed_type_from_3mf = threemf_settings.get("curr_bed_type")
+        if isinstance(bed_type_from_3mf, str) and bed_type_from_3mf:
+            effective_plate_type = bed_type_from_3mf
+    if effective_plate_type:
+        process_profile["curr_bed_type"] = effective_plate_type
 
     for key, min_val in _CLAMP_RULES.items():
         if key in process_profile:
@@ -431,6 +452,7 @@ async def slice_3mf(
     machine_profile_id: str,
     process_profile_id: str,
     filament_profile_ids: list[str],
+    plate_type: str | None = None,
 ) -> tuple[bytes, SettingsTransferResult]:
     """Slice a 3MF file and return the sliced result as bytes + transfer info."""
     logger.info(
@@ -463,7 +485,7 @@ async def slice_3mf(
 
     async with _slice_semaphore:
         return await _do_slice(
-            file_bytes, machine_profile, process_profile, filament_profiles,
+            file_bytes, machine_profile, process_profile, filament_profiles, plate_type,
         )
 
 
@@ -472,9 +494,12 @@ async def _do_slice(
     machine_profile: dict[str, Any],
     process_profile: dict[str, Any],
     filament_profiles: list[dict[str, Any]],
+    plate_type: str | None,
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
-        ctx = _prepare_slice(file_bytes, machine_profile, process_profile, filament_profiles, tmpdir)
+        ctx = _prepare_slice(
+            file_bytes, machine_profile, process_profile, filament_profiles, plate_type, tmpdir,
+        )
 
         # Run OrcaSlicer
         logger.info("Running: %s", " ".join(ctx.cmd))
@@ -510,6 +535,7 @@ async def slice_3mf_streaming(
     machine_profile_id: str,
     process_profile_id: str,
     filament_profile_ids: list[str],
+    plate_type: str | None = None,
 ):
     """Resolve profiles and return an SSE async generator for streaming slicing.
 
@@ -530,7 +556,9 @@ async def slice_3mf_streaming(
         tmpdir = tempfile.mkdtemp()
         try:
             yield _sse_event("status", {"phase": "reading_3mf", "message": "Reading 3MF file"})
-            ctx = _prepare_slice(file_bytes, machine_profile, process_profile, filament_profiles, tmpdir)
+            ctx = _prepare_slice(
+                file_bytes, machine_profile, process_profile, filament_profiles, plate_type, tmpdir,
+            )
 
             yield _sse_event("status", {"phase": "slicing", "message": "Starting OrcaSlicer"})
 

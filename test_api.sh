@@ -54,6 +54,13 @@ check "returns filaments for A1M ($FCOUNT)" "$([ "$FCOUNT" -gt 0 ] && echo true 
 check "Generic PLA present (GFSL99_02)" "$(echo "$FILS" | python3 -c 'import sys,json; fs=json.load(sys.stdin); print("true" if any(f["setting_id"]=="GFSL99_02" for f in fs) else "false")')"
 
 echo ""
+echo "=== Plate Types ==="
+PLATES=$(curl -sf "$BASE_URL/profiles/plate-types")
+PTCOUNT=$(echo "$PLATES" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
+check "returns plate types ($PTCOUNT)" "$([ "$PTCOUNT" -gt 0 ] && echo true || echo false)"
+check "textured_pei_plate present" "$(echo "$PLATES" | python3 -c 'import sys,json; ps=json.load(sys.stdin); print("true" if any(p.get("value")=="textured_pei_plate" for p in ps) else "false")')"
+
+echo ""
 echo "=== Error Handling ==="
 ERR=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE_URL/profiles/processes?machine=INVALID" || true)
 check "invalid machine returns 400 (got $ERR)" "$([ "$ERR" = "400" ] && echo true || echo false)"
@@ -67,6 +74,7 @@ if [ -f "$EXAMPLES_DIR/example3.3mf" ]; then
         -F "file=@$EXAMPLES_DIR/example3.3mf" \
         -F "machine_profile=GM020" \
         -F "process_profile=GP000" \
+        -F "plate_type=textured_pei_plate" \
         -F 'filament_profiles=["GFSL99_02"]' \
         "$BASE_URL/slice")
     check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"

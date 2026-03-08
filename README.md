@@ -38,6 +38,21 @@ Lists print process profiles (layer height, speed, etc.). Optionally filter by m
 
 Lists filament profiles. Optionally filter by machine.
 
+### `GET /profiles/plate-types`
+
+Lists supported bed surface types:
+
+```json
+[
+  {"value": "cool_plate", "label": "Cool Plate"},
+  {"value": "engineering_plate", "label": "Engineering Plate"},
+  {"value": "high_temp_plate", "label": "High Temp Plate"},
+  {"value": "textured_pei_plate", "label": "Textured PEI Plate"},
+  {"value": "textured_cool_plate", "label": "Textured Cool Plate"},
+  {"value": "supertack_plate", "label": "Supertack Plate"}
+]
+```
+
 ### `POST /slice`
 
 Slices a `.3mf` file. Accepts multipart form data:
@@ -48,6 +63,7 @@ Slices a `.3mf` file. Accepts multipart form data:
 | `machine_profile` | Machine setting_id (e.g., `GM014`) |
 | `process_profile` | Process setting_id (e.g., `GP004`) |
 | `filament_profiles` | JSON array of filament setting_ids (e.g., `["GFSA00"]`) |
+| `plate_type` | Optional snake_case bed surface value (from `/profiles/plate-types`, e.g. `textured_pei_plate`) |
 
 Returns the sliced `.3mf` file as a binary download.
 
@@ -58,6 +74,7 @@ curl -o sliced.3mf \
   -F "file=@model.3mf" \
   -F "machine_profile=GM014" \
   -F "process_profile=GP004" \
+  -F "plate_type=textured_pei_plate" \
   -F 'filament_profiles=["GFSA00"]' \
   http://localhost:8000/slice
 ```
