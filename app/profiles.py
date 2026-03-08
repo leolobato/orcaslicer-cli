@@ -133,8 +133,11 @@ def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
     return profiles, type_map
 
 
-def load_all_profiles() -> None:
-    """Read all vendor profile JSONs into memory at startup."""
+def load_all_profiles() -> dict[str, int]:
+    """Read all vendor profile JSONs into memory.
+
+    Returns a summary dict with profile counts by category plus user count.
+    """
     _raw_profiles.clear()
     _type_map.clear()
     _resolved_cache.clear()
@@ -207,6 +210,12 @@ def load_all_profiles() -> None:
         len(vendor_dirs),
         user_count,
     )
+    return {
+        "machines": counts.get("machine", 0),
+        "processes": counts.get("process", 0),
+        "filaments": counts.get("filament", 0),
+        "user": user_count,
+    }
 
 
 def resolve_profile_by_name(name: str) -> dict[str, Any] | None:

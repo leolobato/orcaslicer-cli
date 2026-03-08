@@ -8,16 +8,18 @@ from contextlib import asynccontextmanager
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from starlette.responses import StreamingResponse
 
-from .config import VERSION
+from .config import USER_PROFILES_DIR, VERSION
 from .models import (
     FilamentProfile,
+    FilamentProfileImportResponse,
     HealthResponse,
     MachineProfile,
     ProcessProfile,
+    ReloadResponse,
     SliceError,
 )
 from .profiles import (
@@ -91,6 +93,62 @@ async def list_filaments(
 ):
     """List filament profiles, optionally filtered by a machine setting_id."""
     return get_filament_profiles(machine_id=machine)
+
+
+@app.post(
+    "/profiles/filaments",
+    response_model=FilamentProfileImportResponse,
+    status_code=201,
+    tags=["Profiles"],
+)
+async def import_filament_profile(request: Request):
+    """Import a custom filament profile from JSON."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
+
+    if not isinstance(data, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object."})
+
+    name = data.get("name")
+    if not name or not isinstance(name, str):
+        return JSONResponse(status_code=400, content={"error": "Missing or invalid 'name' field."})
+
+    if "filament_type" not in data and "filament_id" not in data:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Profile must contain 'filament_type' or 'filament_id' to be recognized as a filament."},
+        )
+
+    setting_id = data.get("setting_id", name)
+    data.setdefault("setting_id", setting_id)
+    data.setdefault("instantiation", "true")
+
+    os.makedirs(USER_PROFILES_DIR, exist_ok=True)
+    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    load_all_profiles()
+
+    filament_type = data.get("filament_type", "")
+    if isinstance(filament_type, list):
+        filament_type = filament_type[0] if filament_type else ""
+
+    return FilamentProfileImportResponse(
+        setting_id=setting_id,
+        name=name,
+        filament_type=filament_type,
+        message=f"Profile '{name}' imported successfully.",
+    )
+
+
+@app.post("/profiles/reload", response_model=ReloadResponse, tags=["Profiles"])
+async def reload_profiles():
+    """Hot-reload all profiles (vendor + user) from disk."""
+    summary = load_all_profiles()
+    return ReloadResponse(**summary)
 
 
 @app.get("/profiles/filaments/{setting_id}", tags=["Profiles"])

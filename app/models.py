@@ -40,3 +40,21 @@ class SliceError(BaseModel):
 
     error: str = Field(description="Human-readable error message.")
     orca_output: str | None = Field(default=None, description="Raw output from OrcaSlicer, if available.")
+
+
+class ReloadResponse(BaseModel):
+    """Response from the profile reload endpoint."""
+
+    machines: int = Field(description="Number of machine profiles loaded.")
+    processes: int = Field(description="Number of process profiles loaded.")
+    filaments: int = Field(description="Number of filament profiles loaded.")
+    user: int = Field(description="Number of user-provided profiles loaded.")
+
+
+class FilamentProfileImportResponse(BaseModel):
+    """Response from importing a custom filament profile."""
+
+    setting_id: str = Field(description="Profile identifier.")
+    name: str = Field(description="Profile name.")
+    filament_type: str = Field(description="Filament material type.", examples=["PLA"])
+    message: str = Field(description="Status message.")
