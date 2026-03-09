@@ -38,7 +38,7 @@ Lists print process profiles (layer height, speed, etc.). Optionally filter by m
 
 Lists filament profiles. Optionally filter by machine.
 Set `ams_assignable=true` to return only profiles that are assignable to AMS
-(direct `filament_id`, no `inherits`).
+(instantiable profile with non-empty `setting_id` and resolved `filament_id`).
 Each filament entry includes `ams_assignable` so clients can filter locally.
 
 ### `GET /profiles/plate-types`

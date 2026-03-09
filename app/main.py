@@ -102,8 +102,8 @@ async def list_filaments(
     ams_assignable: bool = Query(
         False,
         description=(
-            "If true, only include root filament profiles that can be assigned to AMS "
-            "(direct filament_id, no inherits)."
+            "If true, only include filament profiles that can be assigned to AMS "
+            "(instantiable profile with non-empty setting_id and resolved filament_id)."
         ),
     ),
 ):

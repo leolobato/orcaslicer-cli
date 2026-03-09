@@ -36,7 +36,7 @@ class FilamentProfile(BaseModel):
     ams_assignable: bool = Field(
         description=(
             "Whether this profile can be assigned to an AMS tray "
-            "(root profile with direct filament_id)."
+            "(instantiable profile with non-empty setting_id and resolved filament_id)."
         ),
         examples=[True],
     )

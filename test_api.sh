@@ -53,6 +53,11 @@ FCOUNT=$(echo "$FILS" | python3 -c 'import sys,json; print(len(json.load(sys.std
 check "returns filaments for A1M ($FCOUNT)" "$([ "$FCOUNT" -gt 0 ] && echo true || echo false)"
 check "Generic PLA present (GFSL99_02)" "$(echo "$FILS" | python3 -c 'import sys,json; fs=json.load(sys.stdin); print("true" if any(f["setting_id"]=="GFSL99_02" for f in fs) else "false")')"
 
+FILS_AMS=$(curl -sf "$BASE_URL/profiles/filaments?machine=GM020&ams_assignable=true")
+FCOUNT_AMS=$(echo "$FILS_AMS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
+check "ams_assignable filter returns A1M filaments ($FCOUNT_AMS)" "$([ "$FCOUNT_AMS" -gt 0 ] && echo true || echo false)"
+check "Bambu PLA Basic AMS profile present (GFSA00_02)" "$(echo "$FILS_AMS" | python3 -c 'import sys,json; fs=json.load(sys.stdin); print("true" if any(f["setting_id"]=="GFSA00_02" for f in fs) else "false")')"
+
 echo ""
 echo "=== Plate Types ==="
 PLATES=$(curl -sf "$BASE_URL/profiles/plate-types")

@@ -64,15 +64,24 @@ def _has_direct_filament_id(raw_profile: dict[str, Any]) -> bool:
     return bool(filament_id and filament_id != "null")
 
 
-def _is_ams_assignable_raw_filament(raw_profile: dict[str, Any]) -> bool:
-    """AMS-assignable filament must be a root, instantiated profile with direct id."""
-    inherits = raw_profile.get("inherits")
-    has_inherits = isinstance(inherits, str) and bool(inherits.strip())
-    return (
-        raw_profile.get("instantiation") == "true"
-        and not has_inherits
-        and _has_direct_filament_id(raw_profile)
-    )
+def _is_ams_assignable_filament(
+    raw_profile: dict[str, Any],
+    resolved_profile: dict[str, Any],
+    *,
+    setting_id: str,
+) -> bool:
+    """Return True when a filament profile can be assigned to AMS.
+
+    A filament is considered assignable if it is instantiable, exposes a
+    stable profile setting_id, and resolves to a non-empty filament_id.
+    Inheritance does not disqualify assignability.
+    """
+    if raw_profile.get("instantiation") != "true":
+        return False
+    if not str(setting_id or "").strip():
+        return False
+    filament_id = _extract_filament_id(resolved_profile)
+    return bool(filament_id and filament_id != "null")
 
 
 def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
@@ -544,11 +553,16 @@ def get_filament_profiles(
             continue
         if raw.get("instantiation") != "true":
             continue
-        ams_assignable = _is_ams_assignable_raw_filament(raw)
-        if ams_assignable_only and not ams_assignable:
-            continue
         resolved = resolve_profile_by_name(name)
         if resolved is None:
+            continue
+        setting_id = _slug_for_profile(name)
+        ams_assignable = _is_ams_assignable_filament(
+            raw,
+            resolved,
+            setting_id=setting_id,
+        )
+        if ams_assignable_only and not ams_assignable:
             continue
 
         if machine_names:
@@ -567,7 +581,7 @@ def get_filament_profiles(
         ) else resolved.get("filament_type", "")
 
         results.append({
-            "setting_id": _slug_for_profile(name),
+            "setting_id": setting_id,
             "name": resolved.get("name", name),
             "compatible_printers": compat_slugs,
             "filament_type": filament_type,
