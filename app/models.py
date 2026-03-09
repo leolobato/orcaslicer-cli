@@ -70,6 +70,7 @@ class FilamentProfileImportResponse(BaseModel):
     """Response from importing a custom filament profile."""
 
     setting_id: str = Field(description="Profile identifier.")
+    filament_id: str = Field(description="Filament identifier used for AMS assignment.")
     name: str = Field(description="Profile name.")
     filament_type: str = Field(description="Filament material type.", examples=["PLA"])
     message: str = Field(description="Status message.")

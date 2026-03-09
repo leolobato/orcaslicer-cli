@@ -163,6 +163,7 @@ async def import_filament_profile(request: Request):
 
     return FilamentProfileImportResponse(
         setting_id=setting_id,
+        filament_id=str(data.get("filament_id", "")),
         name=name,
         filament_type=filament_type,
         message=f"Profile '{name}' imported successfully.",

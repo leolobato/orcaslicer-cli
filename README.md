@@ -57,6 +57,12 @@ Lists supported bed surface types:
 ]
 ```
 
+### `POST /profiles/filaments`
+
+Imports a filament profile JSON and returns the normalized profile identity.
+For imports that rely on `inherits` and do not provide a direct `filament_id`,
+the API assigns a new custom `filament_id` for AMS linkage.
+
 ### `POST /slice`
 
 Slices a `.3mf` file. Accepts multipart form data:

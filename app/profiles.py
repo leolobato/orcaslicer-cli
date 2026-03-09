@@ -130,14 +130,6 @@ def _generate_custom_filament_id(logical_name: str) -> str:
     return base
 
 
-def _find_reusable_filament_id(logical_name: str) -> str | None:
-    """Return an existing filament_id for the same logical name, if present."""
-    for existing_name, existing_id in _iter_known_filament_names_and_ids():
-        if existing_name == logical_name:
-            return existing_id
-    return None
-
-
 def _resolve_filament_parent_ref(parent_ref: str) -> str | None:
     """Resolve a filament inherits reference by name first, then by setting_id."""
     if parent_ref in _raw_profiles and _type_map.get(parent_ref) == "filament":
@@ -155,8 +147,9 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
     Behavior mirrors Orca/Bambu GUI clone flow for custom filaments:
     - Resolve inheritance first (if present).
     - Produce a root profile (clear inherits/base_id).
-    - Ensure explicit filament_id exists (reuse existing by logical name,
-      otherwise generate Pxxxxxxx).
+    - Ensure explicit filament_id exists:
+      - keep user-provided filament_id when present;
+      - otherwise generate a custom Pxxxxxxx id (do not reuse inherited id).
     """
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -167,6 +160,7 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(setting_id, str) or not setting_id.strip():
         raise ValueError("Missing or invalid 'setting_id' field.")
     setting_id = setting_id.strip()
+    has_direct_input_filament_id = _has_direct_filament_id(data)
 
     merged: dict[str, Any]
     inherits = data.get("inherits")
@@ -201,10 +195,11 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
     result.pop("base_id", None)
 
     filament_id = _extract_filament_id(result)
-    if not filament_id or filament_id == "null":
+    if has_direct_input_filament_id and filament_id and filament_id != "null":
+        result["filament_id"] = filament_id
+    else:
         logical_name = _logical_filament_name(name)
-        reusable = _find_reusable_filament_id(logical_name)
-        result["filament_id"] = reusable or _generate_custom_filament_id(logical_name)
+        result["filament_id"] = _generate_custom_filament_id(logical_name)
 
     return result
 
