@@ -579,9 +579,13 @@ def get_filament_profiles(
         filament_type = resolved.get("filament_type", [""])[0] if isinstance(
             resolved.get("filament_type"), list
         ) else resolved.get("filament_type", "")
+        filament_id = _extract_filament_id(resolved)
+        if not filament_id:
+            filament_id = _extract_filament_id(raw)
 
         results.append({
             "setting_id": setting_id,
+            "filament_id": filament_id,
             "name": resolved.get("name", name),
             "compatible_printers": compat_slugs,
             "filament_type": filament_type,

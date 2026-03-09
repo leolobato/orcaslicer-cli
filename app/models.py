@@ -30,6 +30,7 @@ class FilamentProfile(BaseModel):
     """A filament material profile."""
 
     setting_id: str = Field(description="Profile identifier.", examples=["GFL99"])
+    filament_id: str = Field(description="Filament identifier used for AMS assignment.", examples=["GFA00"])
     name: str = Field(examples=["Bambu PLA Basic @BBL P1S"])
     compatible_printers: list[str] = Field(description="Machine setting_ids this filament is compatible with.")
     filament_type: str = Field(examples=["PLA"])
