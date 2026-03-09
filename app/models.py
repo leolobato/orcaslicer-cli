@@ -33,6 +33,13 @@ class FilamentProfile(BaseModel):
     name: str = Field(examples=["Bambu PLA Basic @BBL P1S"])
     compatible_printers: list[str] = Field(description="Machine setting_ids this filament is compatible with.")
     filament_type: str = Field(examples=["PLA"])
+    ams_assignable: bool = Field(
+        description=(
+            "Whether this profile can be assigned to an AMS tray "
+            "(root profile with direct filament_id)."
+        ),
+        examples=[True],
+    )
 
 
 class PlateTypeOption(BaseModel):

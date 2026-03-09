@@ -34,9 +34,12 @@ Lists available machine profiles (printers).
 
 Lists print process profiles (layer height, speed, etc.). Optionally filter by machine.
 
-### `GET /profiles/filaments?machine={setting_id}`
+### `GET /profiles/filaments?machine={setting_id}&ams_assignable=true|false`
 
 Lists filament profiles. Optionally filter by machine.
+Set `ams_assignable=true` to return only profiles that are assignable to AMS
+(direct `filament_id`, no `inherits`).
+Each filament entry includes `ams_assignable` so clients can filter locally.
 
 ### `GET /profiles/plate-types`
 

@@ -1,8 +1,10 @@
 """Load and resolve vendor profiles from OrcaSlicer resources at runtime."""
 
+import hashlib
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Any
 
 from .config import PROFILES_DIR, USER_PROFILES_DIR
@@ -34,6 +36,168 @@ def _detect_profile_type(data: dict[str, Any]) -> str:
     if "printer_model" in data or "machine_start_gcode" in data:
         return "machine"
     return "process"
+
+
+def _logical_filament_name(name: str) -> str:
+    """Normalize a preset name to its logical filament name (before ' @')."""
+    base, _, _ = name.partition(" @")
+    return base.strip() if base else name.strip()
+
+
+def _as_scalar_string(value: Any) -> str:
+    """Return a scalar string from a profile field that may be a list."""
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _extract_filament_id(profile: dict[str, Any]) -> str:
+    """Extract a normalized filament_id value from a profile dict."""
+    return _as_scalar_string(profile.get("filament_id")).strip()
+
+
+def _has_direct_filament_id(raw_profile: dict[str, Any]) -> bool:
+    """Return True if a raw profile declares a usable filament_id directly."""
+    filament_id = _extract_filament_id(raw_profile)
+    return bool(filament_id and filament_id != "null")
+
+
+def _is_ams_assignable_raw_filament(raw_profile: dict[str, Any]) -> bool:
+    """AMS-assignable filament must be a root, instantiated profile with direct id."""
+    inherits = raw_profile.get("inherits")
+    has_inherits = isinstance(inherits, str) and bool(inherits.strip())
+    return (
+        raw_profile.get("instantiation") == "true"
+        and not has_inherits
+        and _has_direct_filament_id(raw_profile)
+    )
+
+
+def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
+    """Return known (logical_filament_name, filament_id) pairs from loaded profiles."""
+    pairs: list[tuple[str, str]] = []
+    for name, raw in _raw_profiles.items():
+        if _type_map.get(name) != "filament":
+            continue
+
+        profile_name = str(raw.get("name", name))
+        logical_name = _logical_filament_name(profile_name)
+
+        # Prefer the raw profile's id; fallback to the resolved chain id.
+        filament_id = _extract_filament_id(raw)
+        if not filament_id:
+            resolved = resolve_profile_by_name(name)
+            if resolved:
+                filament_id = _extract_filament_id(resolved)
+
+        if not filament_id or filament_id == "null":
+            continue
+        pairs.append((logical_name, filament_id))
+    return pairs
+
+
+def _generate_custom_filament_id(logical_name: str) -> str:
+    """Generate a custom filament id using Bambu/Orca-style P + md5 prefix."""
+    known_pairs = _iter_known_filament_names_and_ids()
+    id_to_names: dict[str, set[str]] = {}
+    for existing_name, existing_id in known_pairs:
+        id_to_names.setdefault(existing_id, set()).add(existing_name)
+
+    base = "P" + hashlib.md5(logical_name.encode("utf-8")).hexdigest()[:7]
+    if base not in id_to_names or logical_name in id_to_names[base]:
+        return base
+
+    # Collision with a different logical name: add a timestamp seed.
+    for attempt in range(100):
+        ts = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        seed = f"{logical_name}{ts}_{attempt}"
+        candidate = "P" + hashlib.md5(seed.encode("utf-8")).hexdigest()[:7]
+        if candidate not in id_to_names or logical_name in id_to_names[candidate]:
+            return candidate
+
+    # Extremely unlikely fallback; keeps behavior deterministic enough.
+    return base
+
+
+def _find_reusable_filament_id(logical_name: str) -> str | None:
+    """Return an existing filament_id for the same logical name, if present."""
+    for existing_name, existing_id in _iter_known_filament_names_and_ids():
+        if existing_name == logical_name:
+            return existing_id
+    return None
+
+
+def _resolve_filament_parent_ref(parent_ref: str) -> str | None:
+    """Resolve a filament inherits reference by name first, then by setting_id."""
+    if parent_ref in _raw_profiles and _type_map.get(parent_ref) == "filament":
+        return parent_ref
+
+    by_setting_id = _name_for_slug(parent_ref)
+    if by_setting_id and _type_map.get(by_setting_id) == "filament":
+        return by_setting_id
+    return None
+
+
+def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a clone-style root filament profile from imported JSON.
+
+    Behavior mirrors Orca/Bambu GUI clone flow for custom filaments:
+    - Resolve inheritance first (if present).
+    - Produce a root profile (clear inherits/base_id).
+    - Ensure explicit filament_id exists (reuse existing by logical name,
+      otherwise generate Pxxxxxxx).
+    """
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Missing or invalid 'name' field.")
+    name = name.strip()
+
+    setting_id = data.get("setting_id", name)
+    if not isinstance(setting_id, str) or not setting_id.strip():
+        raise ValueError("Missing or invalid 'setting_id' field.")
+    setting_id = setting_id.strip()
+
+    merged: dict[str, Any]
+    inherits = data.get("inherits")
+    if isinstance(inherits, str) and inherits.strip():
+        parent_name = _resolve_filament_parent_ref(inherits.strip())
+        if not parent_name:
+            raise ProfileNotFoundError(
+                f"Filament parent '{inherits.strip()}' not found"
+            )
+        parent = resolve_profile_by_name(parent_name)
+        if parent is None:
+            raise ProfileNotFoundError(
+                f"Failed to resolve filament parent '{inherits.strip()}'"
+            )
+        merged = dict(parent)
+        merged.update(data)
+    else:
+        merged = dict(data)
+
+    if "filament_type" not in merged and "filament_id" not in merged:
+        raise ValueError(
+            "Profile must contain 'filament_type' or 'filament_id' (directly or via inherits)."
+        )
+
+    result = dict(merged)
+    result["name"] = name
+    result["setting_id"] = setting_id
+    result["from"] = "User"
+    result["instantiation"] = "true"
+    result["filament_settings_id"] = [name]
+    result.pop("inherits", None)
+    result.pop("base_id", None)
+
+    filament_id = _extract_filament_id(result)
+    if not filament_id or filament_id == "null":
+        logical_name = _logical_filament_name(name)
+        reusable = _find_reusable_filament_id(logical_name)
+        result["filament_id"] = reusable or _generate_custom_filament_id(logical_name)
+
+    return result
 
 
 def _load_user_profiles() -> int:
@@ -363,6 +527,7 @@ def get_process_profiles(
 
 def get_filament_profiles(
     machine_id: str | None = None,
+    ams_assignable_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return resolved leaf filament profiles, optionally filtered by machine."""
     machine_names: set[str] | None = None
@@ -378,6 +543,9 @@ def get_filament_profiles(
         if _type_map.get(name) != "filament":
             continue
         if raw.get("instantiation") != "true":
+            continue
+        ams_assignable = _is_ams_assignable_raw_filament(raw)
+        if ams_assignable_only and not ams_assignable:
             continue
         resolved = resolve_profile_by_name(name)
         if resolved is None:
@@ -403,6 +571,7 @@ def get_filament_profiles(
             "name": resolved.get("name", name),
             "compatible_printers": compat_slugs,
             "filament_type": filament_type,
+            "ams_assignable": ams_assignable,
         })
     results.sort(key=lambda x: x["name"])
     return results

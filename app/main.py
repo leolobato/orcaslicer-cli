@@ -30,6 +30,7 @@ from .profiles import (
     get_process_profiles,
     get_profile,
     load_all_profiles,
+    materialize_filament_import,
 )
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
@@ -98,9 +99,16 @@ async def list_processes(
 @app.get("/profiles/filaments", response_model=list[FilamentProfile], tags=["Profiles"])
 async def list_filaments(
     machine: str | None = Query(None, description="Filter by machine setting_id (e.g. GM014)."),
+    ams_assignable: bool = Query(
+        False,
+        description=(
+            "If true, only include root filament profiles that can be assigned to AMS "
+            "(direct filament_id, no inherits)."
+        ),
+    ),
 ):
     """List filament profiles, optionally filtered by a machine setting_id."""
-    return get_filament_profiles(machine_id=machine)
+    return get_filament_profiles(machine_id=machine, ams_assignable_only=ams_assignable)
 
 
 @app.get("/profiles/plate-types", response_model=list[PlateTypeOption], tags=["Profiles"])
@@ -132,15 +140,15 @@ async def import_filament_profile(request: Request):
     if not name or not isinstance(name, str):
         return JSONResponse(status_code=400, content={"error": "Missing or invalid 'name' field."})
 
-    if "filament_type" not in data and "filament_id" not in data:
+    try:
+        data = materialize_filament_import(data)
+    except (ProfileNotFoundError, ValueError) as exc:
         return JSONResponse(
             status_code=400,
-            content={"error": "Profile must contain 'filament_type' or 'filament_id' to be recognized as a filament."},
+            content={"error": str(exc)},
         )
 
-    setting_id = data.get("setting_id", name)
-    data.setdefault("setting_id", setting_id)
-    data.setdefault("instantiation", "true")
+    setting_id = data["setting_id"]
 
     os.makedirs(USER_PROFILES_DIR, exist_ok=True)
     file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
