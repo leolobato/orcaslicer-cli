@@ -74,3 +74,13 @@ class FilamentProfileImportResponse(BaseModel):
     name: str = Field(description="Profile name.")
     filament_type: str = Field(description="Filament material type.", examples=["PLA"])
     message: str = Field(description="Status message.")
+
+
+class FilamentProfileImportPreview(BaseModel):
+    """Resolved filament profile preview before saving."""
+
+    setting_id: str = Field(description="Profile identifier.")
+    filament_id: str = Field(description="Filament identifier used for AMS assignment.")
+    name: str = Field(description="Profile name.")
+    filament_type: str = Field(description="Resolved filament material type.", examples=["PLA"])
+    resolved_payload: dict = Field(description="Fully materialized filament profile JSON to be saved.")

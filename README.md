@@ -63,6 +63,12 @@ Imports a filament profile JSON and returns the normalized profile identity.
 For imports that rely on `inherits` and do not provide a direct `filament_id`,
 the API assigns a new custom `filament_id` for AMS linkage.
 
+### `POST /profiles/filaments/resolve-import`
+
+Resolves a filament import payload through inheritance without saving it.
+Returns the materialized payload, including the resolved `filament_id` and `filament_type`,
+so clients can validate or override fields before calling `POST /profiles/filaments`.
+
 ### `POST /slice`
 
 Slices a `.3mf` file. Accepts multipart form data:

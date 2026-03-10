@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ from starlette.responses import StreamingResponse
 from .config import USER_PROFILES_DIR, VERSION
 from .models import (
     FilamentProfile,
+    FilamentProfileImportPreview,
     FilamentProfileImportResponse,
     HealthResponse,
     MachineProfile,
@@ -76,6 +78,23 @@ async def slicing_error_handler(request, exc: SlicingError):
     )
 
 
+def _read_filament_import_body(data: Any) -> tuple[dict | None, JSONResponse | None]:
+    if not isinstance(data, dict):
+        return None, JSONResponse(status_code=400, content={"error": "Body must be a JSON object."})
+
+    name = data.get("name")
+    if not name or not isinstance(name, str):
+        return None, JSONResponse(status_code=400, content={"error": "Missing or invalid 'name' field."})
+
+    try:
+        return materialize_filament_import(data), None
+    except (ProfileNotFoundError, ValueError) as exc:
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": str(exc)},
+        )
+
+
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health():
     """Check that the API is running and return its version."""
@@ -121,6 +140,35 @@ async def list_plate_types():
 
 
 @app.post(
+    "/profiles/filaments/resolve-import",
+    response_model=FilamentProfileImportPreview,
+    tags=["Profiles"],
+)
+async def resolve_filament_import(request: Request):
+    """Resolve a filament import payload without saving it."""
+    try:
+        raw_data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
+
+    data, error_response = _read_filament_import_body(raw_data)
+    if error_response is not None or data is None:
+        return error_response
+
+    filament_type = data.get("filament_type", "")
+    if isinstance(filament_type, list):
+        filament_type = filament_type[0] if filament_type else ""
+
+    return FilamentProfileImportPreview(
+        setting_id=data["setting_id"],
+        filament_id=str(data.get("filament_id", "")),
+        name=str(data.get("name", "")),
+        filament_type=str(filament_type or ""),
+        resolved_payload=data,
+    )
+
+
+@app.post(
     "/profiles/filaments",
     response_model=FilamentProfileImportResponse,
     status_code=201,
@@ -133,20 +181,9 @@ async def import_filament_profile(request: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
 
-    if not isinstance(data, dict):
-        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object."})
-
-    name = data.get("name")
-    if not name or not isinstance(name, str):
-        return JSONResponse(status_code=400, content={"error": "Missing or invalid 'name' field."})
-
-    try:
-        data = materialize_filament_import(data)
-    except (ProfileNotFoundError, ValueError) as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": str(exc)},
-        )
+    data, error_response = _read_filament_import_body(data)
+    if error_response is not None or data is None:
+        return error_response
 
     setting_id = data["setting_id"]
 
@@ -164,9 +201,9 @@ async def import_filament_profile(request: Request):
     return FilamentProfileImportResponse(
         setting_id=setting_id,
         filament_id=str(data.get("filament_id", "")),
-        name=name,
+        name=str(data.get("name", "")),
         filament_type=filament_type,
-        message=f"Profile '{name}' imported successfully.",
+        message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
     )
 
 
