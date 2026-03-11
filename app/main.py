@@ -34,6 +34,7 @@ from .profiles import (
     load_all_profiles,
     materialize_filament_import,
 )
+from .slice_request import parse_filament_profile_ids
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
     SUPPORTED_PLATE_TYPES,
@@ -241,7 +242,11 @@ async def slice_file(
     machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
     process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
     filament_profiles: str = Form(
-        description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
+        description=(
+            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
+            "or a JSON object mapping project filament indexes to setting_ids or "
+            "to `{profile_setting_id, tray_slot}` selections."
+        ),
         examples=['["GFL99"]'],
     ),
     plate_type: str | None = Form(
@@ -258,20 +263,13 @@ async def slice_file(
 
     Returns the sliced `.3mf` archive containing G-code.
     """
-    # Parse filament_profiles JSON list
-    try:
-        filament_ids = json.loads(filament_profiles)
-        if not isinstance(filament_ids, list):
-            raise ValueError
-    except (json.JSONDecodeError, ValueError):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "filament_profiles must be a JSON-encoded list of setting_id strings"},
-        )
-
     file_bytes = await file.read()
     if not file_bytes:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, file_bytes)
+    if error_message is not None or filament_ids is None:
+        return JSONResponse(status_code=400, content={"error": error_message})
 
     if plate_type is not None:
         plate_type = plate_type.strip().lower()
@@ -321,7 +319,11 @@ async def slice_file_stream(
     machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
     process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
     filament_profiles: str = Form(
-        description='JSON array of filament setting_ids, e.g. `["GFL99"]`.',
+        description=(
+            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
+            "or a JSON object mapping project filament indexes to setting_ids or "
+            "to `{profile_setting_id, tray_slot}` selections."
+        ),
         examples=['["GFL99"]'],
     ),
     plate_type: str | None = Form(
@@ -339,19 +341,13 @@ async def slice_file_stream(
     Returns an SSE stream with event types: `status`, `progress`, `result`, `error`, `done`.
     The `result` event contains the sliced file as base64.
     """
-    try:
-        filament_ids = json.loads(filament_profiles)
-        if not isinstance(filament_ids, list):
-            raise ValueError
-    except (json.JSONDecodeError, ValueError):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "filament_profiles must be a JSON-encoded list of setting_id strings"},
-        )
-
     file_bytes = await file.read()
     if not file_bytes:
         return JSONResponse(status_code=400, content={"error": "Empty file"})
+
+    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, file_bytes)
+    if error_message is not None or filament_ids is None:
+        return JSONResponse(status_code=400, content={"error": error_message})
 
     if plate_type is not None:
         plate_type = plate_type.strip().lower()

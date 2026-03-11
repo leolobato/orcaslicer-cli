@@ -45,6 +45,12 @@ _CLAMP_RULES = {
     "wall_filament": 1,
 }
 
+# Filament slot/material identity comes from the explicit filament profiles
+# loaded for the slice, not from embedded process settings in the source 3MF.
+_NON_TRANSFERABLE_PROCESS_KEYS = {
+    "default_filament_profile",
+}
+
 
 @dataclass
 class SettingsTransferResult:
@@ -86,7 +92,7 @@ def _diff_3mf_settings(
     """
     diffs: dict[str, tuple[Any, Any]] = {}
     for key, tv in threemf_settings.items():
-        if key in _PROFILE_META_KEYS:
+        if key in _PROFILE_META_KEYS or not _is_transferable_process_key(key):
             continue
         if key not in original_profile:
             # Setting exists in 3MF but not in original profile — treat as customization
@@ -109,7 +115,12 @@ def _apply_customizations(
     """
     overrides = {}
     for k in customized_keys:
-        if k not in threemf_settings or k not in process_profile or k in _PROFILE_META_KEYS:
+        if (
+            k not in threemf_settings
+            or k not in process_profile
+            or k in _PROFILE_META_KEYS
+            or not _is_transferable_process_key(k)
+        ):
             continue
         pv = process_profile[k]
         tv = threemf_settings[k]
@@ -134,6 +145,17 @@ class SlicingError(Exception):
     def __init__(self, message: str, orca_output: str | None = None):
         super().__init__(message)
         self.orca_output = orca_output
+
+
+def _is_transferable_process_key(key: str) -> bool:
+    """Return True when a 3MF setting is safe to copy onto a target process profile."""
+    if key in _NON_TRANSFERABLE_PROCESS_KEYS:
+        return False
+    if key.startswith("filament_"):
+        return False
+    if key.endswith("_filament"):
+        return False
+    return True
 
 
 def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
@@ -181,7 +203,11 @@ def _overlay_3mf_settings(
     """Overlay 3MF project settings onto process profile to preserve user choices."""
     overrides = {}
     for k in process_profile:
-        if k not in threemf_settings or k in _PROFILE_META_KEYS:
+        if (
+            k not in threemf_settings
+            or k in _PROFILE_META_KEYS
+            or not _is_transferable_process_key(k)
+        ):
             continue
         pv = process_profile[k]
         tv = threemf_settings[k]
