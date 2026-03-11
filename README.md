@@ -42,6 +42,13 @@ Set `ams_assignable=true` to return only profiles that are assignable to AMS
 Each filament entry includes `filament_id` (for AMS assignment) and
 `ams_assignable` so clients can filter locally.
 
+When `machine` is provided, duplicate filament families are resolved the same
+way the GUI does for AMS-facing profiles: if Orca's filament library and a
+machine-compatible vendor family share the same inherited base name, the
+machine-compatible family wins. In practice this means Bambu machine-scoped
+results return the same AMS `filament_id`/`tray_info_idx` values the GUI would
+send over MQTT, instead of an Orca-library-only fallback ID.
+
 ### `GET /profiles/plate-types`
 
 Lists supported bed surface types:

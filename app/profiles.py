@@ -11,22 +11,87 @@ from .config import PROFILES_DIR, USER_PROFILES_DIR
 
 logger = logging.getLogger(__name__)
 
+ORCA_FILAMENT_LIBRARY = "OrcaFilamentLibrary"
+
 # Keys stripped from resolved profiles (inheritance metadata).
 # NOTE: "from" must NOT be stripped — OrcaSlicer CLI requires it.
 STRIP_KEYS = {"inherits", "instantiation"}
 
-# Raw profiles loaded at startup: {name: raw_json_data}
+# Raw profiles loaded at startup: {internal_key: raw_json_data}
 _raw_profiles: dict[str, dict[str, Any]] = {}
-# Category map: {name: "machine" | "process" | "filament"}
+# Category map: {internal_key: "machine" | "process" | "filament"}
 _type_map: dict[str, str] = {}
+# Vendor map: {internal_key: vendor_name}
+_vendor_map: dict[str, str] = {}
+# Display-name index: {name: [internal_key, ...]}
+_name_index: dict[str, list[str]] = {}
 # Memoized resolved profiles
 _resolved_cache: dict[str, dict[str, Any]] = {}
-# Index: {setting_id (e.g. "GM014"): name}
+# Index: {setting_id (e.g. "GM014"): internal_key}
 _setting_id_index: dict[str, str] = {}
 
 
 class ProfileNotFoundError(Exception):
     pass
+
+
+def _profile_key(vendor_name: str, name: str) -> str:
+    """Return a stable internal key for a loaded profile."""
+    return f"{vendor_name}::{name}"
+
+
+def _display_name(profile_key: str) -> str:
+    """Return the human-readable name for an internal profile key."""
+    raw = _raw_profiles.get(profile_key, {})
+    return str(raw.get("name", profile_key))
+
+
+def _index_profile(profile_key: str, data: dict[str, Any], category: str, vendor_name: str) -> None:
+    """Register a loaded profile in the in-memory indexes."""
+    _raw_profiles[profile_key] = data
+    _type_map[profile_key] = category
+    _vendor_map[profile_key] = vendor_name
+    name = str(data.get("name", profile_key))
+    _name_index.setdefault(name, []).append(profile_key)
+
+    setting_id = str(data.get("setting_id", "")).strip()
+    if setting_id:
+        _setting_id_index[setting_id] = profile_key
+
+
+def _candidate_keys_for_name(name: str, *, category: str | None = None) -> list[str]:
+    """Return loaded profile keys that share the exact display name."""
+    keys = _name_index.get(name, [])
+    if category is None:
+        return list(keys)
+    return [key for key in keys if _type_map.get(key) == category]
+
+
+def _prefer_same_vendor(
+    keys: list[str],
+    *,
+    preferred_vendor: str | None,
+) -> list[str]:
+    """Sort candidate keys so the matching vendor is preferred first."""
+    if not preferred_vendor:
+        return list(keys)
+    preferred = [key for key in keys if _vendor_map.get(key) == preferred_vendor]
+    fallback = [key for key in keys if _vendor_map.get(key) != preferred_vendor]
+    return preferred + fallback
+
+
+def _select_profile_key_by_name(
+    name: str,
+    *,
+    category: str | None = None,
+    preferred_vendor: str | None = None,
+) -> str | None:
+    """Select one loaded profile key for a display name."""
+    keys = _candidate_keys_for_name(name, category=category)
+    if not keys:
+        return None
+    ordered = _prefer_same_vendor(keys, preferred_vendor=preferred_vendor)
+    return ordered[0] if ordered else None
 
 
 def _detect_profile_type(data: dict[str, Any]) -> str:
@@ -87,17 +152,17 @@ def _is_ams_assignable_filament(
 def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
     """Return known (logical_filament_name, filament_id) pairs from loaded profiles."""
     pairs: list[tuple[str, str]] = []
-    for name, raw in _raw_profiles.items():
-        if _type_map.get(name) != "filament":
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != "filament":
             continue
 
-        profile_name = str(raw.get("name", name))
+        profile_name = str(raw.get("name", _display_name(profile_key)))
         logical_name = _logical_filament_name(profile_name)
 
         # Prefer the raw profile's id; fallback to the resolved chain id.
         filament_id = _extract_filament_id(raw)
         if not filament_id:
-            resolved = resolve_profile_by_name(name)
+            resolved = resolve_profile_by_name(profile_key)
             if resolved:
                 filament_id = _extract_filament_id(resolved)
 
@@ -138,7 +203,7 @@ def _resolve_filament_parent_ref(parent_ref: str) -> str | None:
     by_setting_id = _name_for_slug(parent_ref)
     if by_setting_id and _type_map.get(by_setting_id) == "filament":
         return by_setting_id
-    return None
+    return _select_profile_key_by_name(parent_ref, category="filament")
 
 
 def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
@@ -231,14 +296,13 @@ def _load_user_profiles() -> int:
             logger.warning("Skipping user profile %s: missing 'name' field", fname)
             continue
 
-        category = _detect_profile_type(data)
-        _raw_profiles[name] = data
-        _type_map[name] = category
-
         # Use setting_id if present, otherwise use name as identifier
         if "setting_id" not in data:
             data["setting_id"] = name
-        _setting_id_index[data["setting_id"]] = name
+
+        category = _detect_profile_type(data)
+        profile_key = _profile_key("User", str(name))
+        _index_profile(profile_key, data, category, "User")
 
         count += 1
         logger.info("Loaded user %s profile: %s", category, name)
@@ -308,13 +372,20 @@ def load_all_profiles() -> dict[str, int]:
     """
     _raw_profiles.clear()
     _type_map.clear()
+    _vendor_map.clear()
+    _name_index.clear()
     _resolved_cache.clear()
     _setting_id_index.clear()
 
     vendor_dirs: list[tuple[str, str]] = []  # (vendor_name, vendor_dir)
 
     # Discover all vendor index files in PROFILES_DIR
-    for fname in sorted(os.listdir(PROFILES_DIR)):
+    index_files = sorted(fname for fname in os.listdir(PROFILES_DIR) if fname.endswith(".json"))
+    if f"{ORCA_FILAMENT_LIBRARY}.json" in index_files:
+        index_files.remove(f"{ORCA_FILAMENT_LIBRARY}.json")
+        index_files.insert(0, f"{ORCA_FILAMENT_LIBRARY}.json")
+
+    for fname in index_files:
         if not fname.endswith(".json"):
             continue
         vendor_name = fname[:-5]  # e.g. "BBL", "Creality"
@@ -328,38 +399,46 @@ def load_all_profiles() -> dict[str, int]:
             index = json.load(f)
 
         v_profiles, v_type_map = _load_vendor_profiles(vendor_dir, index)
-        _raw_profiles.update(v_profiles)
-        _type_map.update(v_type_map)
+        for profile_name, data in v_profiles.items():
+            profile_key = _profile_key(vendor_name, profile_name)
+            _index_profile(profile_key, data, v_type_map[profile_name], vendor_name)
         vendor_dirs.append((vendor_name, vendor_dir))
-
-    # Build setting_id index
-    for name, data in _raw_profiles.items():
-        if "setting_id" in data:
-            _setting_id_index[data["setting_id"]] = name
 
     # Follow inherits chains to discover unlisted base profiles
     # Search across ALL vendor dirs for parent profiles
     pending = list(_raw_profiles.keys())
     while pending:
         next_batch = []
-        for name in pending:
-            parent_name = _raw_profiles[name].get("inherits")
-            if not parent_name or parent_name in _raw_profiles:
+        for profile_key in pending:
+            parent_name = _raw_profiles[profile_key].get("inherits")
+            if not parent_name:
                 continue
-            ptype = _type_map.get(name, "")
+            ptype = _type_map.get(profile_key, "")
             if not ptype:
                 continue
-            for vendor_name, vdir in vendor_dirs:
+            preferred_vendor = _vendor_map.get(profile_key, "")
+            existing_parent_key = _select_profile_key_by_name(
+                parent_name,
+                category=ptype,
+                preferred_vendor=preferred_vendor,
+            )
+            if existing_parent_key and _vendor_map.get(existing_parent_key) == preferred_vendor:
+                continue
+            ordered_vendor_dirs = sorted(
+                vendor_dirs,
+                key=lambda item: (item[0] != preferred_vendor, item[0] != ORCA_FILAMENT_LIBRARY, item[0]),
+            )
+            for vendor_name, vdir in ordered_vendor_dirs:
                 path = os.path.join(vdir, ptype, f"{parent_name}.json")
                 if os.path.isfile(path):
                     with open(path) as f:
                         data = json.load(f)
                     actual_name = data.get("name", parent_name)
-                    _raw_profiles[actual_name] = data
-                    _type_map[actual_name] = ptype
-                    if "setting_id" in data:
-                        _setting_id_index[data["setting_id"]] = actual_name
-                    next_batch.append(actual_name)
+                    parent_key = _profile_key(vendor_name, actual_name)
+                    if parent_key in _raw_profiles:
+                        break
+                    _index_profile(parent_key, data, ptype, vendor_name)
+                    next_batch.append(parent_key)
                     break
         pending = next_batch
 
@@ -388,16 +467,29 @@ def load_all_profiles() -> dict[str, int]:
 
 def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
     """Resolve a single profile's inheritance chain, with memoization."""
-    if name in _resolved_cache:
-        return _resolved_cache[name]
+    profile_key = name if name in _raw_profiles else _select_profile_key_by_name(name)
+    if profile_key is None:
+        return None
 
-    profile = _raw_profiles.get(name)
+    if profile_key in _resolved_cache:
+        return _resolved_cache[profile_key]
+
+    profile = _raw_profiles.get(profile_key)
     if profile is None:
         return None
 
     parent_name = profile.get("inherits")
-    if parent_name and parent_name in _raw_profiles:
-        parent = resolve_profile_by_name(parent_name)
+    if parent_name:
+        parent_key = _select_profile_key_by_name(
+            parent_name,
+            category=_type_map.get(profile_key),
+            preferred_vendor=_vendor_map.get(profile_key),
+        )
+    else:
+        parent_key = None
+
+    if parent_key:
+        parent = resolve_profile_by_name(parent_key)
         if parent is not None:
             merged = dict(parent)
             merged.update(profile)
@@ -406,7 +498,7 @@ def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
     else:
         merged = dict(profile)
 
-    _resolved_cache[name] = merged
+    _resolved_cache[profile_key] = merged
     return merged
 
 
@@ -433,10 +525,10 @@ def _machine_names_for_slug(machine_slug: str) -> set[str]:
     "Bambu Lab A1 0.4 nozzle". But for filtering compatible_printers we
     return all machine names that share the same printer_model+nozzle combo.
     """
-    name = _name_for_slug(machine_slug)
-    if not name:
+    profile_key = _name_for_slug(machine_slug)
+    if not profile_key:
         return set()
-    return {name}
+    return {_display_name(profile_key)}
 
 
 def get_profile(category: str, slug: str) -> dict[str, Any]:
@@ -461,20 +553,20 @@ def get_profile(category: str, slug: str) -> dict[str, Any]:
 def get_machine_profiles() -> list[dict[str, Any]]:
     """Return resolved leaf machine profiles."""
     results = []
-    for name, raw in _raw_profiles.items():
-        if _type_map.get(name) != "machine":
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != "machine":
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(name)
+        resolved = resolve_profile_by_name(profile_key)
         if resolved is None:
             continue
         nozzle = resolved.get("nozzle_diameter", ["0.4"])
         if isinstance(nozzle, list):
             nozzle = nozzle[0] if nozzle else "0.4"
         results.append({
-            "setting_id": _slug_for_profile(name),
-            "name": resolved.get("name", name),
+            "setting_id": _slug_for_profile(profile_key),
+            "name": resolved.get("name", _display_name(profile_key)),
             "nozzle_diameter": nozzle,
             "printer_model": resolved.get("printer_model", ""),
         })
@@ -495,12 +587,12 @@ def get_process_profiles(
             )
 
     results = []
-    for name, raw in _raw_profiles.items():
-        if _type_map.get(name) != "process":
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != "process":
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(name)
+        resolved = resolve_profile_by_name(profile_key)
         if resolved is None:
             continue
 
@@ -512,16 +604,17 @@ def get_process_profiles(
         # Map compatible_printers names to vendor-prefixed slugs
         compat_slugs = []
         for cp_name in resolved.get("compatible_printers", []):
-            if cp_name in _raw_profiles:
-                compat_slugs.append(_slug_for_profile(cp_name))
+            cp_key = _select_profile_key_by_name(cp_name, category="machine")
+            if cp_key:
+                compat_slugs.append(_slug_for_profile(cp_key))
 
         layer_height = resolved.get("layer_height", "")
         if isinstance(layer_height, list):
             layer_height = layer_height[0] if layer_height else ""
 
         results.append({
-            "setting_id": _slug_for_profile(name),
-            "name": resolved.get("name", name),
+            "setting_id": _slug_for_profile(profile_key),
+            "name": resolved.get("name", _display_name(profile_key)),
             "compatible_printers": compat_slugs,
             "layer_height": layer_height,
         })
@@ -543,15 +636,15 @@ def get_filament_profiles(
             )
 
     results = []
-    for name, raw in _raw_profiles.items():
-        if _type_map.get(name) != "filament":
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != "filament":
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(name)
+        resolved = resolve_profile_by_name(profile_key)
         if resolved is None:
             continue
-        setting_id = _slug_for_profile(name)
+        setting_id = _slug_for_profile(profile_key)
         ams_assignable = _is_ams_assignable_filament(
             raw,
             resolved,
@@ -568,8 +661,9 @@ def get_filament_profiles(
         # Map compatible_printers names to vendor-prefixed slugs
         compat_slugs = []
         for cp_name in resolved.get("compatible_printers", []):
-            if cp_name in _raw_profiles:
-                compat_slugs.append(_slug_for_profile(cp_name))
+            cp_key = _select_profile_key_by_name(cp_name, category="machine")
+            if cp_key:
+                compat_slugs.append(_slug_for_profile(cp_key))
 
         filament_type = resolved.get("filament_type", [""])[0] if isinstance(
             resolved.get("filament_type"), list
@@ -581,7 +675,7 @@ def get_filament_profiles(
         results.append({
             "setting_id": setting_id,
             "filament_id": filament_id,
-            "name": resolved.get("name", name),
+            "name": resolved.get("name", _display_name(profile_key)),
             "compatible_printers": compat_slugs,
             "filament_type": filament_type,
             "ams_assignable": ams_assignable,
