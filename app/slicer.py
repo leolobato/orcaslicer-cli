@@ -56,6 +56,7 @@ _NON_TRANSFERABLE_PROCESS_KEYS = {
 class SettingsTransferResult:
     status: str  # "applied", "no_original_profile", "no_customizations", "no_3mf_settings"
     transferred: list[dict[str, str]] = field(default_factory=list)
+    customized_keys: set[str] = field(default_factory=set)
 
 
 def _normalize_for_comparison(value: Any) -> str:
@@ -158,6 +159,21 @@ def _is_transferable_process_key(key: str) -> bool:
     return True
 
 
+def _extract_declared_customizations(threemf_settings: dict[str, Any]) -> set[str]:
+    """Extract process-level keys explicitly marked as customized via different_settings_to_system.
+
+    OrcaSlicer stores this as a list where the first element is a semicolon-separated
+    string of process setting keys that differ from the system profile.
+    """
+    diff_to_system = threemf_settings.get("different_settings_to_system")
+    if not isinstance(diff_to_system, list) or not diff_to_system:
+        return set()
+    process_diffs = diff_to_system[0]
+    if not isinstance(process_diffs, str) or not process_diffs.strip():
+        return set()
+    return {k.strip() for k in process_diffs.split(";") if k.strip()}
+
+
 def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
     """Fix invalid parameter values in a 3MF's project_settings."""
     settings_file = "Metadata/project_settings.config"
@@ -225,22 +241,39 @@ def _overlay_3mf_settings(
 
 
 def _smart_settings_transfer(
-    process_profile: dict[str, Any], threemf_settings: dict[str, Any],
+    process_profile: dict[str, Any],
+    threemf_settings: dict[str, Any],
+    declared_customized_keys: set[str] | None = None,
 ) -> tuple[dict[str, Any], SettingsTransferResult]:
     """Transfer only user-customized settings from 3MF onto the process profile.
 
     Falls back to full overlay when we can't determine the original profile.
+    ``declared_customized_keys`` are process keys from the 3MF's
+    ``different_settings_to_system`` — they supplement the diff-based detection.
     """
     if not threemf_settings:
         logger.debug("No 3MF settings to transfer")
         return process_profile, SettingsTransferResult(status="no_3mf_settings")
+
+    # Filter declared keys to only those that are actually transferable and
+    # present in both the 3MF settings and the target process profile.
+    safe_declared = {
+        k for k in (declared_customized_keys or set())
+        if k in threemf_settings
+        and k in process_profile
+        and k not in _PROFILE_META_KEYS
+        and _is_transferable_process_key(k)
+    }
 
     print_settings_id = threemf_settings.get("print_settings_id")
     if not print_settings_id:
         logger.debug("No print_settings_id in 3MF, falling back to full overlay")
         return (
             _overlay_3mf_settings(process_profile, threemf_settings),
-            SettingsTransferResult(status="no_3mf_settings"),
+            SettingsTransferResult(
+                status="no_3mf_settings",
+                customized_keys=safe_declared,
+            ),
         )
 
     original_profile = resolve_profile_by_name(print_settings_id)
@@ -251,32 +284,51 @@ def _smart_settings_transfer(
         )
         return (
             _overlay_3mf_settings(process_profile, threemf_settings),
-            SettingsTransferResult(status="no_original_profile"),
+            SettingsTransferResult(
+                status="no_original_profile",
+                customized_keys=safe_declared,
+            ),
         )
 
     diffs = _diff_3mf_settings(threemf_settings, original_profile)
-    if not diffs:
+
+    # Union diff-detected keys with explicitly declared customizations
+    all_customized = set(diffs.keys()) | safe_declared
+
+    if not all_customized:
         logger.info("No customizations detected in 3MF vs original profile %r", print_settings_id)
         return process_profile, SettingsTransferResult(status="no_customizations")
 
-    updated, applied_keys = _apply_customizations(process_profile, threemf_settings, set(diffs.keys()))
+    updated, applied_keys = _apply_customizations(process_profile, threemf_settings, all_customized)
     if not applied_keys:
         logger.info(
             "Detected %d customization(s) in 3MF vs %r but none apply to the target profile",
-            len(diffs), print_settings_id,
+            len(all_customized), print_settings_id,
         )
         return process_profile, SettingsTransferResult(status="no_customizations")
 
+    diff_count = len(diffs)
+    declared_count = len(declared_customized_keys or set())
     logger.info(
-        "Applied %d customization(s) from 3MF (of %d detected) vs original profile %r: %s",
-        len(applied_keys), len(diffs), print_settings_id, list(applied_keys),
+        "Applied %d customization(s) from 3MF (%d detected, %d declared) vs original profile %r: %s",
+        len(applied_keys), diff_count, declared_count, print_settings_id, list(applied_keys),
     )
     transferred = [
         {"key": k, "value": json.dumps(tv), "original": json.dumps(ov)}
         for k, (tv, ov) in diffs.items()
         if k in applied_keys
     ]
-    return updated, SettingsTransferResult(status="applied", transferred=transferred)
+    # Include declared-only keys (not caught by diff) that were successfully applied
+    for k in applied_keys:
+        if k not in diffs:
+            tv = threemf_settings.get(k)
+            ov = original_profile.get(k)
+            transferred.append({
+                "key": k, "value": json.dumps(tv), "original": json.dumps(ov),
+            })
+    return updated, SettingsTransferResult(
+        status="applied", transferred=transferred, customized_keys=applied_keys,
+    )
 
 
 def _sse_event(event_type: str, data: dict) -> str:
@@ -374,21 +426,27 @@ def _prepare_slice(
     with open(input_path, "wb") as f:
         f.write(file_bytes)
 
+    # Extract values before machine-key filter (these may be present in both
+    # machine and process contexts and would otherwise be incorrectly excluded).
+    declared_customizations = _extract_declared_customizations(threemf_settings)
+    raw_bed_type = threemf_settings.get("curr_bed_type")
+
     threemf_settings = {
         k: v for k, v in threemf_settings.items()
         if k not in machine_profile or k in _PROFILE_META_KEYS
     }
 
-    transfer_result = _smart_settings_transfer(process_profile, threemf_settings)
+    transfer_result = _smart_settings_transfer(
+        process_profile, threemf_settings, declared_customizations,
+    )
     process_profile = transfer_result[0]
     settings_transfer = transfer_result[1]
 
     # Request value takes priority; otherwise preserve 3MF-selected bed type.
     effective_plate_type = plate_type
     if not effective_plate_type:
-        bed_type_from_3mf = threemf_settings.get("curr_bed_type")
-        if isinstance(bed_type_from_3mf, str) and bed_type_from_3mf:
-            effective_plate_type = bed_type_from_3mf
+        if isinstance(raw_bed_type, str) and raw_bed_type:
+            effective_plate_type = raw_bed_type
     if effective_plate_type:
         process_profile["curr_bed_type"] = effective_plate_type
 
@@ -448,6 +506,54 @@ def _prepare_slice(
     )
 
 
+def _patch_output_settings(result_path: str, customized_keys: set[str]) -> None:
+    """Ensure transferred keys appear in the output 3MF's different_settings_to_system.
+
+    OrcaSlicer CLI computes different_settings_to_system against the loaded profile
+    (which already has customizations baked in), so transferred keys are missing.
+    The GUI then falls back to system-profile defaults for those keys.  Patching
+    the field after slicing ensures the user's customizations are visible when
+    reopening the file in OrcaSlicer.
+    """
+    if not customized_keys:
+        return
+
+    settings_file = "Metadata/project_settings.config"
+
+    with zipfile.ZipFile(result_path, "r") as zf:
+        if settings_file not in zf.namelist():
+            return
+        raw = zf.read(settings_file).decode()
+
+    settings = json.loads(raw)
+    diff_to_system = settings.get("different_settings_to_system", [])
+    if not isinstance(diff_to_system, list) or not diff_to_system:
+        diff_to_system = [""]
+
+    existing = {k.strip() for k in diff_to_system[0].split(";") if k.strip()} \
+        if isinstance(diff_to_system[0], str) else set()
+    merged = existing | customized_keys
+    if merged == existing:
+        return  # nothing to add
+
+    diff_to_system[0] = ";".join(sorted(merged))
+    settings["different_settings_to_system"] = diff_to_system
+
+    tmp_path = result_path + ".tmp"
+    with zipfile.ZipFile(result_path, "r") as zf_in:
+        with zipfile.ZipFile(tmp_path, "w") as zf_out:
+            for item in zf_in.infolist():
+                if item.filename == settings_file:
+                    zf_out.writestr(item.filename, json.dumps(settings, indent=2))
+                else:
+                    zf_out.writestr(item, zf_in.read(item.filename))
+    os.replace(tmp_path, result_path)
+    logger.debug(
+        "Patched different_settings_to_system with %d key(s): %s",
+        len(merged - existing), sorted(merged - existing),
+    )
+
+
 def _post_process(ctx: SliceContext, orca_output: str | None = None) -> bytes:
     """Read the sliced result and inject thumbnails."""
     if not os.path.isfile(ctx.result_path):
@@ -456,6 +562,11 @@ def _post_process(ctx: SliceContext, orca_output: str | None = None) -> bytes:
             "OrcaSlicer did not produce output file",
             orca_output=orca_output,
         )
+
+    try:
+        _patch_output_settings(ctx.result_path, ctx.settings_transfer.customized_keys)
+    except Exception:
+        logger.warning("Failed to patch different_settings_to_system; continuing", exc_info=True)
 
     if ctx.original_thumbnails:
         with zipfile.ZipFile(ctx.result_path, "r") as zf:
