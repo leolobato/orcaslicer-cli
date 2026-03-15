@@ -4,13 +4,43 @@ A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to p
 
 ## Quick Start
 
+### Using the pre-built image (recommended)
+
 ```bash
+docker run -d -p 8000:8000 -v ./data:/data ghcr.io/leolobato/orcaslicer-cli:latest
+```
+
+Or with Docker Compose, create a `docker-compose.yml`:
+
+```yaml
+services:
+  orcaslicer-cli:
+    image: ghcr.io/leolobato/orcaslicer-cli:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+```
+
+Then run:
+
+```bash
+docker compose up
+```
+
+### Building from source
+
+```bash
+git clone https://github.com/leolobato/orcaslicer-cli.git
+cd orcaslicer-cli
 docker compose up --build
 ```
 
-The API will be available at `http://localhost:8000`.
+> **Note:** Building from source takes a while — OrcaSlicer is downloaded and extracted from the official AppImage.
 
-> **Note:** The first build takes a while — OrcaSlicer is downloaded and extracted from the official AppImage.
+---
+
+The API will be available at `http://localhost:8000`.
 
 ## API Endpoints
 
