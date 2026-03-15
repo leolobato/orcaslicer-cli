@@ -122,4 +122,4 @@ Environment variables (set in `docker-compose.yml`):
 
 ## License
 
-MIT
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) — the same license as [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer).
