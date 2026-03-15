@@ -1,0 +1,71 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What This Is
+
+A REST API that wraps OrcaSlicer's CLI to provide headless 3D print slicing. It loads all vendor printer/process/filament profiles from OrcaSlicer's bundled resources, resolves their inheritance chains, and exposes endpoints to list profiles and slice `.3mf` files.
+
+## Build & Run
+
+This is a Docker-only project. OrcaSlicer is compiled from source in the Docker build.
+
+```bash
+docker compose up --build        # build and start on port 8000
+docker compose up                # start (already built)
+```
+
+The API runs via uvicorn at `http://localhost:8000`. There is no local (non-Docker) dev setup — the OrcaSlicer binary and BBL profiles only exist inside the container.
+
+## Testing
+
+```bash
+./test_api.sh                    # smoke tests against running container
+./test_api.sh http://host:port   # test against a different host
+```
+
+Requires example `.3mf` files in `../bambu-poc/` (not included in this repo).
+
+Unit tests exist in `tests/` and can be run with pytest inside the container:
+
+- `test_filament_vendor_resolution.py` — filament inheritance across vendors and machine-scoped ID preference
+- `test_slicer_settings_transfer.py` — filament key exclusion and customization detection
+- `test_slice_request_parsing.py` — legacy list and sparse object filament parsing
+
+## Architecture
+
+**`app/main.py`** — FastAPI app. Endpoints: `GET /health`, `GET /profiles/{machines,processes,filaments}`, `POST /slice`, `POST /slice-stream` (SSE streaming with phase/progress), `POST /profiles/reload` (hot-reload from disk), `POST /profiles/filaments/resolve-import` (preview), `POST /profiles/filaments/import` (save custom filament). The `/slice` endpoint accepts multipart form data with a `.3mf` file and profile setting_ids.
+
+**`app/profiles.py`** — Profile loading and inheritance resolution. At startup (`lifespan`), reads all vendor JSON profiles from disk into five in-memory indexes (`_raw_profiles`, type map, vendor map, name index, setting_id reverse index). Profiles have an `inherits` chain that gets recursively resolved and memoized. Parent lookup prefers same-vendor profiles before searching across vendors. `OrcaFilamentLibrary` loads first so vendor-specific profiles can override it. Only profiles with `instantiation: "true"` are exposed as leaf/selectable profiles. The `compatible_printers` field is mapped from profile names to setting_ids in API responses.
+
+**`app/slicer.py`** — Slicing orchestration. Resolves profiles, writes them as temp JSON files, sanitizes the input 3MF (clamps invalid parameter values via `_CLAMP_RULES`), performs smart settings transfer from the 3MF onto the process profile, then shells out to `orca-slicer` CLI. Serialized to one concurrent slice via `asyncio.Semaphore(1)`. Customization detection uses two mechanisms: diff against resolved original profile, and declared keys from `different_settings_to_system[0]`. Keys starting with `filament_` or ending with `_filament` are never transferred.
+
+**`app/threemf.py`** — 3MF ZIP parsing, model bounding box extraction (affine transform math), build volume validation, multi-plate to single-plate extraction, and thumbnail preservation.
+
+**`app/slice_request.py`** — Parses `filament_profiles` form field. Supports legacy list format (`["GFSA00", "GFL99"]`) and sparse object format (`{"0": "GFSA00", "1": {"profile_setting_id": "GFL99", "tray_slot": 2}}`).
+
+**`app/config.py`** — Paths and version constants. API version format: `{ORCA_VERSION}-{API_REVISION}`.
+
+**`app/models.py`** — Pydantic response models.
+
+## Environment Variables
+
+```
+ORCA_BINARY       = /opt/orcaslicer/bin/orca-slicer
+PROFILES_DIR      = /opt/orcaslicer/profiles
+USER_PROFILES_DIR = /data
+LOG_LEVEL         = INFO
+```
+
+## Key Details
+
+- The `"from"` key in profiles must NOT be stripped during resolution — OrcaSlicer CLI requires it.
+- The slicer injects `G92 E0` into `layer_change_gcode` if not already present (workaround for extrusion issues on relative extrusion printers like all Bambu Lab models).
+- 3MF project settings use smart transfer: when a 3MF contains a `print_settings_id`, the slicer resolves the original profile and diffs the 3MF settings against it, then only transfers user customizations onto the target process profile. Falls back to full overlay when the original profile can't be resolved. The `/slice` response includes `X-Settings-Transfer-Status` (`applied`, `no_original_profile`, `no_customizations`, `no_3mf_settings`) and `X-Settings-Transferred` (JSON array of `{key, value, original}` objects when status is `applied`) headers.
+- Profile `setting_id` values (e.g. `GM014`) are the stable identifiers used across the API (not profile names).
+- Internal profile key format: `"{vendor_name}::{profile_name}"` for stable cross-reload references.
+- Custom filament import generates IDs via `"P" + md5(logical_name)[:7]` with timestamp-based collision fallback.
+- A filament is AMS-assignable only if it has `instantiation: "true"`, a non-empty `setting_id`, and resolves to a non-empty `filament_id`.
+- Plate types map from snake_case API values (`cool_plate`, `engineering_plate`, `high_temp_plate`, `textured_pei_plate`, `textured_cool_plate`, `supertack_plate`) to OrcaSlicer display names written as `curr_bed_type`.
+- Multi-plate 3MFs are auto-extracted to single-plate; cross-printer scenarios trigger auto-arrange.
+- OrcaSlicer version pinned to 2.3.1. The Dockerfile uses an AppImage extraction workaround for arm64 (computes ELF offset instead of `--appimage-extract`).
