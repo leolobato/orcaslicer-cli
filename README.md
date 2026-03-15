@@ -10,87 +10,27 @@ docker compose up --build
 
 The API will be available at `http://localhost:8000`.
 
-> **Note:** The first build takes a while — OrcaSlicer is compiled from source.
+> **Note:** The first build takes a while — OrcaSlicer is downloaded and extracted from the official AppImage.
 
 ## API Endpoints
 
-### `GET /health`
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | API status and version |
+| GET | `/profiles/machines` | List machine profiles (printers) |
+| GET | `/profiles/processes` | List process profiles. Filter: `?machine={setting_id}` |
+| GET | `/profiles/filaments` | List filament profiles. Filter: `?machine={setting_id}&ams_assignable=true` |
+| GET | `/profiles/filaments/{setting_id}` | Fully-resolved filament profile with all inherited fields |
+| GET | `/profiles/plate-types` | List supported bed surface types |
+| POST | `/profiles/filaments` | Import a custom filament profile JSON |
+| POST | `/profiles/filaments/resolve-import` | Preview filament import resolution without saving |
+| POST | `/profiles/reload` | Hot-reload all profiles from disk |
+| POST | `/slice` | Slice a `.3mf` file, returns sliced `.3mf` binary |
+| POST | `/slice-stream` | Same as `/slice` but streams progress via SSE |
 
-Returns API status and version.
+All profile identifiers use `setting_id` values (e.g. `GM014`, `GP004`, `GFSA00`).
 
-```json
-{"status": "ok", "version": "2.3.1-1"}
-```
-
-### `GET /profiles/machines`
-
-Lists available machine profiles (printers).
-
-```json
-[{"setting_id": "GM014", "name": "Bambu Lab P1S 0.4 nozzle", "nozzle_diameter": "0.4", "printer_model": "Bambu Lab P1S"}]
-```
-
-### `GET /profiles/processes?machine={setting_id}`
-
-Lists print process profiles (layer height, speed, etc.). Optionally filter by machine.
-
-### `GET /profiles/filaments?machine={setting_id}&ams_assignable=true|false`
-
-Lists filament profiles. Optionally filter by machine.
-Set `ams_assignable=true` to return only profiles that are assignable to AMS
-(instantiable profile with non-empty `setting_id` and resolved `filament_id`).
-Each filament entry includes `filament_id` (for AMS assignment) and
-`ams_assignable` so clients can filter locally.
-
-When `machine` is provided, duplicate filament families are resolved the same
-way the GUI does for AMS-facing profiles: if Orca's filament library and a
-machine-compatible vendor family share the same inherited base name, the
-machine-compatible family wins. In practice this means Bambu machine-scoped
-results return the same AMS `filament_id`/`tray_info_idx` values the GUI would
-send over MQTT, instead of an Orca-library-only fallback ID.
-
-### `GET /profiles/plate-types`
-
-Lists supported bed surface types:
-
-```json
-[
-  {"value": "cool_plate", "label": "Cool Plate"},
-  {"value": "engineering_plate", "label": "Engineering Plate"},
-  {"value": "high_temp_plate", "label": "High Temp Plate"},
-  {"value": "textured_pei_plate", "label": "Textured PEI Plate"},
-  {"value": "textured_cool_plate", "label": "Textured Cool Plate"},
-  {"value": "supertack_plate", "label": "Supertack Plate"}
-]
-```
-
-### `POST /profiles/filaments`
-
-Imports a filament profile JSON and returns the normalized profile identity.
-For imports that rely on `inherits` and do not provide a direct `filament_id`,
-the API assigns a new custom `filament_id` for AMS linkage.
-
-### `POST /profiles/filaments/resolve-import`
-
-Resolves a filament import payload through inheritance without saving it.
-Returns the materialized payload, including the resolved `filament_id` and `filament_type`,
-so clients can validate or override fields before calling `POST /profiles/filaments`.
-
-### `POST /slice`
-
-Slices a `.3mf` file. Accepts multipart form data:
-
-| Field | Description |
-|---|---|
-| `file` | The `.3mf` file to slice |
-| `machine_profile` | Machine setting_id (e.g., `GM014`) |
-| `process_profile` | Process setting_id (e.g., `GP004`) |
-| `filament_profiles` | JSON array of filament setting_ids (e.g., `["GFSA00"]`) |
-| `plate_type` | Optional snake_case bed surface value (from `/profiles/plate-types`, e.g. `textured_pei_plate`) |
-
-Returns the sliced `.3mf` file as a binary download.
-
-**Example:**
+### Slicing example
 
 ```bash
 curl -o sliced.3mf \
@@ -101,6 +41,30 @@ curl -o sliced.3mf \
   -F 'filament_profiles=["GFSA00"]' \
   http://localhost:8000/slice
 ```
+
+### Custom filament import
+
+You can import custom filament profiles that inherit from any built-in profile. The API resolves the full inheritance chain, merges parent fields, and produces a standalone profile ready for slicing.
+
+**Payload:**
+
+```json
+{
+  "name": "My Custom PLA",
+  "inherits": "Bambu PLA Basic @BBL P1S",
+  "nozzle_temperature": [230]
+}
+```
+
+Only `name` is required. Any field you provide overrides the inherited value.
+
+**Inheritance resolution** works recursively — if a parent itself inherits from another profile, the full chain is walked and merged. When multiple vendors define a profile with the same name, the resolver prefers the same vendor as the child profile before falling back to others.
+
+**ID generation:** If no `setting_id` is provided, it defaults to `name`. If no `filament_id` is provided, one is auto-generated as `"P" + md5(name)[:7]` with collision fallback.
+
+**Preview before saving:** Use `POST /profiles/filaments/resolve-import` to see the fully materialized profile (including resolved `filament_id` and `filament_type`) without persisting it. Then call `POST /profiles/filaments` to save.
+
+**AMS assignability:** A filament is assignable to the AMS when it has `instantiation: "true"`, a non-empty `setting_id`, and a resolved `filament_id`. Imported profiles meet these criteria automatically.
 
 ## Testing
 
@@ -118,7 +82,9 @@ Environment variables (set in `docker-compose.yml`):
 | Variable | Default | Description |
 |---|---|---|
 | `ORCA_BINARY` | `/opt/orcaslicer/bin/orca-slicer` | Path to OrcaSlicer binary |
-| `PROFILES_DIR` | `/opt/orcaslicer/profiles/BBL` | Path to BBL profile directory |
+| `PROFILES_DIR` | `/opt/orcaslicer/profiles` | Path to vendor profile directory |
+| `USER_PROFILES_DIR` | `/data` | Path for imported/custom profiles |
+| `LOG_LEVEL` | `INFO` | Logging level |
 
 ## License
 
