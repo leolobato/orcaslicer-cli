@@ -36,6 +36,18 @@ SUPPORTED_PLATE_TYPES = tuple(PLATE_TYPE_API_TO_ORCA.keys())
 # Keys that are profile metadata, not slicer settings
 _PROFILE_META_KEYS = {"name", "from", "inherits", "version", "type", "setting_id"}
 
+# Valid values for parameter overrides
+VALID_INFILL_PATTERNS = frozenset({
+    "grid", "line", "cubic", "cubicsubdiv", "gyroid", "lightning",
+    "honeycomb", "3dhoneycomb", "rectilinear", "monotonic", "monotoniclines",
+    "alignedrectilinear", "hilbertcurve", "archimedeanchords",
+    "octagramspiral", "supportcubic", "adaptivecubic",
+})
+VALID_SUPPORT_TYPES = frozenset({"normal", "tree", "none"})
+VALID_BRIM_TYPES = frozenset({
+    "auto_brim", "outer_only", "inner_only", "outer_and_inner", "no_brim",
+})
+
 # Parameters that must be clamped to a minimum value
 _CLAMP_RULES = {
     "raft_first_layer_expansion": 0,
@@ -365,6 +377,63 @@ def _detect_orca_phase(line: str) -> tuple[str, str] | None:
     return None
 
 
+def _apply_parameter_overrides(
+    process_profile: dict[str, Any],
+    overrides: dict[str, Any],
+) -> tuple[dict[str, Any], set[str]]:
+    """Apply explicit API parameter overrides onto the process profile.
+
+    Returns (updated_profile, set_of_applied_keys).
+    All values are formatted to match OrcaSlicer's internal conventions.
+    """
+    applied: dict[str, Any] = {}
+
+    if "layer_height" in overrides:
+        val = str(overrides["layer_height"])
+        applied["layer_height"] = val
+        # initial_layer_print_height often matches layer_height
+        if "initial_layer_print_height" in process_profile:
+            cur = float(process_profile["initial_layer_print_height"])
+            new = float(val)
+            if new > cur:
+                applied["initial_layer_print_height"] = val
+
+    if "sparse_infill_density" in overrides:
+        applied["sparse_infill_density"] = f"{int(overrides['sparse_infill_density'])}%"
+
+    if "sparse_infill_pattern" in overrides:
+        applied["sparse_infill_pattern"] = overrides["sparse_infill_pattern"]
+
+    if "wall_loops" in overrides:
+        applied["wall_loops"] = str(overrides["wall_loops"])
+
+    if "top_shell_layers" in overrides:
+        applied["top_shell_layers"] = str(overrides["top_shell_layers"])
+
+    if "bottom_shell_layers" in overrides:
+        applied["bottom_shell_layers"] = str(overrides["bottom_shell_layers"])
+
+    if "brim_type" in overrides:
+        applied["brim_type"] = overrides["brim_type"]
+
+    if "support_type" in overrides:
+        st = overrides["support_type"]
+        if st == "none":
+            applied["enable_support"] = "0"
+        elif st == "normal":
+            applied["enable_support"] = "1"
+            applied["support_type"] = "normal(auto)"
+        elif st == "tree":
+            applied["enable_support"] = "1"
+            applied["support_type"] = "tree(auto)"
+
+    if not applied:
+        return process_profile, set()
+
+    logger.info("Applying %d parameter override(s): %s", len(applied), list(applied.keys()))
+    return {**process_profile, **applied}, set(applied.keys())
+
+
 @dataclass
 class SliceContext:
     tmpdir: str
@@ -381,8 +450,22 @@ def _prepare_slice(
     filament_profiles: list[dict[str, Any]],
     plate_type: str | None,
     tmpdir: str,
+    process_overrides: dict[str, Any] | None = None,
+    file_type: str = "3mf",
 ) -> SliceContext:
     """Prepare all inputs for slicing: extract settings, write temp files, build CLI command."""
+    # Convert STL to 3MF if needed
+    if file_type == "stl":
+        from .stl_to_3mf import stl_to_3mf
+
+        volume = get_build_volume(machine_profile)
+        if volume:
+            bed_cx, bed_cy = volume[0] / 2, volume[1] / 2
+        else:
+            bed_cx, bed_cy = 128.0, 128.0
+        logger.info("Converting STL to 3MF (bed center: %.1f, %.1f)", bed_cx, bed_cy)
+        file_bytes = stl_to_3mf(file_bytes, bed_cx, bed_cy)
+
     threemf_settings = {}
     original_thumbnails: dict[str, bytes] = {}
     try:
@@ -459,6 +542,12 @@ def _prepare_slice(
                     process_profile[key] = str(min_val) if isinstance(val, str) else min_val
             except (ValueError, TypeError):
                 pass
+
+    # Apply explicit API parameter overrides (highest priority — after settings
+    # transfer and clamp rules so they always win).
+    if process_overrides:
+        process_profile, override_keys = _apply_parameter_overrides(process_profile, process_overrides)
+        settings_transfer.customized_keys |= override_keys
 
     slice_filepath = _sanitize_3mf(input_path, tmpdir)
     if slice_filepath != input_path:
@@ -590,11 +679,14 @@ async def slice_3mf(
     process_profile_id: str,
     filament_profile_ids: list[str],
     plate_type: str | None = None,
+    process_overrides: dict[str, Any] | None = None,
+    file_type: str = "3mf",
 ) -> tuple[bytes, SettingsTransferResult]:
-    """Slice a 3MF file and return the sliced result as bytes + transfer info."""
+    """Slice a 3MF or STL file and return the sliced result as bytes + transfer info."""
     logger.info(
-        "Slice request: machine=%s process=%s filaments=%s file_size=%d",
+        "Slice request: machine=%s process=%s filaments=%s file_size=%d overrides=%s file_type=%s",
         machine_profile_id, process_profile_id, filament_profile_ids, len(file_bytes),
+        list(process_overrides.keys()) if process_overrides else None, file_type,
     )
 
     # Resolve profiles
@@ -622,7 +714,8 @@ async def slice_3mf(
 
     async with _slice_semaphore:
         return await _do_slice(
-            file_bytes, machine_profile, process_profile, filament_profiles, plate_type,
+            file_bytes, machine_profile, process_profile, filament_profiles,
+            plate_type, process_overrides, file_type,
         )
 
 
@@ -632,10 +725,13 @@ async def _do_slice(
     process_profile: dict[str, Any],
     filament_profiles: list[dict[str, Any]],
     plate_type: str | None,
+    process_overrides: dict[str, Any] | None = None,
+    file_type: str = "3mf",
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx = _prepare_slice(
-            file_bytes, machine_profile, process_profile, filament_profiles, plate_type, tmpdir,
+            file_bytes, machine_profile, process_profile, filament_profiles,
+            plate_type, tmpdir, process_overrides, file_type,
         )
 
         # Run OrcaSlicer
@@ -673,6 +769,8 @@ async def slice_3mf_streaming(
     process_profile_id: str,
     filament_profile_ids: list[str],
     plate_type: str | None = None,
+    process_overrides: dict[str, Any] | None = None,
+    file_type: str = "3mf",
 ):
     """Resolve profiles and return an SSE async generator for streaming slicing.
 
@@ -692,9 +790,10 @@ async def slice_3mf_streaming(
     async def _generate():
         tmpdir = tempfile.mkdtemp()
         try:
-            yield _sse_event("status", {"phase": "reading_3mf", "message": "Reading 3MF file"})
+            yield _sse_event("status", {"phase": "reading_3mf", "message": "Reading input file"})
             ctx = _prepare_slice(
-                file_bytes, machine_profile, process_profile, filament_profiles, plate_type, tmpdir,
+                file_bytes, machine_profile, process_profile, filament_profiles,
+                plate_type, tmpdir, process_overrides, file_type,
             )
 
             yield _sse_event("status", {"phase": "slicing", "message": "Starting OrcaSlicer"})
