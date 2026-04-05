@@ -68,4 +68,4 @@ LOG_LEVEL         = INFO
 - A filament is AMS-assignable only if it has `instantiation: "true"`, a non-empty `setting_id`, and resolves to a non-empty `filament_id`.
 - Plate types map from snake_case API values (`cool_plate`, `engineering_plate`, `high_temp_plate`, `textured_pei_plate`, `textured_cool_plate`, `supertack_plate`) to OrcaSlicer display names written as `curr_bed_type`.
 - Multi-plate 3MFs are auto-extracted to single-plate; cross-printer scenarios trigger auto-arrange.
-- OrcaSlicer version pinned to 2.3.1. The Dockerfile uses an AppImage extraction workaround for arm64 (computes ELF offset instead of `--appimage-extract`).
+- OrcaSlicer version pinned to 2.3.2. The Dockerfile uses an AppImage extraction workaround for arm64 (computes ELF offset instead of `--appimage-extract`).

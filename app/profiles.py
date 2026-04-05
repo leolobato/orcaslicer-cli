@@ -27,8 +27,8 @@ _vendor_map: dict[str, str] = {}
 _name_index: dict[str, list[str]] = {}
 # Memoized resolved profiles
 _resolved_cache: dict[str, dict[str, Any]] = {}
-# Index: {setting_id (e.g. "GM014"): internal_key}
-_setting_id_index: dict[str, str] = {}
+# Index: {setting_id (e.g. "GM014"): [internal_key, ...]}
+_setting_id_index: dict[str, list[str]] = {}
 
 
 class ProfileNotFoundError(Exception):
@@ -56,7 +56,7 @@ def _index_profile(profile_key: str, data: dict[str, Any], category: str, vendor
 
     setting_id = str(data.get("setting_id", "")).strip()
     if setting_id:
-        _setting_id_index[setting_id] = profile_key
+        _setting_id_index.setdefault(setting_id, []).append(profile_key)
 
 
 def _candidate_keys_for_name(name: str, *, category: str | None = None) -> list[str]:
@@ -514,35 +514,52 @@ def _slug_for_profile(name: str) -> str:
 
 
 def _name_for_slug(setting_id: str) -> str | None:
-    """Look up a profile name by its setting_id (e.g. 'GM014')."""
-    return _setting_id_index.get(setting_id)
+    """Look up a profile key by its setting_id (e.g. 'GM014').
+
+    Returns the first registered profile key for the given setting_id.
+    """
+    keys = _setting_id_index.get(setting_id)
+    if not keys:
+        return None
+    return keys[0]
 
 
 def _machine_names_for_slug(machine_slug: str) -> set[str]:
     """Return all machine profile names matching a machine slug.
 
-    A single slug (e.g. BBL.GM030) maps to one machine name like
-    "Bambu Lab A1 0.4 nozzle". But for filtering compatible_printers we
-    return all machine names that share the same printer_model+nozzle combo.
+    Multiple vendors may reuse the same setting_id (e.g. GM014 is used by
+    both BBL and Z-Bolt).  We return display names for every machine that
+    shares the setting_id so that compatible_printers filtering works for all
+    of them.
     """
-    profile_key = _name_for_slug(machine_slug)
-    if not profile_key:
+    keys = _setting_id_index.get(machine_slug)
+    if not keys:
         return set()
-    return {_display_name(profile_key)}
+    return {
+        _display_name(k)
+        for k in keys
+        if _type_map.get(k) == "machine"
+    }
 
 
 def get_profile(category: str, slug: str) -> dict[str, Any]:
     """Return a fully-resolved profile by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
-    name = _name_for_slug(slug)
-    if not name:
+    keys = _setting_id_index.get(slug)
+    if not keys:
         raise ProfileNotFoundError(
             f"{category} profile with id '{slug}' not found"
         )
-    if _type_map.get(name) != category:
+    # Find the first match with the correct category
+    profile_key = None
+    for k in keys:
+        if _type_map.get(k) == category:
+            profile_key = k
+            break
+    if profile_key is None:
         raise ProfileNotFoundError(
             f"'{slug}' is not a {category} profile"
         )
-    resolved = resolve_profile_by_name(name)
+    resolved = resolve_profile_by_name(profile_key)
     if resolved is None:
         raise ProfileNotFoundError(
             f"Failed to resolve {category} profile '{slug}'"

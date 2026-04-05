@@ -5,7 +5,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = Field(examples=["ok"])
-    version: str = Field(description="OrcaSlicer version and API revision.", examples=["2.3.1-1"])
+    version: str = Field(description="OrcaSlicer version and API revision.", examples=["2.3.2-1"])
 
 
 class MachineProfile(BaseModel):
