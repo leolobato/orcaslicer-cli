@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
 from .config import USER_PROFILES_DIR, VERSION
@@ -545,3 +546,7 @@ async def slice_file_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# Mount web UI — must be last so API routes take priority
+app.mount("/web", StaticFiles(directory="app/web", html=True), name="web")

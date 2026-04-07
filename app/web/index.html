@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OrcaSlicer Profile Manager</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            ink: "var(--color-ink)",
+            panel: "var(--color-panel)",
+            accent: {
+              DEFAULT: "var(--color-accent)",
+              light: "var(--color-accent-light)",
+              faint: "var(--color-accent-faint)",
+              ring: "var(--color-accent-ring)",
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Custom styles (scrollbars, animations) -->
+  <link rel="stylesheet" href="/web/style.css" />
+
+  <!-- Alpine.js for reactivity -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+
+  <!-- App logic -->
+  <script src="/web/app.js"></script>
+</head>
+
+<body class="bg-slate-900 text-ink" x-data="app()" x-init="init()">
+
+  <div class="flex min-h-screen">
+
+    <!-- ===== SIDEBAR ===== -->
+    <aside class="fixed inset-y-0 left-0 z-10 flex w-56 flex-col border-r border-slate-800 bg-panel">
+      <header class="border-b border-slate-800 px-4 pt-4 pb-3">
+        <h2 class="text-lg font-semibold tracking-tight">orcaslicer-cli</h2>
+        <span class="mt-1 inline-block text-xs text-slate-500" x-text="version || '...'"></span>
+      </header>
+
+      <nav class="flex flex-1 flex-col gap-1 p-3">
+        <a href="#/machines"
+           class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
+           :class="route.type === 'machines' && route.view === 'list'
+             ? 'bg-accent-faint border border-accent text-accent-light'
+             : 'text-slate-300'">
+          Machines
+        </a>
+        <a href="#/processes"
+           class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
+           :class="route.type === 'processes' && route.view === 'list'
+             ? 'bg-accent-faint border border-accent text-accent-light'
+             : 'text-slate-300'">
+          Processes
+        </a>
+        <a href="#/filaments"
+           class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
+           :class="route.type === 'filaments' && route.view === 'list' && !route.filter
+             ? 'bg-accent-faint border border-accent text-accent-light'
+             : 'text-slate-300'">
+          Filaments
+        </a>
+        <a href="#/filaments?filter=user"
+           class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
+           :class="route.type === 'filaments' && route.view === 'list' && route.filter === 'user'
+             ? 'bg-accent-faint border border-accent text-accent-light'
+             : 'text-slate-300'">
+          User Filaments
+        </a>
+      </nav>
+
+      <footer class="border-t border-slate-800 p-3">
+        <button class="w-full rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800 disabled:opacity-50"
+                @click="reloadProfiles()" :disabled="reloading">
+          <span x-show="!reloading">Reload Profiles</span>
+          <span x-show="reloading">Reloading...</span>
+        </button>
+      </footer>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main class="ml-56 flex-1 p-6 max-w-4xl">
+
+      <!-- Loading spinner -->
+      <div class="text-sm text-slate-500 py-4" x-show="loading">Loading...</div>
+
+      <!-- ==================== MACHINE LIST ==================== -->
+      <template x-if="route.type === 'machines' && route.view === 'list'">
+        <section x-data="machineList()" x-init="load()">
+          <div class="flex items-center justify-between gap-4 mb-4">
+            <h3 class="text-lg font-semibold whitespace-nowrap">Machines</h3>
+            <input type="search"
+                   class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                   placeholder="Search machines..."
+                   x-model="search" />
+          </div>
+
+          <p class="text-sm italic text-slate-500 py-4" x-show="filteredItems.length === 0 && !listLoading">No machines found.</p>
+          <p class="text-sm text-slate-500 py-4" x-show="listLoading">Loading machines...</p>
+
+          <table class="w-full text-sm" x-show="filteredItems.length > 0">
+            <thead>
+              <tr class="border-b border-slate-800">
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Name</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Setting ID</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Nozzle</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Vendor</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(m, idx) in filteredItems" :key="idx">
+                <tr class="cursor-pointer border-b border-slate-800/50 transition-colors hover:bg-slate-800/50"
+                    @click="inspect('machines', m.setting_id)">
+                  <td class="px-3 py-2" x-text="m.name"></td>
+                  <td class="px-3 py-2"><code class="font-mono text-xs text-slate-400" x-text="m.setting_id"></code></td>
+                  <td class="px-3 py-2" x-text="m.nozzle_diameter || '-'"></td>
+                  <td class="px-3 py-2" x-text="m.vendor || '-'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <!-- ==================== PROCESS LIST ==================== -->
+      <template x-if="route.type === 'processes' && route.view === 'list'">
+        <section x-data="processList()" x-init="load()">
+          <div class="flex items-center justify-between gap-4 mb-4">
+            <h3 class="text-lg font-semibold whitespace-nowrap">Processes</h3>
+            <input type="search"
+                   class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                   placeholder="Search processes..."
+                   x-model="search" />
+          </div>
+
+          <p class="text-sm italic text-slate-500 py-4" x-show="filteredItems.length === 0 && !listLoading">No processes found.</p>
+          <p class="text-sm text-slate-500 py-4" x-show="listLoading">Loading processes...</p>
+
+          <table class="w-full text-sm" x-show="filteredItems.length > 0">
+            <thead>
+              <tr class="border-b border-slate-800">
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Name</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Setting ID</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Layer Height</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Vendor</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(p, idx) in filteredItems" :key="idx">
+                <tr class="cursor-pointer border-b border-slate-800/50 transition-colors hover:bg-slate-800/50"
+                    @click="inspect('processes', p.setting_id)">
+                  <td class="px-3 py-2" x-text="p.name"></td>
+                  <td class="px-3 py-2"><code class="font-mono text-xs text-slate-400" x-text="p.setting_id"></code></td>
+                  <td class="px-3 py-2" x-text="p.layer_height || '-'"></td>
+                  <td class="px-3 py-2" x-text="p.vendor || '-'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <!-- ==================== FILAMENT LIST ==================== -->
+      <template x-if="route.type === 'filaments' && route.view === 'list'">
+        <section x-data="filamentList()" x-init="load()">
+          <div class="flex items-center justify-between gap-4 mb-4">
+            <h3 class="text-lg font-semibold whitespace-nowrap"
+                x-text="$data.route && $data.route.filter === 'user' ? 'User Filaments' : 'Filaments'"></h3>
+            <div class="flex items-center gap-2">
+              <input type="search"
+                     class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                     placeholder="Search filaments..."
+                     x-model="search" />
+              <a href="#/filaments/new"
+                 class="inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint">
+                + New
+              </a>
+            </div>
+          </div>
+
+          <p class="text-sm italic text-slate-500 py-4" x-show="filteredItems.length === 0 && !listLoading">No filaments found.</p>
+          <p class="text-sm text-slate-500 py-4" x-show="listLoading">Loading filaments...</p>
+
+          <table class="w-full text-sm" x-show="filteredItems.length > 0">
+            <thead>
+              <tr class="border-b border-slate-800">
+                <th class="min-w-[18rem] px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Name</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Setting ID</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Filament ID</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Type</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Vendor</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">AMS</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(f, idx) in filteredItems" :key="idx">
+                <tr class="cursor-pointer border-b border-slate-800/50 transition-colors hover:bg-slate-800/50"
+                    @click="inspect('filaments', f.setting_id)">
+                  <td class="px-3 py-2">
+                    <span x-text="f.name"></span>
+                    <span class="ml-1.5 inline-block rounded-full border border-accent px-2 py-0.5 text-[10px] uppercase tracking-wide text-accent-light"
+                          x-show="f.vendor === 'User'">User</span>
+                  </td>
+                  <td class="px-3 py-2"><code class="font-mono text-xs text-slate-400" x-text="f.setting_id"></code></td>
+                  <td class="px-3 py-2"><code class="font-mono text-xs text-slate-400" x-text="f.filament_id || '-'"></code></td>
+                  <td class="px-3 py-2" x-text="f.filament_type || '-'"></td>
+                  <td class="px-3 py-2" x-text="f.vendor || '-'"></td>
+                  <td class="px-3 py-2" x-text="f.ams_assignable ? 'Yes' : '-'"></td>
+                  <td class="px-3 py-2" @click.stop>
+                    <template x-if="f.vendor === 'User'">
+                      <span class="flex gap-1.5">
+                        <button class="rounded-md border border-slate-700 px-2 py-0.5 text-xs text-slate-300 transition-colors hover:bg-slate-800"
+                                @click="editFilament(f.setting_id)">Edit</button>
+                        <button class="rounded-md border border-red-600 px-2 py-0.5 text-xs text-red-300 transition-colors hover:bg-red-900/30"
+                                @click="deleteFilament(f)">Delete</button>
+                      </span>
+                    </template>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <!-- ==================== INSPECTOR (detail view) ==================== -->
+      <template x-if="route.view === 'inspect' && detail">
+        <section x-data="inspector()" x-init="initInspector()">
+          <div class="mb-4">
+            <nav class="mb-2 text-xs text-slate-400">
+              <a class="capitalize hover:text-accent-light transition-colors" :href="'#/' + route.type" x-text="route.type"></a>
+              <span> / </span>
+              <span x-text="detail.name"></span>
+            </nav>
+            <h3 class="text-lg font-semibold" x-text="detail.name"></h3>
+            <p class="mt-1 text-sm">
+              <code class="font-mono text-xs text-slate-400" x-text="detail.setting_id"></code>
+              <span x-show="detail.vendor" class="text-slate-500"> &mdash; <span x-text="detail.vendor"></span></span>
+            </p>
+          </div>
+
+          <!-- Tabs -->
+          <div class="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
+            <button class="rounded-md px-3 py-1.5 text-sm transition-colors"
+                    :class="tab === 'resolved'
+                      ? 'bg-accent-faint text-accent-light border border-accent'
+                      : 'text-slate-400 hover:text-slate-200'"
+                    @click="tab = 'resolved'">
+              Resolved
+            </button>
+            <button class="rounded-md px-3 py-1.5 text-sm transition-colors"
+                    :class="tab === 'diff'
+                      ? 'bg-accent-faint text-accent-light border border-accent'
+                      : 'text-slate-400 hover:text-slate-200'"
+                    @click="tab = 'diff'">
+              Inheritance Diff
+            </button>
+            <button class="ml-auto rounded-md border border-slate-700 px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800"
+                    @click="copyJson()">
+              Copy JSON
+            </button>
+          </div>
+
+          <!-- Resolved tab: sorted key-value table -->
+          <div x-show="tab === 'resolved'">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-slate-800">
+                  <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Key</th>
+                  <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="entry in resolvedEntries()" :key="entry.key">
+                  <tr class="border-b border-slate-800/50">
+                    <td class="px-3 py-1.5"><code class="font-mono text-xs" x-text="entry.key"></code></td>
+                    <td class="px-3 py-1.5 max-w-lg break-all whitespace-pre-wrap font-mono text-xs text-slate-300" x-text="entry.display"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Diff tab: collapsible chain levels -->
+          <div x-show="tab === 'diff'">
+            <p class="text-sm italic text-slate-500 py-4" x-show="!detail.inheritance_chain || detail.inheritance_chain.length === 0">
+              No inheritance chain available.
+            </p>
+
+            <template x-for="(level, idx) in (detail.inheritance_chain || [])" :key="idx">
+              <details class="mb-3 rounded-lg border border-slate-800 p-3" :open="idx === 0">
+                <summary class="cursor-pointer py-1 text-sm">
+                  <strong x-text="level.name"></strong>
+                  <span class="text-slate-500" x-show="level.vendor" x-text="'(' + level.vendor + ')'"></span>
+                  <span class="text-slate-500" x-text="'\u2014 ' + Object.keys(level.own_fields || {}).length + ' fields'"></span>
+                </summary>
+
+                <table class="mt-2 w-full text-sm" x-show="Object.keys(level.own_fields || {}).length > 0">
+                  <thead>
+                    <tr class="border-b border-slate-800">
+                      <th class="px-3 py-1.5 text-left text-xs uppercase tracking-wide text-slate-400">Key</th>
+                      <th class="px-3 py-1.5 text-left text-xs uppercase tracking-wide text-slate-400">Value</th>
+                      <th class="px-3 py-1.5 text-left text-xs uppercase tracking-wide text-slate-400">Parent Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="fe in ownFieldEntries(level, idx)" :key="fe.key">
+                      <tr class="border-b border-slate-800/50" :class="fe.cls">
+                        <td class="px-3 py-1.5"><code class="font-mono text-xs" x-text="fe.key"></code></td>
+                        <td class="px-3 py-1.5 max-w-md break-all whitespace-pre-wrap font-mono text-xs text-slate-300" x-text="fe.display"></td>
+                        <td class="px-3 py-1.5 max-w-md break-all whitespace-pre-wrap font-mono text-xs italic text-slate-500" x-text="fe.parentDisplay"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+
+                <p class="mt-2 text-sm italic text-slate-500" x-show="Object.keys(level.own_fields || {}).length === 0">
+                  No own fields at this level.
+                </p>
+              </details>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- ==================== FILAMENT EDITOR ==================== -->
+      <template x-if="route.view === 'edit' || route.view === 'new'">
+        <section x-data="filamentEditor()" x-init="initEditor()">
+          <div class="mb-4">
+            <h3 class="text-lg font-semibold" x-text="route.view === 'new' ? 'New Filament Profile' : 'Edit Filament Profile'"></h3>
+          </div>
+
+          <!-- Step 1: Pick parent -->
+          <div x-show="step === 1">
+            <h4 class="text-sm font-semibold mb-3">Step 1: Choose Parent Profile</h4>
+            <input type="search"
+                   class="mb-3 w-full max-w-md rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                   placeholder="Search parent profiles..."
+                   x-model="parentSearch" />
+            <div class="max-h-72 overflow-y-auto rounded-lg border border-slate-800 mb-4">
+              <template x-for="p in filteredParents()" :key="p.setting_id">
+                <div class="flex cursor-pointer items-baseline gap-2 border-b border-slate-800/50 px-3 py-2 text-sm transition-colors hover:bg-slate-800/50"
+                     :class="selectedParent === p.setting_id ? 'bg-accent-faint border-l-2 border-l-accent' : ''"
+                     @click="selectParent(p)">
+                  <strong x-text="p.name" class="text-sm"></strong>
+                  <span class="font-mono text-xs text-slate-500" x-text="p.setting_id"></span>
+                  <span class="text-xs text-slate-500" x-show="p.vendor" x-text="'(' + p.vendor + ')'"></span>
+                </div>
+              </template>
+              <p class="text-sm italic text-slate-500 p-3" x-show="filteredParents().length === 0">No matching profiles.</p>
+            </div>
+            <div class="flex gap-2 border-t border-slate-800 pt-4">
+              <button class="rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint disabled:opacity-50"
+                      @click="goStep2()" :disabled="!selectedParent">Next</button>
+              <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                      @click="cancel()">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Step 2: Edit fields -->
+          <div x-show="step === 2">
+            <h4 class="text-sm font-semibold mb-3">Step 2: Customize Fields</h4>
+            <div class="mb-4 rounded-lg border border-slate-800 p-3">
+              <label class="block text-xs font-semibold text-slate-400 mb-1">Profile Name</label>
+              <input type="text"
+                     class="w-full max-w-md rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                     x-model="profileName" placeholder="My Custom Filament" />
+            </div>
+
+            <h5 class="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">Override Fields</h5>
+            <p class="text-xs text-slate-500 mb-3">Expand a category and edit fields. Only modified fields will be saved.</p>
+
+            <template x-for="group in fieldGroups" :key="group.name">
+              <details class="mb-2 rounded-lg border border-slate-800"
+                       :open="group.hasModified">
+                <summary class="flex cursor-pointer items-center justify-between px-3 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-800/50">
+                  <span x-text="group.name"></span>
+                  <span class="flex items-center gap-2">
+                    <span class="rounded-full bg-accent-faint px-2 py-0.5 text-[10px] text-accent"
+                          x-show="group.fields.filter(f => f.modified).length > 0"
+                          x-text="group.fields.filter(f => f.modified).length + ' modified'"></span>
+                    <span class="text-xs text-slate-500" x-text="group.fields.length + ' fields'"></span>
+                  </span>
+                </summary>
+                <div class="border-t border-slate-800 px-3 py-2">
+                  <template x-for="field in group.fields" :key="field.key">
+                    <div class="mb-2 rounded-md p-2 text-sm"
+                         :class="field.modified ? 'bg-accent-faint border-l-2 border-l-accent' : 'border-l-2 border-l-transparent'">
+                      <div class="flex items-center justify-between mb-1">
+                        <label class="text-xs font-semibold text-slate-300" x-text="field.key"></label>
+                        <button class="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400 transition-colors hover:bg-slate-800"
+                                x-show="field.modified" @click="resetField(field)">
+                          Reset
+                        </button>
+                      </div>
+                      <input type="text"
+                             class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink font-mono focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                             :value="field.value"
+                             @input="updateField(field, $event.target.value)" />
+                      <small class="mt-1 block text-xs text-slate-500" x-show="field.modified"
+                             x-text="'Parent: ' + formatValue(field.parentValue)"></small>
+                    </div>
+                  </template>
+                </div>
+              </details>
+            </template>
+
+            <div class="flex gap-2 border-t border-slate-800 pt-4 mt-4">
+              <button class="rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint disabled:opacity-50"
+                      @click="goStep3()" :disabled="!profileName">Preview &amp; Save</button>
+              <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                      @click="step = 1">Back</button>
+              <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                      @click="cancel()">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Step 3: Preview & Save -->
+          <div x-show="step === 3">
+            <h4 class="text-sm font-semibold mb-3">Step 3: Preview &amp; Save</h4>
+
+            <div class="text-sm text-slate-500 py-4" x-show="previewLoading">Resolving preview...</div>
+            <div class="text-sm text-rose-300 py-2" x-show="previewError" x-text="previewError"></div>
+
+            <template x-if="preview">
+              <div>
+                <div class="mb-4 rounded-lg border border-slate-800 p-4 text-sm">
+                  <p class="mb-1">
+                    <span class="text-xs uppercase tracking-wide text-slate-400">Name:</span>
+                    <span class="ml-1" x-text="preview.name"></span>
+                  </p>
+                  <p class="mb-1">
+                    <span class="text-xs uppercase tracking-wide text-slate-400">Setting ID:</span>
+                    <code class="ml-1 font-mono text-xs text-slate-400" x-text="preview.setting_id"></code>
+                  </p>
+                  <p>
+                    <span class="text-xs uppercase tracking-wide text-slate-400">Filament Type:</span>
+                    <span class="ml-1" x-text="preview.filament_type || '-'"></span>
+                  </p>
+                </div>
+
+                <details class="mb-4 rounded-lg border border-slate-800 p-3">
+                  <summary class="cursor-pointer text-sm text-slate-300">Full Resolved Payload</summary>
+                  <pre class="mt-2 max-h-72 overflow-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-400"
+                       x-text="JSON.stringify(preview.resolved_payload, null, 2)"></pre>
+                </details>
+
+                <div class="flex gap-2 border-t border-slate-800 pt-4">
+                  <button class="rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint disabled:opacity-50"
+                          @click="save()" :disabled="saving">
+                    <span x-show="!saving">Save</span>
+                    <span x-show="saving">Saving...</span>
+                  </button>
+                  <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                          @click="step = 2">Back</button>
+                  <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+                          @click="cancel()">Cancel</button>
+                </div>
+                <div class="mt-2 text-sm text-rose-300" x-show="saveError" x-text="saveError"></div>
+              </div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Default empty state -->
+      <template x-if="!route.type">
+        <div class="py-8 text-sm italic text-slate-500">
+          <p>Select a profile category from the sidebar.</p>
+        </div>
+      </template>
+
+    </main>
+  </div>
+
+</body>
+</html>

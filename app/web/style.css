@@ -1,0 +1,53 @@
+/* ============================================================
+   OrcaSlicer Profile Manager — Theme & Custom Styles
+   Change the accent color by editing the CSS variables below.
+   ============================================================ */
+
+/* ---------- Theme variables ---------- */
+/* Swap these to change the entire accent color in one place */
+:root {
+  --color-ink: #e2e8f0;
+  --color-panel: #1e293b;
+
+  /* Accent: Developer Green */
+  --color-accent: #22c55e;       /* border, text on dark bg */
+  --color-accent-light: #86efac; /* lighter text variant */
+  --color-accent-faint: rgba(34, 197, 94, 0.15); /* subtle backgrounds */
+  --color-accent-ring: #16a34a;  /* focus rings */
+}
+
+/* ---------- Dark scrollbars ---------- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+
+/* ---------- Smooth transitions ---------- */
+
+details > summary {
+  transition: color 0.15s;
+}
+
+details[open] > summary {
+  color: #e2e8f0;
+}
