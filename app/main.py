@@ -16,6 +16,7 @@ from starlette.responses import StreamingResponse
 from .config import USER_PROFILES_DIR, VERSION
 from .models import (
     FilamentProfile,
+    FilamentProfileDeleteResponse,
     FilamentProfileImportPreview,
     FilamentProfileImportResponse,
     HealthResponse,
@@ -214,6 +215,29 @@ async def import_filament_profile(request: Request):
         name=str(data.get("name", "")),
         filament_type=filament_type,
         message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+    )
+
+
+@app.delete(
+    "/profiles/filaments/{setting_id}",
+    response_model=FilamentProfileDeleteResponse,
+    tags=["Profiles"],
+)
+async def delete_filament_profile(setting_id: str):
+    """Delete a user-imported custom filament profile."""
+    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+    if not os.path.isfile(file_path):
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"User filament profile '{setting_id}' not found."},
+        )
+
+    os.remove(file_path)
+    load_all_profiles()
+
+    return FilamentProfileDeleteResponse(
+        setting_id=setting_id,
+        message=f"Profile '{setting_id}' deleted successfully.",
     )
 
 

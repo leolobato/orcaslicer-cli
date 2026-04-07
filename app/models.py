@@ -76,6 +76,13 @@ class FilamentProfileImportResponse(BaseModel):
     message: str = Field(description="Status message.")
 
 
+class FilamentProfileDeleteResponse(BaseModel):
+    """Response from deleting a custom filament profile."""
+
+    setting_id: str = Field(description="Profile identifier that was deleted.")
+    message: str = Field(description="Status message.")
+
+
 class FilamentProfileImportPreview(BaseModel):
     """Resolved filament profile preview before saving."""
 
