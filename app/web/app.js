@@ -139,11 +139,36 @@ function app() {
     loading: false,
     reloading: false,
 
+    // Global machine filter — filters processes and filaments
+    machines: [],
+    selectedMachineId: "",  // setting_id or "" for "All"
+
+    get selectedMachineName() {
+      if (!this.selectedMachineId) return "";
+      const m = this.machines.find((x) => x.setting_id === this.selectedMachineId);
+      return m ? m.name : this.selectedMachineId;
+    },
+
+    async loadMachines() {
+      try {
+        this.machines = await api("/profiles/machines");
+      } catch (err) {
+        console.error("Failed to load machines for filter:", err);
+      }
+    },
+
+    selectMachine(settingId) {
+      this.selectedMachineId = settingId;
+      // Re-trigger current list view to reload with filter
+      window.dispatchEvent(new Event("machine-filter-changed"));
+    },
+
     init() {
-      // Load API version
+      // Load API version and machine list for global filter
       api("/health").then((data) => {
         this.version = data.version || "";
       }).catch(() => {});
+      this.loadMachines();
 
       // Listen for hash changes
       window.addEventListener("hashchange", () => {
@@ -258,12 +283,16 @@ function processList() {
     async load() {
       this.listLoading = true;
       try {
-        this.items = await api("/profiles/processes");
+        const machineId = this.$data.selectedMachineId;
+        const qs = machineId ? `?machine=${encodeURIComponent(machineId)}` : "";
+        this.items = await api(`/profiles/processes${qs}`);
       } catch (err) {
         alert("Failed to load processes: " + err.message);
       } finally {
         this.listLoading = false;
       }
+      // Reload when machine filter changes
+      window.addEventListener("machine-filter-changed", () => this.load(), { once: true });
     },
 
     inspect(type, id) {
@@ -304,12 +333,16 @@ function filamentList() {
     async load() {
       this.listLoading = true;
       try {
-        this.items = await api("/profiles/filaments");
+        const machineId = this.$data.selectedMachineId;
+        const qs = machineId ? `?machine=${encodeURIComponent(machineId)}` : "";
+        this.items = await api(`/profiles/filaments${qs}`);
       } catch (err) {
         alert("Failed to load filaments: " + err.message);
       } finally {
         this.listLoading = false;
       }
+      // Reload when machine filter changes
+      window.addEventListener("machine-filter-changed", () => this.load(), { once: true });
     },
 
     inspect(type, id) {

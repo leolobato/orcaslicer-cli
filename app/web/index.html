@@ -48,6 +48,19 @@
         <span class="mt-1 inline-block text-xs text-slate-500" x-text="version || '...'"></span>
       </header>
 
+      <!-- Machine filter -->
+      <div class="border-b border-slate-800 px-3 py-2">
+        <label class="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">Machine Filter</label>
+        <select class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-ink focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                x-model="selectedMachineId"
+                @change="selectMachine(selectedMachineId)">
+          <option value="">All Machines</option>
+          <template x-for="m in machines" :key="m.name">
+            <option :value="m.setting_id" x-text="m.name"></option>
+          </template>
+        </select>
+      </div>
+
       <nav class="flex flex-1 flex-col gap-1 p-3">
         <a href="#/machines"
            class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
@@ -136,7 +149,11 @@
       <template x-if="route.type === 'processes' && route.view === 'list'">
         <section x-data="processList()" x-init="load()">
           <div class="flex items-center justify-between gap-4 mb-4">
-            <h3 class="text-lg font-semibold whitespace-nowrap">Processes</h3>
+            <div>
+              <h3 class="text-lg font-semibold whitespace-nowrap">Processes</h3>
+              <p class="text-xs text-slate-500" x-show="$data.selectedMachineId"
+                 x-text="'Filtered by ' + $data.selectedMachineName"></p>
+            </div>
             <input type="search"
                    class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
                    placeholder="Search processes..."
@@ -174,8 +191,12 @@
       <template x-if="route.type === 'filaments' && route.view === 'list'">
         <section x-data="filamentList()" x-init="load()">
           <div class="flex items-center justify-between gap-4 mb-4">
-            <h3 class="text-lg font-semibold whitespace-nowrap"
-                x-text="$data.route && $data.route.filter === 'user' ? 'User Filaments' : 'Filaments'"></h3>
+            <div>
+              <h3 class="text-lg font-semibold whitespace-nowrap"
+                  x-text="$data.route && $data.route.filter === 'user' ? 'User Filaments' : 'Filaments'"></h3>
+              <p class="text-xs text-slate-500" x-show="$data.selectedMachineId"
+                 x-text="'Filtered by ' + $data.selectedMachineName"></p>
+            </div>
             <div class="flex items-center gap-2">
               <input type="search"
                      class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
