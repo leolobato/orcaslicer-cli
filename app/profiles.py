@@ -584,6 +584,7 @@ def get_machine_profiles() -> list[dict[str, Any]]:
         results.append({
             "setting_id": _slug_for_profile(profile_key),
             "name": resolved.get("name", _display_name(profile_key)),
+            "vendor": _vendor_map.get(profile_key, ""),
             "nozzle_diameter": nozzle,
             "printer_model": resolved.get("printer_model", ""),
         })
@@ -632,6 +633,7 @@ def get_process_profiles(
         results.append({
             "setting_id": _slug_for_profile(profile_key),
             "name": resolved.get("name", _display_name(profile_key)),
+            "vendor": _vendor_map.get(profile_key, ""),
             "compatible_printers": compat_slugs,
             "layer_height": layer_height,
         })
@@ -693,6 +695,7 @@ def get_filament_profiles(
             "setting_id": setting_id,
             "filament_id": filament_id,
             "name": resolved.get("name", _display_name(profile_key)),
+            "vendor": _vendor_map.get(profile_key, ""),
             "compatible_printers": compat_slugs,
             "filament_type": filament_type,
             "ams_assignable": ams_assignable,

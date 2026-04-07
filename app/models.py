@@ -13,6 +13,7 @@ class MachineProfile(BaseModel):
 
     setting_id: str = Field(description="Profile identifier.", examples=["GM014"])
     name: str = Field(examples=["Bambu Lab P1S 0.4 nozzle"])
+    vendor: str = Field(description="Vendor name.", examples=["BBL"])
     nozzle_diameter: str = Field(examples=["0.4"])
     printer_model: str = Field(examples=["Bambu Lab P1S"])
 
@@ -22,6 +23,7 @@ class ProcessProfile(BaseModel):
 
     setting_id: str = Field(description="Profile identifier.", examples=["GP004"])
     name: str = Field(examples=["0.20mm Standard @BBL P1S"])
+    vendor: str = Field(description="Vendor name.", examples=["BBL"])
     compatible_printers: list[str] = Field(description="Machine setting_ids this process is compatible with.")
     layer_height: str = Field(examples=["0.2"])
 
@@ -32,6 +34,7 @@ class FilamentProfile(BaseModel):
     setting_id: str = Field(description="Profile identifier.", examples=["GFL99"])
     filament_id: str = Field(description="Filament identifier used for AMS assignment.", examples=["GFA00"])
     name: str = Field(examples=["Bambu PLA Basic @BBL P1S"])
+    vendor: str = Field(description="Vendor name.", examples=["BBL"])
     compatible_printers: list[str] = Field(description="Machine setting_ids this filament is compatible with.")
     filament_type: str = Field(examples=["PLA"])
     ams_assignable: bool = Field(
