@@ -567,6 +567,68 @@ def get_profile(category: str, slug: str) -> dict[str, Any]:
     return _clean_profile(resolved)
 
 
+def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
+    """Return a profile with its resolved data and full inheritance chain.
+
+    Returns a dict with:
+      - setting_id, name, vendor: top-level metadata
+      - resolved: the fully-resolved profile (cleaned of inheritance keys)
+      - inheritance_chain: list of dicts, one per level from leaf to root,
+        each with {name, vendor, own_fields}
+    """
+    keys = _setting_id_index.get(slug)
+    if not keys:
+        raise ProfileNotFoundError(
+            f"{category} profile with id '{slug}' not found"
+        )
+    profile_key = None
+    for k in keys:
+        if _type_map.get(k) == category:
+            profile_key = k
+            break
+    if profile_key is None:
+        raise ProfileNotFoundError(
+            f"'{slug}' is not a {category} profile"
+        )
+    resolved = resolve_profile_by_name(profile_key)
+    if resolved is None:
+        raise ProfileNotFoundError(
+            f"Failed to resolve {category} profile '{slug}'"
+        )
+
+    # Walk the inheritance chain from leaf to root
+    chain: list[dict[str, Any]] = []
+    current_key = profile_key
+    visited: set[str] = set()
+    while current_key and current_key not in visited:
+        visited.add(current_key)
+        raw = _raw_profiles.get(current_key)
+        if raw is None:
+            break
+        own_fields = {k: v for k, v in raw.items() if k not in STRIP_KEYS}
+        chain.append({
+            "name": _display_name(current_key),
+            "vendor": _vendor_map.get(current_key, ""),
+            "own_fields": own_fields,
+        })
+        parent_name = raw.get("inherits")
+        if not parent_name:
+            break
+        current_key = _select_profile_key_by_name(
+            parent_name,
+            category=_type_map.get(current_key),
+            preferred_vendor=_vendor_map.get(current_key),
+        )
+
+    return {
+        "setting_id": slug,
+        "name": _display_name(profile_key),
+        "vendor": _vendor_map.get(profile_key, ""),
+        "resolved": _clean_profile(resolved),
+        "inheritance_chain": chain,
+    }
+
+
 def get_machine_profiles() -> list[dict[str, Any]]:
     """Return resolved leaf machine profiles."""
     results = []
