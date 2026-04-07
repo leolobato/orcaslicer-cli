@@ -32,6 +32,7 @@ from .profiles import (
     get_machine_profiles,
     get_process_profiles,
     get_profile,
+    get_profile_detail,
     load_all_profiles,
     materialize_filament_import,
 )
@@ -248,11 +249,29 @@ async def reload_profiles():
     return ReloadResponse(**summary)
 
 
+@app.get("/profiles/machines/{setting_id}", tags=["Profiles"])
+async def get_machine_detail(setting_id: str):
+    """Return a fully-resolved machine profile with inheritance chain."""
+    try:
+        return get_profile_detail("machine", setting_id)
+    except ProfileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+
+
+@app.get("/profiles/processes/{setting_id}", tags=["Profiles"])
+async def get_process_detail(setting_id: str):
+    """Return a fully-resolved process profile with inheritance chain."""
+    try:
+        return get_profile_detail("process", setting_id)
+    except ProfileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+
+
 @app.get("/profiles/filaments/{setting_id}", tags=["Profiles"])
 async def get_filament_detail(setting_id: str):
-    """Return a fully-resolved filament profile with all fields."""
+    """Return a fully-resolved filament profile with inheritance chain."""
     try:
-        return get_profile("filament", setting_id)
+        return get_profile_detail("filament", setting_id)
     except ProfileNotFoundError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
 

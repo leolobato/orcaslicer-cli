@@ -542,39 +542,10 @@ def _machine_names_for_slug(machine_slug: str) -> set[str]:
     }
 
 
-def get_profile(category: str, slug: str) -> dict[str, Any]:
-    """Return a fully-resolved profile by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
-    keys = _setting_id_index.get(slug)
-    if not keys:
-        raise ProfileNotFoundError(
-            f"{category} profile with id '{slug}' not found"
-        )
-    # Find the first match with the correct category
-    profile_key = None
-    for k in keys:
-        if _type_map.get(k) == category:
-            profile_key = k
-            break
-    if profile_key is None:
-        raise ProfileNotFoundError(
-            f"'{slug}' is not a {category} profile"
-        )
-    resolved = resolve_profile_by_name(profile_key)
-    if resolved is None:
-        raise ProfileNotFoundError(
-            f"Failed to resolve {category} profile '{slug}'"
-        )
-    return _clean_profile(resolved)
+def _resolve_by_slug(category: str, slug: str) -> tuple[str, dict[str, Any]]:
+    """Look up and resolve a profile by setting_id and category.
 
-
-def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
-    """Return a profile with its resolved data and full inheritance chain.
-
-    Returns a dict with:
-      - setting_id, name, vendor: top-level metadata
-      - resolved: the fully-resolved profile (cleaned of inheritance keys)
-      - inheritance_chain: list of dicts, one per level from leaf to root,
-        each with {name, vendor, own_fields}
+    Returns (profile_key, resolved_profile). Raises ProfileNotFoundError.
     """
     keys = _setting_id_index.get(slug)
     if not keys:
@@ -595,6 +566,25 @@ def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
         raise ProfileNotFoundError(
             f"Failed to resolve {category} profile '{slug}'"
         )
+    return profile_key, resolved
+
+
+def get_profile(category: str, slug: str) -> dict[str, Any]:
+    """Return a fully-resolved profile by its vendor-prefixed slug (e.g. 'BBL.GM014')."""
+    _, resolved = _resolve_by_slug(category, slug)
+    return _clean_profile(resolved)
+
+
+def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
+    """Return a profile with its resolved data and full inheritance chain.
+
+    Returns a dict with:
+      - setting_id, name, vendor: top-level metadata
+      - resolved: the fully-resolved profile (cleaned of inheritance keys)
+      - inheritance_chain: list of dicts, one per level from leaf to root,
+        each with {name, vendor, own_fields}
+    """
+    profile_key, resolved = _resolve_by_slug(category, slug)
 
     # Walk the inheritance chain from leaf to root
     chain: list[dict[str, Any]] = []
