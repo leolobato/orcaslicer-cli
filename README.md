@@ -50,10 +50,13 @@ The API will be available at `http://localhost:8000`.
 | GET | `/profiles/machines` | List machine profiles (printers) |
 | GET | `/profiles/processes` | List process profiles. Filter: `?machine={setting_id}` |
 | GET | `/profiles/filaments` | List filament profiles. Filter: `?machine={setting_id}&ams_assignable=true` |
-| GET | `/profiles/filaments/{setting_id}` | Fully-resolved filament profile with all inherited fields |
+| GET | `/profiles/machines/{setting_id}` | Fully-resolved machine profile with inheritance chain |
+| GET | `/profiles/processes/{setting_id}` | Fully-resolved process profile with inheritance chain |
+| GET | `/profiles/filaments/{setting_id}` | Fully-resolved filament profile with inheritance chain |
 | GET | `/profiles/plate-types` | List supported bed surface types |
 | POST | `/profiles/filaments` | Import a custom filament profile JSON |
 | POST | `/profiles/filaments/resolve-import` | Preview filament import resolution without saving |
+| DELETE | `/profiles/filaments/{setting_id}` | Delete a custom filament profile |
 | POST | `/profiles/reload` | Hot-reload all profiles from disk |
 | POST | `/slice` | Slice a `.3mf` file, returns sliced `.3mf` binary |
 | POST | `/slice-stream` | Same as `/slice` but streams progress via SSE |
@@ -96,14 +99,17 @@ Only `name` is required. Any field you provide overrides the inherited value.
 
 **AMS assignability:** A filament is assignable to the AMS when it has `instantiation: "true"`, a non-empty `setting_id`, and a resolved `filament_id`. Imported profiles meet these criteria automatically.
 
-## Testing
+## Web UI
 
-```bash
-./test_api.sh                    # test against localhost:8000
-./test_api.sh http://host:port   # test against a different host
-```
+A built-in web interface is available at `http://localhost:8000/web/` for browsing and managing profiles.
 
-Requires example `.3mf` files in `../bambu-poc/`.
+- **Browse** all machine, process, and filament profiles with search filtering
+- **Inspect** any profile to see its fully resolved fields or an inheritance diff view showing what each level in the chain overrides
+- **Filter by machine** using the sidebar dropdown — processes and filaments automatically filter to compatible profiles
+- **Create** custom filament profiles by picking a parent and overriding specific fields (grouped by category: Temperature, Retraction, Speed, etc.)
+- **Edit and delete** existing custom filament profiles
+
+The UI is served as static files from the same container — no additional setup needed.
 
 ## Configuration
 
