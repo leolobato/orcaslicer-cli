@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import ORCA_BINARY
-from .profiles import ProfileNotFoundError, get_profile, resolve_profile_by_name
+from .profiles import ProfileNotFoundError, get_profile
 from .threemf import extract_first_plate, get_build_volume, get_plate_count, validate_model_fits
 
 logger = logging.getLogger(__name__)
@@ -71,83 +71,6 @@ class SettingsTransferResult:
     customized_keys: set[str] = field(default_factory=set)
 
 
-def _normalize_for_comparison(value: Any) -> str:
-    """Normalize a value for comparison: float precision, type coercion."""
-    if isinstance(value, bool):
-        return str(value).lower()
-    if isinstance(value, (int, float)):
-        try:
-            f = float(value)
-            if f == int(f):
-                return str(int(f))
-            return f"{f:.10g}"
-        except (ValueError, OverflowError):
-            return str(value)
-    if isinstance(value, str):
-        try:
-            f = float(value)
-            if f == int(f):
-                return str(int(f))
-            return f"{f:.10g}"
-        except ValueError:
-            return value
-    if isinstance(value, list):
-        return json.dumps([_normalize_for_comparison(v) for v in value], separators=(",", ":"))
-    return str(value)
-
-
-def _diff_3mf_settings(
-    threemf_settings: dict[str, Any], original_profile: dict[str, Any],
-) -> dict[str, tuple[Any, Any]]:
-    """Compare 3MF settings against the resolved original profile.
-
-    Returns dict of {key: (threemf_val, original_val)} for settings that differ.
-    """
-    diffs: dict[str, tuple[Any, Any]] = {}
-    for key, tv in threemf_settings.items():
-        if key in _PROFILE_META_KEYS or not _is_transferable_process_key(key):
-            continue
-        if key not in original_profile:
-            # Setting exists in 3MF but not in original profile — treat as customization
-            diffs[key] = (tv, None)
-            continue
-        ov = original_profile[key]
-        if _normalize_for_comparison(tv) != _normalize_for_comparison(ov):
-            diffs[key] = (tv, ov)
-    return diffs
-
-
-def _apply_customizations(
-    process_profile: dict[str, Any],
-    threemf_settings: dict[str, Any],
-    customized_keys: set[str],
-) -> tuple[dict[str, Any], set[str]]:
-    """Apply only the customized keys from 3MF settings onto the process profile.
-
-    Returns (updated_profile, actually_applied_keys).
-    """
-    overrides = {}
-    for k in customized_keys:
-        if (
-            k not in threemf_settings
-            or k not in process_profile
-            or k in _PROFILE_META_KEYS
-            or not _is_transferable_process_key(k)
-        ):
-            continue
-        pv = process_profile[k]
-        tv = threemf_settings[k]
-        if type(pv) == type(tv):
-            overrides[k] = tv
-        elif isinstance(pv, list) and isinstance(tv, str):
-            overrides[k] = [tv] * len(pv) if pv else [tv]
-        elif isinstance(pv, str) and isinstance(tv, list):
-            overrides[k] = tv[0] if tv else pv
-        else:
-            overrides[k] = tv
-    if overrides:
-        return {**process_profile, **overrides}, set(overrides.keys())
-    return process_profile, set()
 
 
 class ModelTooBigError(Exception):
@@ -227,8 +150,11 @@ def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
 
 def _overlay_3mf_settings(
     process_profile: dict[str, Any], threemf_settings: dict[str, Any],
-) -> dict[str, Any]:
-    """Overlay 3MF project settings onto process profile to preserve user choices."""
+) -> tuple[dict[str, Any], set[str]]:
+    """Overlay 3MF project settings onto process profile to preserve user choices.
+
+    Returns (updated_profile, set_of_overlaid_keys).
+    """
     overrides = {}
     for k in process_profile:
         if (
@@ -248,99 +174,10 @@ def _overlay_3mf_settings(
         else:
             overrides[k] = tv
     if overrides:
-        return {**process_profile, **overrides}
-    return process_profile
+        return {**process_profile, **overrides}, set(overrides.keys())
+    return process_profile, set()
 
 
-def _smart_settings_transfer(
-    process_profile: dict[str, Any],
-    threemf_settings: dict[str, Any],
-    declared_customized_keys: set[str] | None = None,
-) -> tuple[dict[str, Any], SettingsTransferResult]:
-    """Transfer only user-customized settings from 3MF onto the process profile.
-
-    Falls back to full overlay when we can't determine the original profile.
-    ``declared_customized_keys`` are process keys from the 3MF's
-    ``different_settings_to_system`` — they supplement the diff-based detection.
-    """
-    if not threemf_settings:
-        logger.debug("No 3MF settings to transfer")
-        return process_profile, SettingsTransferResult(status="no_3mf_settings")
-
-    # Filter declared keys to only those that are actually transferable and
-    # present in both the 3MF settings and the target process profile.
-    safe_declared = {
-        k for k in (declared_customized_keys or set())
-        if k in threemf_settings
-        and k in process_profile
-        and k not in _PROFILE_META_KEYS
-        and _is_transferable_process_key(k)
-    }
-
-    print_settings_id = threemf_settings.get("print_settings_id")
-    if not print_settings_id:
-        logger.debug("No print_settings_id in 3MF, falling back to full overlay")
-        return (
-            _overlay_3mf_settings(process_profile, threemf_settings),
-            SettingsTransferResult(
-                status="no_3mf_settings",
-                customized_keys=safe_declared,
-            ),
-        )
-
-    original_profile = resolve_profile_by_name(print_settings_id)
-    if original_profile is None:
-        logger.debug(
-            "Original profile %r not found, falling back to full overlay",
-            print_settings_id,
-        )
-        return (
-            _overlay_3mf_settings(process_profile, threemf_settings),
-            SettingsTransferResult(
-                status="no_original_profile",
-                customized_keys=safe_declared,
-            ),
-        )
-
-    diffs = _diff_3mf_settings(threemf_settings, original_profile)
-
-    # Union diff-detected keys with explicitly declared customizations
-    all_customized = set(diffs.keys()) | safe_declared
-
-    if not all_customized:
-        logger.info("No customizations detected in 3MF vs original profile %r", print_settings_id)
-        return process_profile, SettingsTransferResult(status="no_customizations")
-
-    updated, applied_keys = _apply_customizations(process_profile, threemf_settings, all_customized)
-    if not applied_keys:
-        logger.info(
-            "Detected %d customization(s) in 3MF vs %r but none apply to the target profile",
-            len(all_customized), print_settings_id,
-        )
-        return process_profile, SettingsTransferResult(status="no_customizations")
-
-    diff_count = len(diffs)
-    declared_count = len(declared_customized_keys or set())
-    logger.info(
-        "Applied %d customization(s) from 3MF (%d detected, %d declared) vs original profile %r: %s",
-        len(applied_keys), diff_count, declared_count, print_settings_id, list(applied_keys),
-    )
-    transferred = [
-        {"key": k, "value": json.dumps(tv), "original": json.dumps(ov)}
-        for k, (tv, ov) in diffs.items()
-        if k in applied_keys
-    ]
-    # Include declared-only keys (not caught by diff) that were successfully applied
-    for k in applied_keys:
-        if k not in diffs:
-            tv = threemf_settings.get(k)
-            ov = original_profile.get(k)
-            transferred.append({
-                "key": k, "value": json.dumps(tv), "original": json.dumps(ov),
-            })
-    return updated, SettingsTransferResult(
-        status="applied", transferred=transferred, customized_keys=applied_keys,
-    )
 
 
 def _sse_event(event_type: str, data: dict) -> str:
@@ -519,11 +356,18 @@ def _prepare_slice(
         if k not in machine_profile or k in _PROFILE_META_KEYS
     }
 
-    transfer_result = _smart_settings_transfer(
-        process_profile, threemf_settings, declared_customizations,
-    )
-    process_profile = transfer_result[0]
-    settings_transfer = transfer_result[1]
+    if threemf_settings:
+        process_profile, overlaid_keys = _overlay_3mf_settings(process_profile, threemf_settings)
+        if overlaid_keys:
+            logger.info("Overlaid %d setting(s) from 3MF onto process profile", len(overlaid_keys))
+            settings_transfer = SettingsTransferResult(
+                status="applied",
+                customized_keys=overlaid_keys | declared_customizations,
+            )
+        else:
+            settings_transfer = SettingsTransferResult(status="no_customizations")
+    else:
+        settings_transfer = SettingsTransferResult(status="no_3mf_settings")
 
     # Request value takes priority; otherwise preserve 3MF-selected bed type.
     effective_plate_type = plate_type
