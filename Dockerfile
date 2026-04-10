@@ -39,6 +39,8 @@ RUN apt-get update && \
     libglu1-mesa \
     libgtk-3-0t64 \
     libsecret-1-0 \
+    libmspack0 \
+    libsm6 \
     libsoup2.4-1 \
     libssl3t64 \
     libudev1 \
