@@ -152,6 +152,15 @@ function app() {
     async loadMachines() {
       try {
         this.machines = await api("/profiles/machines");
+        // Restore persisted filter after options are available
+        const stored = localStorage.getItem("machineFilter") || "";
+        if (stored && this.machines.some((m) => m.setting_id === stored)) {
+          this.selectedMachineId = stored;
+        } else if (stored) {
+          // Machine no longer exists — clear
+          this.selectedMachineId = "";
+          localStorage.removeItem("machineFilter");
+        }
       } catch (err) {
         console.error("Failed to load machines for filter:", err);
       }
@@ -159,11 +168,19 @@ function app() {
 
     selectMachine(settingId) {
       this.selectedMachineId = settingId;
+      if (settingId) {
+        localStorage.setItem("machineFilter", settingId);
+      } else {
+        localStorage.removeItem("machineFilter");
+      }
       // Re-trigger current list view to reload with filter
       window.dispatchEvent(new Event("machine-filter-changed"));
     },
 
     init() {
+      // Restore persisted machine filter
+      this.selectedMachineId = localStorage.getItem("machineFilter") || "";
+
       // Load API version and machine list for global filter
       api("/health").then((data) => {
         this.version = data.version || "";
@@ -666,9 +683,12 @@ function filamentEditor() {
 
     // Build the import payload from current editor state
     buildPayload() {
+      // For materialized profiles (no parent), include ALL fields since
+      // there's no inherits chain to resolve defaults from.
+      const includeAll = !this.selectedParentData;
       const overrides = {};
       for (const field of this.editableFields) {
-        if (field.modified) {
+        if (field.modified || includeAll) {
           let val = field.value;
           // Re-wrap into single-element array if the parent used that format
           if (field.wrapArray) {
@@ -725,7 +745,7 @@ function filamentEditor() {
     },
 
     async saveAsCopy() {
-      if (!this.preview || !this.preview.resolved_payload) return;
+      if (!this.profileName) return;
       const newName = prompt("Name for the copy:", this.profileName + " (Copy)");
       if (!newName || !newName.trim()) return;
 
@@ -733,16 +753,20 @@ function filamentEditor() {
       this.saveError = null;
 
       try {
-        const payload = { ...this.preview.resolved_payload, name: newName.trim() };
-        // Remove the old setting_id so the backend generates a new one
-        delete payload.setting_id;
-        delete payload.filament_id;
-
-        // Resolve with the new name to get a fresh setting_id
+        // Resolve with the new name to get a fresh setting_id and filament_id.
+        // Carry over compatible_printers from the resolved profile since
+        // buildPayload() excludes it from editable fields.
+        const copyPayload = { ...this.buildPayload(), name: newName.trim() };
+        delete copyPayload.setting_id;
+        delete copyPayload.filament_id;
+        const resolved = this.parentDetail?.resolved || {};
+        if (resolved.compatible_printers) {
+          copyPayload.compatible_printers = resolved.compatible_printers;
+        }
         const resolveResp = await api("/profiles/filaments/resolve-import", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...this.buildPayload(), name: newName.trim() }),
+          body: JSON.stringify(copyPayload),
         });
 
         await api("/profiles/filaments", {
@@ -752,6 +776,8 @@ function filamentEditor() {
         });
 
         window.location.hash = "#/filaments?filter=user";
+        // Force reload after the list component has re-mounted
+        setTimeout(() => window.dispatchEvent(new Event("machine-filter-changed")), 100);
       } catch (err) {
         this.saveError = "Save as copy failed: " + err.message;
       } finally {

@@ -55,7 +55,7 @@
                 x-model="selectedMachineId"
                 @change="selectMachine(selectedMachineId)">
           <option value="">All Machines</option>
-          <template x-for="m in machines" :key="m.name">
+          <template x-for="m in machines" :key="m.setting_id">
             <option :value="m.setting_id" x-text="m.name"></option>
           </template>
         </select>
@@ -440,6 +440,11 @@
             <div class="flex gap-2 border-t border-slate-800 pt-4 mt-4">
               <button class="rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint disabled:opacity-50"
                       @click="goStep3()" :disabled="!profileName">Preview &amp; Save</button>
+              <button x-show="editingId"
+                      class="rounded-md border border-slate-600 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800 disabled:opacity-50"
+                      @click="saveAsCopy()" :disabled="saving || !profileName">
+                Save as Copy
+              </button>
               <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
                       @click="step = 1">Back</button>
               <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
