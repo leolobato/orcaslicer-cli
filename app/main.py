@@ -388,6 +388,7 @@ async def slice_file(
     bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
     support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
     brim_type: str | None = Form(default=None, description="Override brim type."),
+    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
 ):
     """Slice a `.3mf` or `.stl` file using the specified machine, process, and filament profiles.
 
@@ -436,7 +437,7 @@ async def slice_file(
     result, settings_transfer = await slice_3mf(
         file_bytes, machine_profile, process_profile, filament_ids,
         plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type,
+        file_type=file_type, plate=plate,
     )
     headers = {
         "Content-Disposition": "attachment; filename=sliced.3mf",
@@ -492,6 +493,7 @@ async def slice_file_stream(
     bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
     support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
     brim_type: str | None = Form(default=None, description="Override brim type."),
+    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
 ):
     """Slice a `.3mf` or `.stl` file and stream progress via Server-Sent Events.
 
@@ -539,7 +541,7 @@ async def slice_file_stream(
     generator = await slice_3mf_streaming(
         file_bytes, machine_profile, process_profile, filament_ids,
         plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type,
+        file_type=file_type, plate=plate,
     )
     return StreamingResponse(
         generator,

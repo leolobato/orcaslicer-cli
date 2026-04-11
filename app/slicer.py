@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import ORCA_BINARY
 from .profiles import ProfileNotFoundError, get_profile
-from .threemf import extract_first_plate, get_build_volume, get_plate_count, validate_model_fits
+from .threemf import extract_plate, get_build_volume, get_plate_count, validate_model_fits
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +289,7 @@ def _prepare_slice(
     tmpdir: str,
     process_overrides: dict[str, Any] | None = None,
     file_type: str = "3mf",
+    plate: int = 1,
 ) -> SliceContext:
     """Prepare all inputs for slicing: extract settings, write temp files, build CLI command."""
     # Convert STL to 3MF if needed
@@ -313,9 +314,12 @@ def _prepare_slice(
                 logger.debug("Loaded %d project settings from 3MF", len(threemf_settings))
             except (KeyError, json.JSONDecodeError):
                 pass
+            plate_str = str(plate)
             for name in zf.namelist():
                 if name.endswith(".png") and (
-                    "plate_1" in name or "top_1." in name or "pick_1." in name
+                    f"plate_{plate_str}" in name
+                    or f"top_{plate_str}." in name
+                    or f"pick_{plate_str}." in name
                 ):
                     original_thumbnails[name] = zf.read(name)
     except (zipfile.BadZipFile,) as exc:
@@ -324,17 +328,21 @@ def _prepare_slice(
         logger.debug("Extracted %d thumbnail(s) from original 3MF", len(original_thumbnails))
 
     plate_count = get_plate_count(file_bytes)
+    if plate > plate_count:
+        raise ModelTooBigError(
+            f"Requested plate {plate} but file only has {plate_count} plate(s)"
+        )
     if plate_count > 1:
         volume = get_build_volume(machine_profile)
         if volume:
             bed_cx, bed_cy = volume[0] / 2, volume[1] / 2
         else:
             bed_cx, bed_cy = 90.0, 90.0
-        rebuilt = extract_first_plate(file_bytes, bed_cx, bed_cy)
+        rebuilt = extract_plate(file_bytes, bed_cx, bed_cy, plate_id=str(plate))
         if rebuilt is not None:
             logger.info(
-                "Rebuilt multi-plate 3MF (%d plates) into single-plate for plate 1",
-                plate_count,
+                "Rebuilt multi-plate 3MF (%d plates) into single-plate for plate %d",
+                plate_count, plate,
             )
             file_bytes = rebuilt
 
@@ -525,12 +533,13 @@ async def slice_3mf(
     plate_type: str | None = None,
     process_overrides: dict[str, Any] | None = None,
     file_type: str = "3mf",
+    plate: int = 1,
 ) -> tuple[bytes, SettingsTransferResult]:
     """Slice a 3MF or STL file and return the sliced result as bytes + transfer info."""
     logger.info(
-        "Slice request: machine=%s process=%s filaments=%s file_size=%d overrides=%s file_type=%s",
+        "Slice request: machine=%s process=%s filaments=%s file_size=%d overrides=%s file_type=%s plate=%d",
         machine_profile_id, process_profile_id, filament_profile_ids, len(file_bytes),
-        list(process_overrides.keys()) if process_overrides else None, file_type,
+        list(process_overrides.keys()) if process_overrides else None, file_type, plate,
     )
 
     # Resolve profiles
@@ -559,7 +568,7 @@ async def slice_3mf(
     async with _slice_semaphore:
         return await _do_slice(
             file_bytes, machine_profile, process_profile, filament_profiles,
-            plate_type, process_overrides, file_type,
+            plate_type, process_overrides, file_type, plate,
         )
 
 
@@ -571,11 +580,12 @@ async def _do_slice(
     plate_type: str | None,
     process_overrides: dict[str, Any] | None = None,
     file_type: str = "3mf",
+    plate: int = 1,
 ) -> tuple[bytes, SettingsTransferResult]:
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx = _prepare_slice(
             file_bytes, machine_profile, process_profile, filament_profiles,
-            plate_type, tmpdir, process_overrides, file_type,
+            plate_type, tmpdir, process_overrides, file_type, plate,
         )
 
         # Run OrcaSlicer
@@ -615,6 +625,7 @@ async def slice_3mf_streaming(
     plate_type: str | None = None,
     process_overrides: dict[str, Any] | None = None,
     file_type: str = "3mf",
+    plate: int = 1,
 ):
     """Resolve profiles and return an SSE async generator for streaming slicing.
 
@@ -637,7 +648,7 @@ async def slice_3mf_streaming(
             yield _sse_event("status", {"phase": "reading_3mf", "message": "Reading input file"})
             ctx = _prepare_slice(
                 file_bytes, machine_profile, process_profile, filament_profiles,
-                plate_type, tmpdir, process_overrides, file_type,
+                plate_type, tmpdir, process_overrides, file_type, plate,
             )
 
             yield _sse_event("status", {"phase": "slicing", "message": "Starting OrcaSlicer"})

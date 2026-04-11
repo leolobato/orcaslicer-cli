@@ -374,12 +374,13 @@ def _collect_mesh_data(
     return all_verts, all_tris
 
 
-def extract_first_plate(
+def extract_plate(
     file_bytes: bytes,
     bed_center_x: float = 90.0,
     bed_center_y: float = 90.0,
+    plate_id: str = "1",
 ) -> bytes | None:
-    """Extract plate 1 geometry from a multi-plate 3MF into a fresh simple 3MF.
+    """Extract a plate's geometry from a multi-plate 3MF into a fresh simple 3MF.
 
     Returns new 3MF bytes with a single inline mesh centered on the bed,
     or None if extraction fails.
@@ -390,8 +391,8 @@ def extract_first_plate(
                 return None
 
             ms = zf.read("Metadata/model_settings.config").decode()
-            plate1_ids = _get_plate_object_ids(ms, "1")
-            if not plate1_ids:
+            plate_ids = _get_plate_object_ids(ms, plate_id)
+            if not plate_ids:
                 return None
 
             root_model_path = None
@@ -404,7 +405,7 @@ def extract_first_plate(
 
             root_model = zf.read(root_model_path).decode()
             world_verts, tris = _collect_mesh_data(
-                zf, root_model, plate1_ids,
+                zf, root_model, plate_ids,
             )
 
         if not world_verts or not tris:
@@ -517,8 +518,8 @@ def extract_first_plate(
 
         result = buf.getvalue()
         logger.info(
-            "Extracted plate 1 from multi-plate 3MF: %d vertices, %d triangles, %d bytes",
-            len(final_verts), len(tris), len(result),
+            "Extracted plate %s from multi-plate 3MF: %d vertices, %d triangles, %d bytes",
+            plate_id, len(final_verts), len(tris), len(result),
         )
         return result
 
