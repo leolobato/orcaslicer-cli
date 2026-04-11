@@ -724,6 +724,41 @@ function filamentEditor() {
       }
     },
 
+    async saveAsCopy() {
+      if (!this.preview || !this.preview.resolved_payload) return;
+      const newName = prompt("Name for the copy:", this.profileName + " (Copy)");
+      if (!newName || !newName.trim()) return;
+
+      this.saving = true;
+      this.saveError = null;
+
+      try {
+        const payload = { ...this.preview.resolved_payload, name: newName.trim() };
+        // Remove the old setting_id so the backend generates a new one
+        delete payload.setting_id;
+        delete payload.filament_id;
+
+        // Resolve with the new name to get a fresh setting_id
+        const resolveResp = await api("/profiles/filaments/resolve-import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...this.buildPayload(), name: newName.trim() }),
+        });
+
+        await api("/profiles/filaments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(resolveResp.resolved_payload),
+        });
+
+        window.location.hash = "#/filaments?filter=user";
+      } catch (err) {
+        this.saveError = "Save as copy failed: " + err.message;
+      } finally {
+        this.saving = false;
+      }
+    },
+
     cancel() {
       window.location.hash = "#/filaments";
     },

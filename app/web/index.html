@@ -483,6 +483,11 @@
                     <span x-show="!saving">Save</span>
                     <span x-show="saving">Saving...</span>
                   </button>
+                  <button x-show="editingId"
+                          class="rounded-md border border-slate-600 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800 disabled:opacity-50"
+                          @click="saveAsCopy()" :disabled="saving">
+                    Save as Copy
+                  </button>
                   <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
                           @click="step = 2">Back</button>
                   <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm text-slate-300 transition-colors hover:bg-slate-800"
