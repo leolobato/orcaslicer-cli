@@ -24,14 +24,6 @@ Ours emits 1-element vectors for those keys. No impact on single-filament prints
 
 Action when tackled: port the normalization step to `app/profiles.py` (or apply in `app/slicer.py` just before writing the profile JSONs). ~50 lines.
 
-### Per-filament transfer (`different_settings_to_system[2+]`)
-
-Slots 2+ of `different_settings_to_system` track per-filament customizations the user made in the GUI. We don't currently look at them — today we just pass the user-selected filament profiles as-is.
-
-GUI applies them on top of the selected filament preset. If a user saves a 3MF with, say, a custom `nozzle_temperature` override on filament slot 1, our tool will currently ignore that customization unless the user also imports it as a custom filament.
-
-Action: mirror the process-side transfer for each filament slot. Per-slot allowlist from `different_settings_to_system[slot + 2]`, overlay onto the corresponding loaded filament profile.
-
 ## Known, intentional divergences (not bugs)
 
 - `layer_change_gcode` is prepended with `G92 E0` — Bambu relative-extrusion workaround (documented in CLAUDE.md).
