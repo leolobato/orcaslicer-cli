@@ -17,7 +17,7 @@ When a user saves a 3MF in OrcaSlicer with a process profile (e.g., "0.20mm Stan
 
 Previously, the API blindly overlaid **all** embedded settings onto whatever process profile the client requested. This meant the target profile's defaults were mostly overwritten by the source profile's defaults — defeating the purpose of choosing a different profile.
 
-Now, the API detects which settings the user actually customized and transfers only those.
+Now, the API reads the 3MF's own `different_settings_to_system[0]` fingerprint — the list of keys the slicer recorded as user-customized when the file was saved — and transfers only those keys onto the target process profile. This matches OrcaSlicer GUI behavior when you open a 3MF and re-select the process preset. If the fingerprint is absent or empty, nothing is transferred.
 
 ### New Response Headers
 
@@ -29,10 +29,9 @@ Always present. One of:
 
 | Value | Meaning |
 |-------|---------|
-| `applied` | User customizations were detected and transferred to the target profile. |
-| `no_customizations` | The 3MF settings match the original profile exactly — no transfer needed. |
-| `no_original_profile` | The original profile referenced in the 3MF wasn't found in our profile library. Fell back to full overlay (previous behavior). |
-| `no_3mf_settings` | The 3MF has no embedded process settings or no `print_settings_id`. Fell back to full overlay (previous behavior). |
+| `applied` | The 3MF declared user customizations and they were transferred to the target profile. |
+| `no_customizations` | The 3MF's `different_settings_to_system[0]` fingerprint was empty or absent — nothing to transfer. |
+| `no_3mf_settings` | The 3MF had no embedded `project_settings.config` at all. |
 
 #### `X-Settings-Transferred`
 
@@ -63,7 +62,6 @@ Present only when status is `applied`. A JSON array of objects describing each t
 |--------|------------------------|
 | `applied` | Show a summary: *"Transferred N custom setting(s) from your file: [list keys]."* Optionally display the before/after values. |
 | `no_customizations` | Silent or brief: *"Sliced with [profile name]. No custom settings detected in file."* |
-| `no_original_profile` | Warning: *"Could not identify the original profile in your file. All embedded settings were applied as-is."* |
 | `no_3mf_settings` | Silent — the file had no embedded process settings, which is normal for freshly exported STL→3MF files. |
 
 ---

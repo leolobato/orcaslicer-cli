@@ -149,16 +149,23 @@ def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
 
 
 def _overlay_3mf_settings(
-    process_profile: dict[str, Any], threemf_settings: dict[str, Any],
+    process_profile: dict[str, Any],
+    threemf_settings: dict[str, Any],
+    allowed_keys: set[str],
 ) -> tuple[dict[str, Any], set[str]]:
     """Overlay 3MF project settings onto process profile to preserve user choices.
+
+    Only keys in `allowed_keys` (derived from the 3MF's
+    `different_settings_to_system[0]` fingerprint) are considered. Passing an
+    empty set transfers nothing.
 
     Returns (updated_profile, set_of_overlaid_keys).
     """
     overrides = {}
-    for k in process_profile:
+    for k in allowed_keys:
         if (
-            k not in threemf_settings
+            k not in process_profile
+            or k not in threemf_settings
             or k in _PROFILE_META_KEYS
             or not _is_transferable_process_key(k)
         ):
@@ -365,12 +372,14 @@ def _prepare_slice(
     }
 
     if threemf_settings:
-        process_profile, overlaid_keys = _overlay_3mf_settings(process_profile, threemf_settings)
+        process_profile, overlaid_keys = _overlay_3mf_settings(
+            process_profile, threemf_settings, declared_customizations,
+        )
         if overlaid_keys:
             logger.info("Overlaid %d setting(s) from 3MF onto process profile", len(overlaid_keys))
             settings_transfer = SettingsTransferResult(
                 status="applied",
-                customized_keys=overlaid_keys | declared_customizations,
+                customized_keys=overlaid_keys,
             )
         else:
             settings_transfer = SettingsTransferResult(status="no_customizations")
