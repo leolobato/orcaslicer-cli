@@ -94,6 +94,41 @@ def _select_profile_key_by_name(
     return ordered[0] if ordered else None
 
 
+def _resolve_parent_key(
+    parent_name: str,
+    *,
+    category: str,
+    preferred_vendor: str,
+) -> str | None:
+    """Resolve an `inherits` reference using OrcaSlicer GUI semantics.
+
+    Same-vendor wins; the only cross-vendor fallback is OrcaFilamentLibrary.
+    User profiles additionally fall back to any system vendor, since user
+    customizations commonly clone vendor presets.
+    """
+    keys = _candidate_keys_for_name(parent_name, category=category)
+    if not keys:
+        return None
+
+    same = [k for k in keys if _vendor_map.get(k) == preferred_vendor]
+    if same:
+        return same[0]
+
+    library = [k for k in keys if _vendor_map.get(k) == ORCA_FILAMENT_LIBRARY]
+    if library:
+        return library[0]
+
+    if preferred_vendor == "User":
+        other = [
+            k for k in keys
+            if _vendor_map.get(k) not in (preferred_vendor, ORCA_FILAMENT_LIBRARY)
+        ]
+        if other:
+            return other[0]
+
+    return None
+
+
 def _detect_profile_type(data: dict[str, Any]) -> str:
     """Detect whether a profile is machine, process, or filament."""
     if "filament_type" in data or "filament_id" in data:
@@ -404,8 +439,9 @@ def load_all_profiles() -> dict[str, int]:
             _index_profile(profile_key, data, v_type_map[profile_name], vendor_name)
         vendor_dirs.append((vendor_name, vendor_dir))
 
-    # Follow inherits chains to discover unlisted base profiles
-    # Search across ALL vendor dirs for parent profiles
+    # Follow inherits chains to discover unlisted base profiles.
+    # Strict GUI semantics: only search the child's own vendor and
+    # OrcaFilamentLibrary. Same-vendor wins.
     pending = list(_raw_profiles.keys())
     while pending:
         next_batch = []
@@ -417,18 +453,17 @@ def load_all_profiles() -> dict[str, int]:
             if not ptype:
                 continue
             preferred_vendor = _vendor_map.get(profile_key, "")
-            existing_parent_key = _select_profile_key_by_name(
+            existing_parent_key = _resolve_parent_key(
                 parent_name,
                 category=ptype,
                 preferred_vendor=preferred_vendor,
             )
             if existing_parent_key and _vendor_map.get(existing_parent_key) == preferred_vendor:
                 continue
-            ordered_vendor_dirs = sorted(
-                vendor_dirs,
-                key=lambda item: (item[0] != preferred_vendor, item[0] != ORCA_FILAMENT_LIBRARY, item[0]),
-            )
-            for vendor_name, vdir in ordered_vendor_dirs:
+            allowed = {preferred_vendor, ORCA_FILAMENT_LIBRARY}
+            candidate_dirs = [item for item in vendor_dirs if item[0] in allowed]
+            candidate_dirs.sort(key=lambda item: (item[0] != preferred_vendor, item[0]))
+            for vendor_name, vdir in candidate_dirs:
                 path = os.path.join(vdir, ptype, f"{parent_name}.json")
                 if os.path.isfile(path):
                     with open(path) as f:
@@ -480,10 +515,10 @@ def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
 
     parent_name = profile.get("inherits")
     if parent_name:
-        parent_key = _select_profile_key_by_name(
+        parent_key = _resolve_parent_key(
             parent_name,
-            category=_type_map.get(profile_key),
-            preferred_vendor=_vendor_map.get(profile_key),
+            category=_type_map.get(profile_key, ""),
+            preferred_vendor=_vendor_map.get(profile_key, ""),
         )
     else:
         parent_key = None
@@ -604,10 +639,10 @@ def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
         parent_name = raw.get("inherits")
         if not parent_name:
             break
-        current_key = _select_profile_key_by_name(
+        current_key = _resolve_parent_key(
             parent_name,
-            category=_type_map.get(current_key),
-            preferred_vendor=_vendor_map.get(current_key),
+            category=_type_map.get(current_key, ""),
+            preferred_vendor=_vendor_map.get(current_key, ""),
         )
 
     return {
