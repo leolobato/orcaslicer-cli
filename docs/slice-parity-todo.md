@@ -9,6 +9,7 @@ Methodology: diff `Metadata/project_settings.config` from each 3MF. 57 real valu
 ## Done
 
 - [x] **Smart settings transfer over-reach.** Our overlay copied 151 keys from the 3MF's project_settings onto the target process, while the GUI only applies the 4 keys declared in `different_settings_to_system[0]`. Fixed: `_overlay_3mf_settings` now takes an allowlist sourced from the 3MF fingerprint; transfers nothing when the fingerprint is empty or absent. See `app/slicer.py` and the updated `test_slicer_settings_transfer.py`.
+- [x] **`print_extruder_variant` leak** (ours emitted `["Direct Drive Standard", "Direct Drive High Flow"]` vs GUI's `["Direct Drive Standard"]`) resolved as a side effect of the transfer fix — the extra variant was being injected through the over-transfer path.
 
 ## Pending
 
@@ -21,14 +22,6 @@ Evidence: with 2 filament slots loaded, the GUI emits 2-element vectors for `fil
 Ours emits 1-element vectors for those keys. No impact on single-filament prints; will matter for AMS multi-material.
 
 Action when tackled: port the normalization step to `app/profiles.py` (or apply in `app/slicer.py` just before writing the profile JSONs). ~50 lines.
-
-### `print_extruder_variant` picks up filament-scoped variant
-
-Symptom: ours emits `print_extruder_variant = ["Direct Drive Standard", "Direct Drive High Flow"]`, GUI emits `["Direct Drive Standard"]`.
-
-The imported eSUN filament JSON declares `filament_extruder_variant: ["Direct Drive Standard"]`, but our `materialize_filament_import` / merge path may be leaking the filament-side variant list into the process's `print_extruder_variant`. The A1 mini is single-extruder, so `print_extruder_variant` must be length 1.
-
-Action: trace where `print_extruder_variant` is populated during slice prep; ensure it matches the machine profile's extruder count, not the filament count.
 
 ### Per-filament transfer (`different_settings_to_system[2+]`)
 
