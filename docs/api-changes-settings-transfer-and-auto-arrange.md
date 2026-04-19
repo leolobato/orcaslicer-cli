@@ -17,7 +17,9 @@ When a user saves a 3MF in OrcaSlicer with a process profile (e.g., "0.20mm Stan
 
 Previously, the API blindly overlaid **all** embedded settings onto whatever process profile the client requested. This meant the target profile's defaults were mostly overwritten by the source profile's defaults — defeating the purpose of choosing a different profile.
 
-Now, the API reads the 3MF's own `different_settings_to_system[0]` fingerprint — the list of keys the slicer recorded as user-customized when the file was saved — and transfers only those keys onto the target process profile. This matches OrcaSlicer GUI behavior when you open a 3MF and re-select the process preset. If the fingerprint is absent or empty, nothing is transferred.
+Now, the API reads the 3MF's own `different_settings_to_system` fingerprint — the list of keys the slicer recorded as user-customized when the file was saved — and transfers only those keys onto the target profiles. Slot 0 drives process-level transfer; slots 2+ drive per-filament transfer (one slot per filament, in order). This matches OrcaSlicer GUI behavior when you open a 3MF and re-select a preset. If the fingerprint is absent or empty, nothing is transferred.
+
+Per-filament customizations are applied only when the selected filament for a slot matches the 3MF's original filament (`filament_settings_id[slot]`). When the user swaps in a different filament profile, declared customizations are discarded (they were tuned for a different filament) and reported back so the client can show the user which settings were dropped.
 
 ### New Response Headers
 
@@ -35,7 +37,7 @@ Always present. One of:
 
 #### `X-Settings-Transferred`
 
-Present only when status is `applied`. A JSON array of objects describing each transferred setting:
+Present only when status is `applied`. A JSON array of objects describing each transferred process-level setting:
 
 ```json
 [
@@ -54,7 +56,45 @@ Present only when status is `applied`. A JSON array of objects describing each t
 
 - `key` — The OrcaSlicer setting name.
 - `value` — The user's customized value (from the 3MF).
-- `original` — The default value from the 3MF's original profile (`None` if the setting didn't exist in the original profile).
+- `original` — The target process profile's value before overlay (`None` if the setting didn't exist).
+
+#### `X-Filament-Settings-Transferred`
+
+Present whenever the 3MF declared per-filament customizations for at least one slot. A JSON array of per-slot entries:
+
+```json
+[
+  {
+    "slot": 0,
+    "original_filament": "Bambu PLA Basic @BBL A1M",
+    "selected_filament": "Bambu PLA Basic @BBL A1M",
+    "status": "applied",
+    "transferred": [
+      {"key": "nozzle_temperature", "value": "225", "original": "220"}
+    ],
+    "discarded": []
+  },
+  {
+    "slot": 1,
+    "original_filament": "Bambu PLA Matte @BBL A1M",
+    "selected_filament": "eSUN PLA Silk @BBL A1M",
+    "status": "filament_changed",
+    "transferred": [],
+    "discarded": ["fan_min_speed", "nozzle_temperature"]
+  }
+]
+```
+
+- `status` — `applied` when customizations were carried over, `filament_changed` when the user selected a different filament and customizations were dropped, `no_customizations` when the 3MF had nothing declared for the slot (usually omitted from the array).
+- `transferred` — per-key entries in the same shape as `X-Settings-Transferred` (only populated when `status: "applied"`).
+- `discarded` — list of keys the 3MF declared as customized but which weren't applied because the filament was swapped (only populated when `status: "filament_changed"`).
+
+### Client suggested UX for filament transfers
+
+| Condition | Suggested User Feedback |
+|-----------|------------------------|
+| `applied` with non-empty `transferred` | *"Carried over N custom setting(s) for filament slot X."* |
+| `filament_changed` with non-empty `discarded` | *"Dropped N custom setting(s) on slot X because you replaced [original] with [selected]."* — surface as a warning so the user can tweak manually if needed. |
 
 ### Suggested UX
 

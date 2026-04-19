@@ -10,7 +10,7 @@ import re
 import shutil
 import tempfile
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import ORCA_BINARY
@@ -65,10 +65,22 @@ _NON_TRANSFERABLE_PROCESS_KEYS = {
 
 
 @dataclass
+class FilamentTransferEntry:
+    slot: int  # 0-indexed filament slot
+    original_filament: str  # `filament_settings_id[slot]` from the source 3MF
+    selected_filament: str  # `name` of the filament profile supplied for this slice
+    status: str  # "applied", "filament_changed", "no_customizations"
+    transferred: list[dict[str, Any]] = field(default_factory=list)
+    discarded: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SettingsTransferResult:
-    status: str  # "applied", "no_original_profile", "no_customizations", "no_3mf_settings"
+    status: str  # "applied", "no_customizations", "no_3mf_settings"
     transferred: list[dict[str, str]] = field(default_factory=list)
     customized_keys: set[str] = field(default_factory=set)
+    filaments: list[FilamentTransferEntry] = field(default_factory=list)
+    filament_customized_keys: dict[int, set[str]] = field(default_factory=dict)
 
 
 
@@ -107,6 +119,76 @@ def _extract_declared_customizations(threemf_settings: dict[str, Any]) -> set[st
     if not isinstance(process_diffs, str) or not process_diffs.strip():
         return set()
     return {k.strip() for k in process_diffs.split(";") if k.strip()}
+
+
+def _extract_declared_filament_customizations(
+    threemf_settings: dict[str, Any],
+) -> list[set[str]]:
+    """Per-filament customization allowlists from `different_settings_to_system[2+]`.
+
+    Slot `i` in the returned list corresponds to filament slot `i`
+    (= `different_settings_to_system[i + 2]`). Returns an empty list when the
+    fingerprint is missing or has no filament slots.
+    """
+    diff_to_system = threemf_settings.get("different_settings_to_system")
+    if not isinstance(diff_to_system, list) or len(diff_to_system) <= 2:
+        return []
+    result: list[set[str]] = []
+    for entry in diff_to_system[2:]:
+        if isinstance(entry, str) and entry.strip():
+            result.append({k.strip() for k in entry.split(";") if k.strip()})
+        else:
+            result.append(set())
+    return result
+
+
+def _overlay_3mf_filament_settings(
+    filament_profile: dict[str, Any],
+    threemf_settings: dict[str, Any],
+    slot_idx: int,
+    allowed_keys: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Overlay per-filament 3MF customizations onto a loaded filament profile.
+
+    The 3MF's `project_settings.config` stores per-filament values as combined
+    multi-element vectors (e.g. `nozzle_temperature: ["220", "225"]` where
+    index `i` is filament slot `i`). A loaded filament profile keeps its own
+    value as a 1-element vector. For each key in `allowed_keys`, this extracts
+    `threemf_settings[key][slot_idx]` and writes it as `[value]` into the
+    filament profile.
+
+    Returns `(updated_profile, entries)` where `entries` is a list of
+    `{key, value, original}` dicts for display in response headers.
+    """
+    overrides: dict[str, Any] = {}
+    entries: list[dict[str, Any]] = []
+    for key in allowed_keys:
+        if key not in threemf_settings:
+            continue
+        threemf_val = threemf_settings[key]
+        if isinstance(threemf_val, list):
+            if slot_idx >= len(threemf_val):
+                continue
+            slot_val = threemf_val[slot_idx]
+        else:
+            slot_val = threemf_val
+
+        profile_val = filament_profile.get(key)
+        if isinstance(profile_val, list):
+            new_val: Any = [slot_val]
+            original = profile_val[0] if profile_val else None
+        else:
+            new_val = slot_val
+            original = profile_val
+
+        if profile_val == new_val:
+            continue
+        overrides[key] = new_val
+        entries.append({"key": key, "value": slot_val, "original": original})
+
+    if overrides:
+        return {**filament_profile, **overrides}, entries
+    return filament_profile, []
 
 
 def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
@@ -414,6 +496,65 @@ def _prepare_slice(
     if slice_filepath != input_path:
         logger.debug("3MF was sanitized")
 
+    # Per-filament customization transfer: apply the 3MF's declared per-slot
+    # customizations onto the loaded filament profile when the selected filament
+    # matches the 3MF's original for that slot; otherwise report discarded keys.
+    filament_allowlists = _extract_declared_filament_customizations(threemf_settings)
+    original_filament_ids = threemf_settings.get("filament_settings_id") or []
+    if not isinstance(original_filament_ids, list):
+        original_filament_ids = []
+
+    for slot_idx, fp in enumerate(filament_profiles):
+        allowed_keys = (
+            filament_allowlists[slot_idx]
+            if slot_idx < len(filament_allowlists)
+            else set()
+        )
+        original_name = ""
+        if slot_idx < len(original_filament_ids):
+            raw = original_filament_ids[slot_idx]
+            if isinstance(raw, str):
+                original_name = raw.strip()
+        selected_name = str(fp.get("name", "")).strip()
+
+        if not allowed_keys:
+            continue
+
+        same_filament = bool(original_name) and original_name == selected_name
+        if same_filament:
+            updated_fp, transferred = _overlay_3mf_filament_settings(
+                fp, threemf_settings, slot_idx, allowed_keys,
+            )
+            if transferred:
+                filament_profiles[slot_idx] = updated_fp
+                settings_transfer.filaments.append(FilamentTransferEntry(
+                    slot=slot_idx,
+                    original_filament=original_name,
+                    selected_filament=selected_name,
+                    status="applied",
+                    transferred=transferred,
+                ))
+                settings_transfer.filament_customized_keys[slot_idx] = {
+                    e["key"] for e in transferred
+                }
+                logger.info(
+                    "Filament slot %d: applied %d customization(s) from 3MF",
+                    slot_idx, len(transferred),
+                )
+        else:
+            settings_transfer.filaments.append(FilamentTransferEntry(
+                slot=slot_idx,
+                original_filament=original_name,
+                selected_filament=selected_name,
+                status="filament_changed",
+                discarded=sorted(allowed_keys),
+            ))
+            logger.info(
+                "Filament slot %d: discarded %d customization(s) — filament "
+                "changed from %r to %r",
+                slot_idx, len(allowed_keys), original_name, selected_name,
+            )
+
     machine_path = os.path.join(tmpdir, "machine.json")
     process_path = os.path.join(tmpdir, "process.json")
     with open(machine_path, "w") as f:
@@ -456,7 +597,11 @@ def _prepare_slice(
     )
 
 
-def _patch_output_settings(result_path: str, customized_keys: set[str]) -> None:
+def _patch_output_settings(
+    result_path: str,
+    customized_keys: set[str],
+    filament_customized_keys: dict[int, set[str]] | None = None,
+) -> None:
     """Ensure transferred keys appear in the output 3MF's different_settings_to_system.
 
     OrcaSlicer CLI computes different_settings_to_system against the loaded profile
@@ -464,8 +609,13 @@ def _patch_output_settings(result_path: str, customized_keys: set[str]) -> None:
     The GUI then falls back to system-profile defaults for those keys.  Patching
     the field after slicing ensures the user's customizations are visible when
     reopening the file in OrcaSlicer.
+
+    `customized_keys` patches slot 0 (process). `filament_customized_keys` maps
+    filament slot index to per-filament customization keys; each mapped slot is
+    patched into `different_settings_to_system[slot + 2]`.
     """
-    if not customized_keys:
+    filament_customized_keys = filament_customized_keys or {}
+    if not customized_keys and not filament_customized_keys:
         return
 
     settings_file = "Metadata/project_settings.config"
@@ -477,16 +627,47 @@ def _patch_output_settings(result_path: str, customized_keys: set[str]) -> None:
 
     settings = json.loads(raw)
     diff_to_system = settings.get("different_settings_to_system", [])
-    if not isinstance(diff_to_system, list) or not diff_to_system:
-        diff_to_system = [""]
+    if not isinstance(diff_to_system, list):
+        diff_to_system = []
 
-    existing = {k.strip() for k in diff_to_system[0].split(";") if k.strip()} \
-        if isinstance(diff_to_system[0], str) else set()
-    merged = existing | customized_keys
-    if merged == existing:
-        return  # nothing to add
+    required_len = max(
+        [1]
+        + ([2 + s for s in filament_customized_keys] if filament_customized_keys else []),
+    )
+    while len(diff_to_system) < required_len:
+        diff_to_system.append("")
 
-    diff_to_system[0] = ";".join(sorted(merged))
+    changed = False
+
+    if customized_keys:
+        existing = (
+            {k.strip() for k in diff_to_system[0].split(";") if k.strip()}
+            if isinstance(diff_to_system[0], str)
+            else set()
+        )
+        merged = existing | customized_keys
+        if merged != existing:
+            diff_to_system[0] = ";".join(sorted(merged))
+            changed = True
+
+    for slot_idx, keys in filament_customized_keys.items():
+        if not keys:
+            continue
+        target_idx = slot_idx + 2
+        existing_entry = diff_to_system[target_idx]
+        existing = (
+            {k.strip() for k in existing_entry.split(";") if k.strip()}
+            if isinstance(existing_entry, str)
+            else set()
+        )
+        merged = existing | keys
+        if merged != existing:
+            diff_to_system[target_idx] = ";".join(sorted(merged))
+            changed = True
+
+    if not changed:
+        return
+
     settings["different_settings_to_system"] = diff_to_system
 
     tmp_path = result_path + ".tmp"
@@ -498,10 +679,7 @@ def _patch_output_settings(result_path: str, customized_keys: set[str]) -> None:
                 else:
                     zf_out.writestr(item, zf_in.read(item.filename))
     os.replace(tmp_path, result_path)
-    logger.debug(
-        "Patched different_settings_to_system with %d key(s): %s",
-        len(merged - existing), sorted(merged - existing),
-    )
+    logger.debug("Patched different_settings_to_system")
 
 
 def _post_process(ctx: SliceContext, orca_output: str | None = None) -> bytes:
@@ -514,7 +692,11 @@ def _post_process(ctx: SliceContext, orca_output: str | None = None) -> bytes:
         )
 
     try:
-        _patch_output_settings(ctx.result_path, ctx.settings_transfer.customized_keys)
+        _patch_output_settings(
+            ctx.result_path,
+            ctx.settings_transfer.customized_keys,
+            ctx.settings_transfer.filament_customized_keys,
+        )
     except Exception:
         logger.warning("Failed to patch different_settings_to_system; continuing", exc_info=True)
 
@@ -708,9 +890,13 @@ async def slice_3mf_streaming(
                     return
 
                 result_b64 = base64.b64encode(result_bytes).decode()
-                transfer_info = {"status": ctx.settings_transfer.status}
+                transfer_info: dict[str, Any] = {"status": ctx.settings_transfer.status}
                 if ctx.settings_transfer.status == "applied" and ctx.settings_transfer.transferred:
                     transfer_info["transferred"] = ctx.settings_transfer.transferred
+                if ctx.settings_transfer.filaments:
+                    transfer_info["filaments"] = [
+                        asdict(f) for f in ctx.settings_transfer.filaments
+                    ]
 
                 yield _sse_event("result", {
                     "file_base64": result_b64,

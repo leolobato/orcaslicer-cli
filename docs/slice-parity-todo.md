@@ -10,6 +10,7 @@ Methodology: diff `Metadata/project_settings.config` from each 3MF. 57 real valu
 
 - [x] **Smart settings transfer over-reach.** Our overlay copied 151 keys from the 3MF's project_settings onto the target process, while the GUI only applies the 4 keys declared in `different_settings_to_system[0]`. Fixed: `_overlay_3mf_settings` now takes an allowlist sourced from the 3MF fingerprint; transfers nothing when the fingerprint is empty or absent. See `app/slicer.py` and the updated `test_slicer_settings_transfer.py`.
 - [x] **`print_extruder_variant` leak** (ours emitted `["Direct Drive Standard", "Direct Drive High Flow"]` vs GUI's `["Direct Drive Standard"]`) resolved as a side effect of the transfer fix — the extra variant was being injected through the over-transfer path.
+- [x] **Per-filament transfer** (`different_settings_to_system[2+]`). Each filament slot's declared keys are overlaid onto the loaded filament profile only when that slot's selected filament matches the 3MF's original (`filament_settings_id[slot]`). When the user swaps in a different filament, customizations are discarded and reported via a new `X-Filament-Settings-Transferred` header (process-side header is unchanged). bambu-gateway surfaces the header into its own responses and the web UI shows both "applied" and "discarded" messages.
 
 ## Pending
 

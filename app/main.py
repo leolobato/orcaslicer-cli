@@ -1,6 +1,7 @@
 """FastAPI app exposing OrcaSlicer as a REST API."""
 
 import json
+from dataclasses import asdict
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -445,6 +446,10 @@ async def slice_file(
     }
     if settings_transfer.status == "applied" and settings_transfer.transferred:
         headers["X-Settings-Transferred"] = json.dumps(settings_transfer.transferred)
+    if settings_transfer.filaments:
+        headers["X-Filament-Settings-Transferred"] = json.dumps(
+            [asdict(f) for f in settings_transfer.filaments]
+        )
     return Response(
         content=result,
         media_type="application/octet-stream",

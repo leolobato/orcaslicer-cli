@@ -1,6 +1,11 @@
 import unittest
 
-from app.slicer import _extract_declared_customizations, _overlay_3mf_settings
+from app.slicer import (
+    _extract_declared_customizations,
+    _extract_declared_filament_customizations,
+    _overlay_3mf_filament_settings,
+    _overlay_3mf_settings,
+)
 
 
 class OverlaySettingsTests(unittest.TestCase):
@@ -114,6 +119,96 @@ class DeclaredCustomizationsTests(unittest.TestCase):
     def test_returns_empty_when_process_slot_blank(self) -> None:
         threemf_settings = {"different_settings_to_system": ["", "", "", ""]}
         self.assertEqual(_extract_declared_customizations(threemf_settings), set())
+
+
+class DeclaredFilamentCustomizationsTests(unittest.TestCase):
+    def test_extracts_per_filament_slots(self) -> None:
+        threemf_settings = {
+            "different_settings_to_system": [
+                "sparse_infill_pattern",
+                "",
+                "nozzle_temperature;fan_min_speed",
+                "filament_max_volumetric_speed",
+            ],
+        }
+        result = _extract_declared_filament_customizations(threemf_settings)
+        self.assertEqual(result, [
+            {"nozzle_temperature", "fan_min_speed"},
+            {"filament_max_volumetric_speed"},
+        ])
+
+    def test_returns_empty_when_no_filament_slots(self) -> None:
+        threemf_settings = {"different_settings_to_system": ["a", ""]}
+        self.assertEqual(_extract_declared_filament_customizations(threemf_settings), [])
+
+    def test_returns_empty_when_field_missing(self) -> None:
+        self.assertEqual(_extract_declared_filament_customizations({}), [])
+
+    def test_blank_slot_yields_empty_set(self) -> None:
+        threemf_settings = {"different_settings_to_system": ["", "", "", "nozzle_temperature"]}
+        self.assertEqual(
+            _extract_declared_filament_customizations(threemf_settings),
+            [set(), {"nozzle_temperature"}],
+        )
+
+
+class OverlayFilamentSettingsTests(unittest.TestCase):
+    def test_extracts_slot_value_from_combined_vector(self) -> None:
+        filament_profile = {
+            "name": "Bambu PLA Basic @BBL A1M",
+            "nozzle_temperature": ["220"],
+            "fan_min_speed": ["60"],
+        }
+        threemf_settings = {
+            "nozzle_temperature": ["220", "225"],
+            "fan_min_speed": ["60", "80"],
+        }
+        allowed = {"nozzle_temperature", "fan_min_speed"}
+
+        updated, entries = _overlay_3mf_filament_settings(
+            filament_profile, threemf_settings, slot_idx=1, allowed_keys=allowed,
+        )
+
+        self.assertEqual(updated["nozzle_temperature"], ["225"])
+        self.assertEqual(updated["fan_min_speed"], ["80"])
+        by_key = {e["key"]: e for e in entries}
+        self.assertEqual(by_key["nozzle_temperature"]["value"], "225")
+        self.assertEqual(by_key["nozzle_temperature"]["original"], "220")
+        self.assertEqual(by_key["fan_min_speed"]["value"], "80")
+
+    def test_skips_key_when_slot_out_of_bounds(self) -> None:
+        filament_profile = {"nozzle_temperature": ["220"]}
+        threemf_settings = {"nozzle_temperature": ["220"]}  # only 1 slot in 3MF
+
+        updated, entries = _overlay_3mf_filament_settings(
+            filament_profile, threemf_settings, slot_idx=1, allowed_keys={"nozzle_temperature"},
+        )
+
+        self.assertEqual(updated, filament_profile)
+        self.assertEqual(entries, [])
+
+    def test_skips_keys_not_in_allowlist(self) -> None:
+        filament_profile = {"nozzle_temperature": ["220"], "fan_min_speed": ["60"]}
+        threemf_settings = {"nozzle_temperature": ["225"], "fan_min_speed": ["80"]}
+
+        updated, entries = _overlay_3mf_filament_settings(
+            filament_profile, threemf_settings, slot_idx=0, allowed_keys={"nozzle_temperature"},
+        )
+
+        self.assertEqual(updated["nozzle_temperature"], ["225"])
+        self.assertEqual(updated["fan_min_speed"], ["60"])  # not in allowlist
+        self.assertEqual([e["key"] for e in entries], ["nozzle_temperature"])
+
+    def test_transfers_nothing_when_values_equal(self) -> None:
+        filament_profile = {"nozzle_temperature": ["220"]}
+        threemf_settings = {"nozzle_temperature": ["220"]}
+
+        updated, entries = _overlay_3mf_filament_settings(
+            filament_profile, threemf_settings, slot_idx=0, allowed_keys={"nozzle_temperature"},
+        )
+
+        self.assertEqual(updated, filament_profile)
+        self.assertEqual(entries, [])
 
 
 if __name__ == "__main__":
