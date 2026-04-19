@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import ORCA_BINARY
+from .normalize import normalize_process_profile
 from .profiles import ProfileNotFoundError, get_profile
 from .threemf import extract_plate, get_build_volume, get_plate_count, validate_model_fits
 
@@ -554,6 +555,13 @@ def _prepare_slice(
                 "changed from %r to %r",
                 slot_idx, len(allowed_keys), original_name, selected_name,
             )
+
+    # Resize per-filament vector keys to match the number of loaded filaments.
+    # Replicates `Preset::normalize` — the orca-slicer CLI does not run it after
+    # combining --load-settings with --load-filaments, so keys absent from vendor
+    # filament JSONs stay at length 1 and silently fall back to slot-0 values
+    # for slot 1+ on multi-filament prints.
+    process_profile = normalize_process_profile(process_profile, len(filament_profiles))
 
     machine_path = os.path.join(tmpdir, "machine.json")
     process_path = os.path.join(tmpdir, "process.json")
