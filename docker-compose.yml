@@ -5,6 +5,9 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/data
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./conftest.py:/app/conftest.py
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
       - PROFILES_DIR=/opt/orcaslicer/profiles

@@ -25,6 +25,9 @@ from .models import (
     MachineProfile,
     PlateTypeOption,
     ProcessProfile,
+    ProcessProfileDeleteResponse,
+    ProcessProfileImportPreview,
+    ProcessProfileImportResponse,
     ReloadResponse,
     SliceError,
 )
@@ -37,6 +40,7 @@ from .profiles import (
     get_profile_detail,
     load_all_profiles,
     materialize_filament_import,
+    materialize_process_import,
 )
 from .slice_request import parse_filament_profile_ids
 from .stl_to_3mf import detect_file_type as _detect_file_type
@@ -90,6 +94,26 @@ async def slicing_error_handler(request, exc: SlicingError):
         status_code=500,
         content={"error": str(exc), "orca_output": exc.orca_output},
     )
+
+
+def _reject_unsafe_setting_id(setting_id: str) -> JSONResponse | None:
+    """Reject setting_ids that would escape USER_PROFILES_DIR or be otherwise unsafe as a filename.
+
+    Any path separator, parent-directory reference, or empty/whitespace value is blocked.
+    """
+    if (
+        not isinstance(setting_id, str)
+        or not setting_id.strip()
+        or "/" in setting_id
+        or "\\" in setting_id
+        or ".." in setting_id
+        or "\x00" in setting_id
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unsafe or invalid profile setting_id: {setting_id!r}"},
+        )
+    return None
 
 
 def _read_filament_import_body(data: Any) -> tuple[dict | None, JSONResponse | None]:
@@ -182,14 +206,150 @@ async def resolve_filament_import(request: Request):
     )
 
 
+def _read_process_import_body(data: Any) -> tuple[dict | None, JSONResponse | None]:
+    if not isinstance(data, dict):
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": "Body must be a JSON object."},
+        )
+
+    name = data.get("name")
+    if not name or not isinstance(name, str):
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": "Missing or invalid 'name' field."},
+        )
+
+    try:
+        return materialize_process_import(data), None
+    except (ProfileNotFoundError, ValueError) as exc:
+        return None, JSONResponse(
+            status_code=400,
+            content={"error": str(exc)},
+        )
+
+
+@app.post(
+    "/profiles/processes/resolve-import",
+    response_model=ProcessProfileImportPreview,
+    tags=["Profiles"],
+)
+async def resolve_process_import(request: Request):
+    """Resolve a process import payload without saving it."""
+    try:
+        raw_data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
+
+    data, error_response = _read_process_import_body(raw_data)
+    if error_response is not None or data is None:
+        return error_response
+
+    inherits_resolved = ""
+    if isinstance(raw_data, dict):
+        raw_inherits = raw_data.get("inherits")
+        if isinstance(raw_inherits, str):
+            inherits_resolved = raw_inherits.strip()
+
+    return ProcessProfileImportPreview(
+        setting_id=data["setting_id"],
+        name=str(data.get("name", "")),
+        inherits_resolved=inherits_resolved,
+        resolved_payload=data,
+    )
+
+
+@app.post(
+    "/profiles/processes",
+    response_model=ProcessProfileImportResponse,
+    tags=["Profiles"],
+)
+async def import_process_profile(request: Request, replace: bool = False):
+    """Import a custom process profile from JSON.
+
+    Returns 201 on create, 200 on replace, 409 when the target file exists
+    and `replace=true` was not provided.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
+
+    data, error_response = _read_process_import_body(data)
+    if error_response is not None or data is None:
+        return error_response
+
+    setting_id = data["setting_id"]
+    unsafe = _reject_unsafe_setting_id(setting_id)
+    if unsafe is not None:
+        return unsafe
+
+    os.makedirs(USER_PROFILES_DIR, exist_ok=True)
+    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+    exists = os.path.isfile(file_path)
+    if exists and not replace:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    f"Profile '{setting_id}' already exists. "
+                    f"Pass ?replace=true to overwrite."
+                )
+            },
+        )
+
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    load_all_profiles()
+
+    return JSONResponse(
+        status_code=200 if exists else 201,
+        content=ProcessProfileImportResponse(
+            setting_id=setting_id,
+            name=str(data.get("name", "")),
+            message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+        ).model_dump(),
+    )
+
+
+@app.delete(
+    "/profiles/processes/{setting_id}",
+    response_model=ProcessProfileDeleteResponse,
+    tags=["Profiles"],
+)
+async def delete_process_profile(setting_id: str):
+    """Delete a user-imported custom process profile."""
+    unsafe = _reject_unsafe_setting_id(setting_id)
+    if unsafe is not None:
+        return unsafe
+    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+    if not os.path.isfile(file_path):
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"User process profile '{setting_id}' not found."},
+        )
+
+    os.remove(file_path)
+    load_all_profiles()
+
+    return ProcessProfileDeleteResponse(
+        setting_id=setting_id,
+        message=f"Profile '{setting_id}' deleted successfully.",
+    )
+
+
 @app.post(
     "/profiles/filaments",
     response_model=FilamentProfileImportResponse,
-    status_code=201,
     tags=["Profiles"],
 )
-async def import_filament_profile(request: Request):
-    """Import a custom filament profile from JSON."""
+async def import_filament_profile(request: Request, replace: bool = False):
+    """Import a custom filament profile from JSON.
+
+    Returns 201 on create, 200 on replace, 409 when the target file exists
+    and `replace=true` was not provided.
+    """
     try:
         data = await request.json()
     except Exception:
@@ -200,9 +360,24 @@ async def import_filament_profile(request: Request):
         return error_response
 
     setting_id = data["setting_id"]
+    unsafe = _reject_unsafe_setting_id(setting_id)
+    if unsafe is not None:
+        return unsafe
 
     os.makedirs(USER_PROFILES_DIR, exist_ok=True)
     file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+    exists = os.path.isfile(file_path)
+    if exists and not replace:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    f"Profile '{setting_id}' already exists. "
+                    f"Pass ?replace=true to overwrite."
+                )
+            },
+        )
+
     with open(file_path, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -212,12 +387,15 @@ async def import_filament_profile(request: Request):
     if isinstance(filament_type, list):
         filament_type = filament_type[0] if filament_type else ""
 
-    return FilamentProfileImportResponse(
-        setting_id=setting_id,
-        filament_id=str(data.get("filament_id", "")),
-        name=str(data.get("name", "")),
-        filament_type=filament_type,
-        message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+    return JSONResponse(
+        status_code=200 if exists else 201,
+        content=FilamentProfileImportResponse(
+            setting_id=setting_id,
+            filament_id=str(data.get("filament_id", "")),
+            name=str(data.get("name", "")),
+            filament_type=filament_type,
+            message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+        ).model_dump(),
     )
 
 
@@ -228,6 +406,9 @@ async def import_filament_profile(request: Request):
 )
 async def delete_filament_profile(setting_id: str):
     """Delete a user-imported custom filament profile."""
+    unsafe = _reject_unsafe_setting_id(setting_id)
+    if unsafe is not None:
+        return unsafe
     file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
     if not os.path.isfile(file_path):
         return JSONResponse(

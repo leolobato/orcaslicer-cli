@@ -71,10 +71,17 @@
         </a>
         <a href="#/processes"
            class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
-           :class="route.type === 'processes' && route.view === 'list'
+           :class="route.type === 'processes' && route.view === 'list' && !route.filter
              ? 'bg-accent-faint border border-accent text-accent-light'
              : 'text-slate-300'">
           Processes
+        </a>
+        <a href="#/processes?filter=user"
+           class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
+           :class="route.type === 'processes' && route.view === 'list' && route.filter === 'user'
+             ? 'bg-accent-faint border border-accent text-accent-light'
+             : 'text-slate-300'">
+          User Processes
         </a>
         <a href="#/filaments"
            class="rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-slate-800"
@@ -150,14 +157,22 @@
         <section x-data="processList()" x-init="load()">
           <div class="flex items-center justify-between gap-4 mb-4">
             <div>
-              <h3 class="text-lg font-semibold whitespace-nowrap">Processes</h3>
+              <h3 class="text-lg font-semibold whitespace-nowrap"
+                  x-text="$data.route && $data.route.filter === 'user' ? 'User Processes' : 'Processes'"></h3>
               <p class="text-xs text-slate-500" x-show="$data.selectedMachineId"
                  x-text="'Filtered by ' + $data.selectedMachineName"></p>
             </div>
-            <input type="search"
-                   class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
-                   placeholder="Search processes..."
-                   x-model="search" />
+            <div class="flex items-center gap-2">
+              <input type="search"
+                     class="max-w-xs rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-ink placeholder-slate-500 focus:border-accent focus:ring-1 focus:ring-accent-ring"
+                     placeholder="Search processes..."
+                     x-model="search" />
+              <button type="button"
+                      class="inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint"
+                      @click="importer.show()">
+                + Import
+              </button>
+            </div>
           </div>
 
           <p class="text-sm italic text-slate-500 py-4" x-show="filteredItems.length === 0 && !listLoading">No processes found.</p>
@@ -170,20 +185,89 @@
                 <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Setting ID</th>
                 <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Layer Height</th>
                 <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Vendor</th>
+                <th class="px-3 py-2 text-left text-xs uppercase tracking-wide text-slate-400">Actions</th>
               </tr>
             </thead>
             <tbody>
               <template x-for="(p, idx) in filteredItems" :key="idx">
                 <tr class="cursor-pointer border-b border-slate-800/50 transition-colors hover:bg-slate-800/50"
                     @click="inspect('processes', p.setting_id)">
-                  <td class="px-3 py-2" x-text="p.name"></td>
+                  <td class="px-3 py-2">
+                    <span x-text="p.name"></span>
+                    <span class="ml-1.5 inline-block rounded-full border border-accent px-2 py-0.5 text-[10px] uppercase tracking-wide text-accent-light"
+                          x-show="p.vendor === 'User'">User</span>
+                  </td>
                   <td class="px-3 py-2"><code class="font-mono text-xs text-slate-400" x-text="p.setting_id"></code></td>
                   <td class="px-3 py-2" x-text="p.layer_height || '-'"></td>
                   <td class="px-3 py-2" x-text="p.vendor || '-'"></td>
+                  <td class="px-3 py-2" @click.stop>
+                    <template x-if="p.vendor === 'User'">
+                      <button class="rounded-md border border-red-600 px-2 py-0.5 text-xs text-red-300 transition-colors hover:bg-red-900/30"
+                              @click="deleteProcess(p)">Delete</button>
+                    </template>
+                  </td>
                 </tr>
               </template>
             </tbody>
           </table>
+
+          <!-- Import modal -->
+          <div x-show="importer.open"
+               x-cloak
+               class="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm"
+               @keydown.escape.window="importer.cancel()">
+            <div class="max-w-lg w-full rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-xl">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold" x-text="'Import ' + importer.label() + ' JSON'"></h3>
+                <button class="text-slate-400 hover:text-slate-200" @click="importer.cancel()" aria-label="Close">&times;</button>
+              </div>
+
+              <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
+              <input type="file" accept=".json,application/json"
+                     class="w-full text-sm text-slate-300"
+                     @change="importer.onFilePicked($event)" />
+              <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
+
+              <p x-show="importer.previewLoading" class="mt-3 text-sm text-slate-400">Resolving profile...</p>
+              <p x-show="importer.previewError" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+                 x-text="importer.previewError"></p>
+
+              <template x-if="importer.preview">
+                <div class="mt-4 space-y-1 text-sm">
+                  <div><span class="text-slate-400">Name:</span> <span x-text="importer.preview.name"></span></div>
+                  <div><span class="text-slate-400">Setting ID:</span> <code class="font-mono text-xs text-slate-400" x-text="importer.preview.setting_id"></code></div>
+                  <div x-show="importer.preview.inherits_resolved">
+                    <span class="text-slate-400">Inherits from:</span>
+                    <span x-text="importer.preview.inherits_resolved"></span>
+                  </div>
+                </div>
+              </template>
+
+              <p x-show="importer.saveError && !importer.collisionConfirm" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+                 x-text="importer.saveError"></p>
+
+              <template x-if="importer.collisionConfirm">
+                <div class="mt-4 rounded-md border border-amber-700/60 bg-amber-900/30 px-3 py-2 text-sm text-amber-200">
+                  A profile with this ID already exists. Replace it?
+                  <div class="mt-2 flex gap-2">
+                    <button class="rounded-md border border-amber-600 px-3 py-1 text-xs"
+                            @click="importer.replaceConfirmed()" :disabled="importer.saving">Replace</button>
+                    <button class="rounded-md border border-slate-600 px-3 py-1 text-xs"
+                            @click="importer.cancelCollision()" :disabled="importer.saving">Cancel</button>
+                  </div>
+                </div>
+              </template>
+
+              <div class="mt-5 flex justify-end gap-2">
+                <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
+                        @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
+                <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                        :disabled="!importer.preview || importer.saving || importer.collisionConfirm"
+                        @click="importer.submit(false)"
+                        x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+              </div>
+            </div>
+          </div>
         </section>
       </template>
 
@@ -206,6 +290,11 @@
                  class="inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint">
                 + New
               </a>
+              <button type="button"
+                      class="inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint"
+                      @click="importer.show()">
+                + Import
+              </button>
             </div>
           </div>
 
@@ -252,6 +341,68 @@
               </template>
             </tbody>
           </table>
+
+          <!-- Import modal -->
+          <div x-show="importer.open"
+               x-cloak
+               class="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm"
+               @keydown.escape.window="importer.cancel()">
+            <div class="max-w-lg w-full rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-xl">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold" x-text="'Import ' + importer.label() + ' JSON'"></h3>
+                <button class="text-slate-400 hover:text-slate-200" @click="importer.cancel()" aria-label="Close">&times;</button>
+              </div>
+
+              <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
+              <input type="file" accept=".json,application/json"
+                     class="w-full text-sm text-slate-300"
+                     @change="importer.onFilePicked($event)" />
+              <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
+
+              <p x-show="importer.previewLoading" class="mt-3 text-sm text-slate-400">Resolving profile...</p>
+              <p x-show="importer.previewError" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+                 x-text="importer.previewError"></p>
+
+              <template x-if="importer.preview">
+                <div class="mt-4 space-y-1 text-sm">
+                  <div><span class="text-slate-400">Name:</span> <span x-text="importer.preview.name"></span></div>
+                  <div><span class="text-slate-400">Setting ID:</span> <code class="font-mono text-xs text-slate-400" x-text="importer.preview.setting_id"></code></div>
+                  <div x-show="importer.preview.inherits_resolved">
+                    <span class="text-slate-400">Inherits from:</span>
+                    <span x-text="importer.preview.inherits_resolved"></span>
+                  </div>
+                  <div x-show="importer.preview.filament_type">
+                    <span class="text-slate-400">Type:</span>
+                    <span x-text="importer.preview.filament_type"></span>
+                  </div>
+                </div>
+              </template>
+
+              <p x-show="importer.saveError && !importer.collisionConfirm" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+                 x-text="importer.saveError"></p>
+
+              <template x-if="importer.collisionConfirm">
+                <div class="mt-4 rounded-md border border-amber-700/60 bg-amber-900/30 px-3 py-2 text-sm text-amber-200">
+                  A profile with this ID already exists. Replace it?
+                  <div class="mt-2 flex gap-2">
+                    <button class="rounded-md border border-amber-600 px-3 py-1 text-xs"
+                            @click="importer.replaceConfirmed()" :disabled="importer.saving">Replace</button>
+                    <button class="rounded-md border border-slate-600 px-3 py-1 text-xs"
+                            @click="importer.cancelCollision()" :disabled="importer.saving">Cancel</button>
+                  </div>
+                </div>
+              </template>
+
+              <div class="mt-5 flex justify-end gap-2">
+                <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
+                        @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
+                <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                        :disabled="!importer.preview || importer.saving || importer.collisionConfirm"
+                        @click="importer.submit(false)"
+                        x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+              </div>
+            </div>
+          </div>
         </section>
       </template>
 

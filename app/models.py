@@ -94,3 +94,30 @@ class FilamentProfileImportPreview(BaseModel):
     name: str = Field(description="Profile name.")
     filament_type: str = Field(description="Resolved filament material type.", examples=["PLA"])
     resolved_payload: dict = Field(description="Fully materialized filament profile JSON to be saved.")
+
+
+class ProcessProfileImportPreview(BaseModel):
+    """Resolved process profile preview before saving."""
+
+    setting_id: str = Field(description="Profile identifier.")
+    name: str = Field(description="Profile name.")
+    inherits_resolved: str = Field(
+        default="",
+        description="Name of the parent profile that the import resolved against.",
+    )
+    resolved_payload: dict = Field(description="Fully materialized process profile JSON to be saved.")
+
+
+class ProcessProfileImportResponse(BaseModel):
+    """Response from importing a custom process profile."""
+
+    setting_id: str = Field(description="Profile identifier.")
+    name: str = Field(description="Profile name.")
+    message: str = Field(description="Status message.")
+
+
+class ProcessProfileDeleteResponse(BaseModel):
+    """Response from deleting a custom process profile."""
+
+    setting_id: str = Field(description="Profile identifier that was deleted.")
+    message: str = Field(description="Status message.")

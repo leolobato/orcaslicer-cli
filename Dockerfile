@@ -68,7 +68,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements-dev.txt
+
 COPY app/ app/
+COPY tests/ tests/
+COPY conftest.py .
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

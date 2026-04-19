@@ -286,11 +286,22 @@ function processList() {
     items: [],
     search: "",
     listLoading: false,
+    importer: importProfileModal("processes", () => {
+      window.location.hash = "#/processes?filter=user";
+      setTimeout(() => window.dispatchEvent(new Event("machine-filter-changed")), 50);
+    }),
 
     get filteredItems() {
       const q = this.search.toLowerCase().trim();
-      if (!q) return this.items;
-      return this.items.filter(
+      let list = this.items;
+
+      const route = this.$data.route;
+      if (route && route.filter === "user") {
+        list = list.filter((p) => p.vendor === "User");
+      }
+
+      if (!q) return list;
+      return list.filter(
         (p) =>
           (p.name || "").toLowerCase().includes(q) ||
           (p.setting_id || "").toLowerCase().includes(q)
@@ -315,6 +326,16 @@ function processList() {
     inspect(type, id) {
       window.location.hash = `#/${type}/${encodeURIComponent(id)}`;
     },
+
+    async deleteProcess(p) {
+      if (!confirm(`Delete user process profile "${p.name}" (${p.setting_id})?`)) return;
+      try {
+        await api(`/profiles/processes/${encodeURIComponent(p.setting_id)}`, { method: "DELETE" });
+        this.items = this.items.filter((x) => x.setting_id !== p.setting_id);
+      } catch (err) {
+        alert("Delete failed: " + err.message);
+      }
+    },
   };
 }
 
@@ -327,6 +348,10 @@ function filamentList() {
     items: [],
     search: "",
     listLoading: false,
+    importer: importProfileModal("filaments", () => {
+      window.location.hash = "#/filaments?filter=user";
+      setTimeout(() => window.dispatchEvent(new Event("machine-filter-changed")), 50);
+    }),
 
     get filteredItems() {
       const q = this.search.toLowerCase().trim();
@@ -791,5 +816,166 @@ function filamentEditor() {
 
     // Re-export formatValue for template use
     formatValue,
+  };
+}
+
+/**
+ * Shared import-from-JSON modal used by the Filaments and Processes list views.
+ * category: "filaments" | "processes"
+ * onImported: callback invoked with the saved-profile response on success
+ */
+function importProfileModal(category, onImported) {
+  return {
+    open: false,
+    file: null,
+    fileName: "",
+    rawPayload: null,
+
+    preview: null,
+    previewLoading: false,
+    previewError: null,
+
+    saving: false,
+    saveError: null,
+    collisionConfirm: false,
+
+    endpoints() {
+      return {
+        resolve: `/profiles/${category}/resolve-import`,
+        save: `/profiles/${category}`,
+      };
+    },
+
+    label() {
+      return category === "filaments" ? "Filament" : "Process";
+    },
+
+    reset() {
+      this.file = null;
+      this.fileName = "";
+      this.rawPayload = null;
+      this.preview = null;
+      this.previewLoading = false;
+      this.previewError = null;
+      this.saving = false;
+      this.saveError = null;
+      this.collisionConfirm = false;
+    },
+
+    show() {
+      this.reset();
+      this.open = true;
+    },
+
+    cancel() {
+      this.open = false;
+      this.reset();
+    },
+
+    async onFilePicked(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      this.fileName = file.name;
+      this.preview = null;
+      this.previewError = null;
+      this.saveError = null;
+      this.collisionConfirm = false;
+
+      let text;
+      try {
+        text = await file.text();
+      } catch (err) {
+        this.previewError = `Could not read file: ${err.message}`;
+        return;
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        this.previewError = `Selected file is not valid JSON: ${err.message}`;
+        return;
+      }
+
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        this.previewError = "Expected a JSON object at the top level.";
+        return;
+      }
+      if (!parsed.name || typeof parsed.name !== "string") {
+        this.previewError = "Profile JSON must contain a 'name' field.";
+        return;
+      }
+
+      this.rawPayload = parsed;
+      this.previewLoading = true;
+      try {
+        this.preview = await api(this.endpoints().resolve, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(parsed),
+        });
+      } catch (err) {
+        this.previewError = err.message;
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+
+    async submit(replace = false) {
+      if (!this.preview) return;
+      this.saving = true;
+      this.saveError = null;
+
+      const url = replace
+        ? `${this.endpoints().save}?replace=true`
+        : this.endpoints().save;
+
+      let resp;
+      try {
+        resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.preview.resolved_payload),
+        });
+      } catch (err) {
+        this.saveError = err.message;
+        this.saving = false;
+        return;
+      }
+
+      let body = null;
+      try {
+        body = await resp.json();
+      } catch {
+        /* empty body */
+      }
+
+      if (resp.status === 409) {
+        this.collisionConfirm = true;
+        this.saving = false;
+        return;
+      }
+      if (!resp.ok) {
+        this.saveError = (body && body.error) || resp.statusText || "Save failed";
+        this.saving = false;
+        return;
+      }
+
+      this.saving = false;
+      this.open = false;
+      this.reset();
+      if (typeof onImported === "function") {
+        onImported(body);
+      }
+    },
+
+    async replaceConfirmed() {
+      this.collisionConfirm = false;
+      await this.submit(true);
+    },
+
+    cancelCollision() {
+      this.collisionConfirm = false;
+    },
   };
 }

@@ -304,6 +304,68 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _resolve_process_parent_ref(parent_ref: str) -> str | None:
+    """Resolve a process inherits reference by name first, then by setting_id.
+
+    Type-scoped: only returns a key where _type_map[key] == "process".
+    """
+    if parent_ref in _raw_profiles and _type_map.get(parent_ref) == "process":
+        return parent_ref
+
+    by_setting_id = _name_for_slug(parent_ref)
+    if by_setting_id and _type_map.get(by_setting_id) == "process":
+        return by_setting_id
+    return _select_profile_key_by_name(parent_ref, category="process")
+
+
+def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a clone-style root process profile from imported JSON.
+
+    Mirrors materialize_filament_import for the process category:
+    - Resolve inheritance chain (required for thin JSON exports).
+    - Produce a root profile (strip inherits / base_id).
+    - Stamp from="User", instantiation="true", print_settings_id=name.
+    - Default setting_id to name when caller doesn't supply one.
+    """
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Missing or invalid 'name' field.")
+    name = name.strip()
+
+    setting_id = data.get("setting_id", name)
+    if not isinstance(setting_id, str) or not setting_id.strip():
+        raise ValueError("Missing or invalid 'setting_id' field.")
+    setting_id = setting_id.strip()
+
+    merged: dict[str, Any]
+    inherits = data.get("inherits")
+    if isinstance(inherits, str) and inherits.strip():
+        parent_name = _resolve_process_parent_ref(inherits.strip())
+        if not parent_name:
+            raise ProfileNotFoundError(
+                f"Process parent '{inherits.strip()}' not found"
+            )
+        parent = resolve_profile_by_name(parent_name)
+        if parent is None:
+            raise ProfileNotFoundError(
+                f"Failed to resolve process parent '{inherits.strip()}'"
+            )
+        merged = dict(parent)
+        merged.update(data)
+    else:
+        merged = dict(data)
+
+    result = dict(merged)
+    result["name"] = name
+    result["setting_id"] = setting_id
+    result["from"] = "User"
+    result["instantiation"] = "true"
+    result["print_settings_id"] = name
+    result.pop("inherits", None)
+    result.pop("base_id", None)
+    return result
+
+
 def _load_user_profiles() -> int:
     """Load user-provided profile JSONs from USER_PROFILES_DIR.
 

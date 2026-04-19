@@ -50,6 +50,15 @@ class FilamentVendorResolutionTests(unittest.TestCase):
         self.assertEqual(resolved["filament_id"], "GFSNL03")
         self.assertEqual(resolved["filament_type"], ["PLA"])
 
+    def test_materialize_is_deterministic_across_two_calls(self) -> None:
+        payload = {
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+        }
+        first = profiles.materialize_filament_import(dict(payload))
+        second = profiles.materialize_filament_import(dict(payload))
+        self.assertEqual(first, second)
+
     def _write_fixture(self) -> None:
         self._write_json(
             self.profiles_dir / "BBL.json",
