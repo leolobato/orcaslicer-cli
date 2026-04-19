@@ -730,13 +730,28 @@ function filamentEditor() {
         }
       }
 
-      return {
+      const payload = {
         name: this.profileName,
         inherits: this.selectedParentData
           ? this.selectedParentData.name
           : undefined,
         ...overrides,
       };
+
+      // skipKeys hides compat metadata; without a parent to inherit it,
+      // carry it manually so machine filtering still matches post-save.
+      if (!this.selectedParentData) {
+        const resolved = this.parentDetail?.resolved || {};
+        if (resolved.compatible_printers !== undefined) {
+          payload.compatible_printers = resolved.compatible_printers;
+        }
+        if (resolved.compatible_printers_condition !== undefined) {
+          payload.compatible_printers_condition =
+            resolved.compatible_printers_condition;
+        }
+      }
+
+      return payload;
     },
 
     // Save the filament profile
@@ -778,16 +793,9 @@ function filamentEditor() {
       this.saveError = null;
 
       try {
-        // Resolve with the new name to get a fresh setting_id and filament_id.
-        // Carry over compatible_printers from the resolved profile since
-        // buildPayload() excludes it from editable fields.
         const copyPayload = { ...this.buildPayload(), name: newName.trim() };
         delete copyPayload.setting_id;
         delete copyPayload.filament_id;
-        const resolved = this.parentDetail?.resolved || {};
-        if (resolved.compatible_printers) {
-          copyPayload.compatible_printers = resolved.compatible_printers;
-        }
         const resolveResp = await api("/profiles/filaments/resolve-import", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
