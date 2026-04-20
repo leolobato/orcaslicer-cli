@@ -94,18 +94,14 @@ function categorizeFields(fields) {
         k === "default_filament_colour",
     },
     {
-      name: "Custom G-code",
-      test: (k) => /^filament_(start_gcode|end_gcode|notes)$/.test(k),
-    },
-    {
-      name: "Build Plate",
-      test: (k) => /_plate_temp(_initial_layer)?$/.test(k),
-    },
-    {
       name: "Temperature",
       test: (k) =>
         /^(nozzle_temperature|chamber_temperature|idle_temperature|temperature_vitrification|filament_vitrification_temperature)/.test(k) ||
         k === "activate_chamber_temp_control",
+    },
+    {
+      name: "Build Plate",
+      test: (k) => /_plate_temp(_initial_layer)?$/.test(k),
     },
     {
       name: "Seam (Scarf)",
@@ -135,6 +131,10 @@ function categorizeFields(fields) {
       test: (k) =>
         /fan|cooling|slow_down|close_fan|full_fan_speed_layer|reduce_fan_stop_start_freq|dont_slow_down_outer_wall/.test(k) ||
         k === "activate_air_filtration",
+    },
+    {
+      name: "Custom G-code",
+      test: (k) => /^filament_(start_gcode|end_gcode|notes)$/.test(k),
     },
   ];
 
