@@ -842,6 +842,7 @@ function importProfileModal(category, onImported) {
     preview: null,
     previewLoading: false,
     previewError: null,
+    editedName: "",
 
     saving: false,
     saveError: null,
@@ -865,6 +866,7 @@ function importProfileModal(category, onImported) {
       this.preview = null;
       this.previewLoading = false;
       this.previewError = null;
+      this.editedName = "";
       this.saving = false;
       this.saveError = null;
       this.collisionConfirm = false;
@@ -915,6 +917,7 @@ function importProfileModal(category, onImported) {
       }
 
       this.rawPayload = parsed;
+      this.editedName = parsed.name;
       this.previewLoading = true;
       try {
         this.preview = await api(this.endpoints().resolve, {
@@ -922,6 +925,40 @@ function importProfileModal(category, onImported) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(parsed),
         });
+      } catch (err) {
+        this.previewError = err.message;
+      } finally {
+        this.previewLoading = false;
+      }
+    },
+
+    async applyRename() {
+      if (!this.rawPayload || !this.preview) return;
+      const next = (this.editedName || "").trim();
+      if (!next) {
+        this.editedName = this.preview.name;
+        this.previewError = "Name cannot be empty.";
+        return;
+      }
+      if (next === this.preview.name) return;
+
+      // Drop IDs so the backend re-derives them from the new name.
+      const payload = { ...this.rawPayload, name: next };
+      delete payload.setting_id;
+      delete payload.filament_id;
+
+      this.previewLoading = true;
+      this.previewError = null;
+      this.saveError = null;
+      this.collisionConfirm = false;
+      try {
+        this.preview = await api(this.endpoints().resolve, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        this.rawPayload = payload;
+        this.editedName = this.preview.name;
       } catch (err) {
         this.previewError = err.message;
       } finally {

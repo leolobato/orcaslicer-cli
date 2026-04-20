@@ -233,8 +233,16 @@
                  x-text="importer.previewError"></p>
 
               <template x-if="importer.preview">
-                <div class="mt-4 space-y-1 text-sm">
-                  <div><span class="text-slate-400">Name:</span> <span x-text="importer.preview.name"></span></div>
+                <div class="mt-4 space-y-2 text-sm">
+                  <div>
+                    <label class="block text-slate-400 text-xs mb-1">Name</label>
+                    <input type="text"
+                           class="w-full rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-sm text-slate-100"
+                           x-model="importer.editedName"
+                           @blur="importer.applyRename()"
+                           @keydown.enter.prevent="$event.target.blur()"
+                           :disabled="importer.previewLoading || importer.saving" />
+                  </div>
                   <div><span class="text-slate-400">Setting ID:</span> <code class="font-mono text-xs text-slate-400" x-text="importer.preview.setting_id"></code></div>
                   <div x-show="importer.preview.inherits_resolved">
                     <span class="text-slate-400">Inherits from:</span>
@@ -262,7 +270,7 @@
                 <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
                         @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
                 <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
-                        :disabled="!importer.preview || importer.saving || importer.collisionConfirm"
+                        :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
                         @click="importer.submit(false)"
                         x-text="importer.saving ? 'Importing...' : 'Import'"></button>
               </div>
@@ -364,8 +372,16 @@
                  x-text="importer.previewError"></p>
 
               <template x-if="importer.preview">
-                <div class="mt-4 space-y-1 text-sm">
-                  <div><span class="text-slate-400">Name:</span> <span x-text="importer.preview.name"></span></div>
+                <div class="mt-4 space-y-2 text-sm">
+                  <div>
+                    <label class="block text-slate-400 text-xs mb-1">Name</label>
+                    <input type="text"
+                           class="w-full rounded-md border border-slate-600 bg-slate-950 px-2 py-1 text-sm text-slate-100"
+                           x-model="importer.editedName"
+                           @blur="importer.applyRename()"
+                           @keydown.enter.prevent="$event.target.blur()"
+                           :disabled="importer.previewLoading || importer.saving" />
+                  </div>
                   <div><span class="text-slate-400">Setting ID:</span> <code class="font-mono text-xs text-slate-400" x-text="importer.preview.setting_id"></code></div>
                   <div x-show="importer.preview.inherits_resolved">
                     <span class="text-slate-400">Inherits from:</span>
@@ -397,7 +413,7 @@
                 <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
                         @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
                 <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
-                        :disabled="!importer.preview || importer.saving || importer.collisionConfirm"
+                        :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
                         @click="importer.submit(false)"
                         x-text="importer.saving ? 'Importing...' : 'Import'"></button>
               </div>
