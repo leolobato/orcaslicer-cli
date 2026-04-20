@@ -77,15 +77,65 @@ function formatValue(val) {
 /**
  * Group filament fields into categories for the editor form.
  * Returns an array of { name, fields, hasModified } objects.
+ *
+ * Rules are checked in order; the first match wins. Ordering matters:
+ *   - Build Plate runs before Cooling & Fan so `cool_plate_temp` isn't
+ *     swept into cooling by the word "cool".
+ *   - Multi-material runs before Cooling & Fan so `filament_cooling_*`
+ *     (wipe-tower ramming moves) stays with the other tool-change keys.
  */
 function categorizeFields(fields) {
   const categories = [
-    { name: "Material",     test: (k) => /^filament_(type|vendor|cost|density|colour|color|diameter|weight)/.test(k) },
-    { name: "Temperature",  test: (k) => /temperature|^heat_bed|^chamber_temp/.test(k) },
-    { name: "Retraction",   test: (k) => /retract|deretract|wipe/.test(k) },
-    { name: "Speed",        test: (k) => /speed|volumetric|acceleration/.test(k) && !/fan/.test(k) },
-    { name: "Flow & Pressure", test: (k) => /flow|pressure|advance/.test(k) },
-    { name: "Cooling & Fan",   test: (k) => /fan|cooling|cool/.test(k) },
+    {
+      name: "Material",
+      test: (k) =>
+        /^filament_(type|vendor|cost|density|colour|color|diameter|weight|soluble|is_support|shrink|id$|extruder_variant)/.test(k) ||
+        k === "required_nozzle_HRC" ||
+        k === "default_filament_colour",
+    },
+    {
+      name: "Custom G-code",
+      test: (k) => /^filament_(start_gcode|end_gcode|notes)$/.test(k),
+    },
+    {
+      name: "Build Plate",
+      test: (k) => /_plate_temp(_initial_layer)?$/.test(k),
+    },
+    {
+      name: "Temperature",
+      test: (k) =>
+        /^(nozzle_temperature|chamber_temperature|idle_temperature|temperature_vitrification|filament_vitrification_temperature)/.test(k) ||
+        k === "activate_chamber_temp_control",
+    },
+    {
+      name: "Seam (Scarf)",
+      test: (k) => /^filament_scarf_/.test(k),
+    },
+    {
+      name: "Ironing",
+      test: (k) => /^filament_ironing_/.test(k),
+    },
+    {
+      name: "Multi-material",
+      test: (k) =>
+        /^filament_(loading|unloading|ramming|cooling|multitool|toolchange|stamping|minimal_purge|map)/.test(k),
+    },
+    {
+      name: "Retraction & Z-hop",
+      test: (k) => /retract|deretract|wipe|z_hop/.test(k),
+    },
+    {
+      name: "Flow & Pressure",
+      test: (k) =>
+        /flow_ratio|pressure_advance|max_volumetric_speed/.test(k) ||
+        k === "enable_pressure_advance",
+    },
+    {
+      name: "Cooling & Fan",
+      test: (k) =>
+        /fan|cooling|slow_down|close_fan|full_fan_speed_layer|reduce_fan_stop_start_freq|dont_slow_down_outer_wall/.test(k) ||
+        k === "activate_air_filtration",
+    },
   ];
 
   const groups = categories.map((c) => ({ name: c.name, fields: [], hasModified: false }));
