@@ -368,6 +368,7 @@ function filamentList() {
         (f) =>
           (f.name || "").toLowerCase().includes(q) ||
           (f.setting_id || "").toLowerCase().includes(q) ||
+          (f.filament_id || "").toLowerCase().includes(q) ||
           (f.filament_type || "").toLowerCase().includes(q)
       );
     },
@@ -485,6 +486,26 @@ function inspector() {
         }
       }
       return "-";
+    },
+
+    // Navigate to the edit form for the current user filament
+    editFilament() {
+      const detail = this.$data.detail;
+      if (!detail || !detail.setting_id) return;
+      window.location.hash = `#/filaments/${encodeURIComponent(detail.setting_id)}/edit`;
+    },
+
+    // Delete the current user filament and return to the filament list
+    async deleteFilament() {
+      const detail = this.$data.detail;
+      if (!detail || !detail.setting_id) return;
+      if (!confirm(`Delete "${detail.name}" (${detail.setting_id})?`)) return;
+      try {
+        await api(`/profiles/filaments/${encodeURIComponent(detail.setting_id)}`, { method: "DELETE" });
+        window.location.hash = "#/filaments?filter=user";
+      } catch (err) {
+        alert("Delete failed: " + err.message);
+      }
     },
 
     // Copy the full resolved JSON to clipboard
