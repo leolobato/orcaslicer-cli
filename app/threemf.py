@@ -288,6 +288,53 @@ def get_plate_count(file_bytes: bytes) -> int:
         return 1
 
 
+def get_used_filament_slots(file_bytes: bytes, plate: int = 1) -> set[int] | None:
+    """Return the 0-indexed filament slots actually used by the given plate.
+
+    Reads `Metadata/slice_info.config`, which records per-plate filament usage
+    as `<filament id="N" .../>` (1-indexed). Returns `None` if the file is
+    absent, malformed, or the requested plate isn't listed — callers should
+    then assume every slot may be used.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            if "Metadata/slice_info.config" not in zf.namelist():
+                return None
+            raw = zf.read("Metadata/slice_info.config").decode()
+    except (zipfile.BadZipFile, KeyError):
+        return None
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return None
+
+    for plate_el in root.iter("plate"):
+        plate_idx = None
+        for meta in plate_el.findall("metadata"):
+            if meta.get("key") == "index":
+                try:
+                    plate_idx = int(meta.get("value") or "")
+                except ValueError:
+                    plate_idx = None
+                break
+        if plate_idx != plate:
+            continue
+        slots: set[int] = set()
+        for fil in plate_el.findall("filament"):
+            raw_id = fil.get("id")
+            if raw_id is None:
+                continue
+            try:
+                one_based = int(raw_id)
+            except ValueError:
+                continue
+            if one_based >= 1:
+                slots.add(one_based - 1)
+        return slots
+    return None
+
+
 def _get_plate_object_ids(model_settings: str, plate_id: str = "1") -> set[str]:
     """Extract object IDs assigned to a specific plate."""
     pattern = (

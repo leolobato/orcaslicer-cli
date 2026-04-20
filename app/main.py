@@ -90,9 +90,17 @@ async def value_error_handler(request, exc: ValueError):
 
 @app.exception_handler(SlicingError)
 async def slicing_error_handler(request, exc: SlicingError):
+    # Critical warnings (e.g. "model has floating regions, enable support")
+    # represent model/settings problems the caller can act on — not server
+    # faults — so they return 422 with the parsed messages surfaced.
+    status_code = 422 if exc.critical_warnings else 500
     return JSONResponse(
-        status_code=500,
-        content={"error": str(exc), "orca_output": exc.orca_output},
+        status_code=status_code,
+        content={
+            "error": str(exc),
+            "orca_output": exc.orca_output,
+            "critical_warnings": exc.critical_warnings,
+        },
     )
 
 

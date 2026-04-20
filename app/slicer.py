@@ -16,7 +16,13 @@ from typing import Any
 from .config import ORCA_BINARY
 from .normalize import normalize_process_profile
 from .profiles import ProfileNotFoundError, get_profile
-from .threemf import extract_plate, get_build_volume, get_plate_count, validate_model_fits
+from .threemf import (
+    extract_plate,
+    get_build_volume,
+    get_plate_count,
+    get_used_filament_slots,
+    validate_model_fits,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,9 +97,67 @@ class ModelTooBigError(Exception):
 
 
 class SlicingError(Exception):
-    def __init__(self, message: str, orca_output: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        orca_output: str | None = None,
+        critical_warnings: list[str] | None = None,
+    ):
         super().__init__(message)
         self.orca_output = orca_output
+        self.critical_warnings = critical_warnings or []
+
+
+# OrcaSlicer status-callback lines carry a `message_type` field where
+# `2` = Critical (GUI would show a dismissable warning, CLI treats as fatal).
+# Example line:
+#   default_status_callback: percent=-1, warning_step=6, message=It seems object
+#   X.stl has floating regions. ..., message_type=2
+_CRITICAL_WARNING_RE = re.compile(
+    r"default_status_callback:[^\n]*?message=(.+?), message_type=2\b"
+)
+
+
+def _extract_critical_warnings(orca_output: str) -> list[str]:
+    """Return the deduplicated list of critical (message_type=2) warnings."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in _CRITICAL_WARNING_RE.finditer(orca_output):
+        msg = match.group(1).strip()
+        if msg and msg not in seen:
+            seen.add(msg)
+            result.append(msg)
+    return result
+
+
+def _read_result_json(tmpdir: str) -> str:
+    """Read the `result.json` file OrcaSlicer writes on exit, if present."""
+    path = os.path.join(tmpdir, "result.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _build_failure(
+    returncode: int,
+    tmpdir: str,
+    orca_output: str,
+) -> SlicingError:
+    """Assemble a SlicingError with the most informative message we can extract."""
+    critical = _extract_critical_warnings(orca_output)
+    exit_reason = _read_result_json(tmpdir)
+    full_output = orca_output
+    if exit_reason:
+        full_output = f"{orca_output}\n\n=== result.json ===\n{exit_reason}"
+    if critical:
+        message = "; ".join(critical)
+    else:
+        message = f"OrcaSlicer exited with code {returncode}"
+    return SlicingError(message, orca_output=full_output, critical_warnings=critical)
 
 
 def _is_transferable_process_key(key: str) -> bool:
@@ -192,8 +256,23 @@ def _overlay_3mf_filament_settings(
     return filament_profile, []
 
 
-def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
-    """Fix invalid parameter values in a 3MF's project_settings."""
+def _sanitize_3mf(
+    filepath: str,
+    tmpdir: str,
+    machine_profile: dict[str, Any] | None = None,
+) -> str:
+    """Fix invalid parameter values and rebrand printer identity in a 3MF.
+
+    When the 3MF was authored for a different printer than the target
+    `machine_profile`, OrcaSlicer CLI takes a "foreign vendor" path
+    (`_load_model_from_file: found 3mf from other vendor, split as instance`)
+    that auto-arranges the model and can spuriously flag repositioned objects
+    as having floating regions — blocking the slice even when the same model
+    + target profile combination succeeds in the GUI. The GUI avoids this by
+    rewriting `printer_model` / `printer_settings_id` in memory when the user
+    changes printer. We mirror that behavior here so CLI slices match GUI
+    behavior for cross-printer 3MFs.
+    """
     settings_file = "Metadata/project_settings.config"
     with zipfile.ZipFile(filepath, "r") as zf:
         if settings_file not in zf.namelist():
@@ -215,6 +294,28 @@ def _sanitize_3mf(filepath: str, tmpdir: str) -> str:
                         changed = True
                 except (ValueError, TypeError):
                     pass
+
+        # Rebrand printer identity to match target, to avoid OrcaSlicer's
+        # foreign-vendor path. The values come from the machine profile's own
+        # `printer_model` and `name` (the profile name doubles as the
+        # printer_settings_id OrcaSlicer embeds on GUI save).
+        if machine_profile:
+            target_model = machine_profile.get("printer_model")
+            target_settings_id = machine_profile.get("name")
+            if target_model and settings.get("printer_model") != target_model:
+                logger.info(
+                    "Rebranding 3MF printer_model: %r -> %r",
+                    settings.get("printer_model"), target_model,
+                )
+                settings["printer_model"] = target_model
+                changed = True
+            if target_settings_id and settings.get("printer_settings_id") != target_settings_id:
+                logger.info(
+                    "Rebranding 3MF printer_settings_id: %r -> %r",
+                    settings.get("printer_settings_id"), target_settings_id,
+                )
+                settings["printer_settings_id"] = target_settings_id
+                changed = True
 
         if not changed:
             return filepath
@@ -361,6 +462,40 @@ def _apply_parameter_overrides(
     return {**process_profile, **applied}, set(applied.keys())
 
 
+def _trim_unused_filament_ids(
+    filament_profile_ids: list[str],
+    file_bytes: bytes,
+    plate: int,
+    file_type: str,
+) -> list[str]:
+    """Drop trailing filament slot ids the 3MF's plate doesn't reference.
+
+    Multi-filament projects often carry `filament_settings_id` entries for slots
+    the active plate never uses. When the client (or a middleware like
+    bambu-gateway) backfills those slots with the 3MF's originals, they may
+    reference filament profiles that don't exist in the target printer's
+    profile set — resolution would then 400 even though the slice doesn't
+    need them. Trimming to `max(used) + 1` keeps interior slot indices intact
+    (the model may bind objects to specific slot indices) while dropping
+    unused trailing entries that would only cause spurious failures.
+    """
+    if file_type != "3mf" or not filament_profile_ids:
+        return filament_profile_ids
+    used = get_used_filament_slots(file_bytes, plate=plate)
+    if not used:
+        return filament_profile_ids
+    required_len = max(used) + 1
+    if required_len >= len(filament_profile_ids):
+        return filament_profile_ids
+    dropped = filament_profile_ids[required_len:]
+    logger.info(
+        "Trimmed %d trailing filament slot id(s) not used by plate %d "
+        "(kept %d; used slots %s; dropped ids %s)",
+        len(dropped), plate, required_len, sorted(used), dropped,
+    )
+    return filament_profile_ids[:required_len]
+
+
 @dataclass
 class SliceContext:
     tmpdir: str
@@ -493,7 +628,7 @@ def _prepare_slice(
         process_profile, override_keys = _apply_parameter_overrides(process_profile, process_overrides)
         settings_transfer.customized_keys |= override_keys
 
-    slice_filepath = _sanitize_3mf(input_path, tmpdir)
+    slice_filepath = _sanitize_3mf(input_path, tmpdir, machine_profile)
     if slice_filepath != input_path:
         logger.debug("3MF was sanitized")
 
@@ -581,6 +716,10 @@ def _prepare_slice(
     result_path = os.path.join(tmpdir, "result.3mf")
     cmd = [
         ORCA_BINARY,
+        # `--debug 4` keeps the `default_status_callback` lines that carry
+        # `message_type=2` (critical) warnings so we can surface them to the
+        # caller on failure, without the per-layer trace noise of level 5.
+        "--debug", "4",
         "--load-settings", settings_arg,
     ]
     if filament_paths:
@@ -741,6 +880,10 @@ async def slice_3mf(
         list(process_overrides.keys()) if process_overrides else None, file_type, plate,
     )
 
+    filament_profile_ids = _trim_unused_filament_ids(
+        filament_profile_ids, file_bytes, plate, file_type
+    )
+
     # Resolve profiles
     machine_profile = get_profile("machine", machine_profile_id)
     process_profile = get_profile("process", process_profile_id)
@@ -800,14 +943,12 @@ async def _do_slice(
         orca_output = (stdout_text + "\n" + stderr_text).strip()
 
         if proc.returncode != 0:
+            err = _build_failure(proc.returncode, tmpdir, orca_output)
             logger.error(
-                "OrcaSlicer failed (code %d)\nstdout: %s\nstderr: %s",
-                proc.returncode, stdout_text, stderr_text,
+                "OrcaSlicer failed (code %d): %s\nstdout: %s\nstderr: %s",
+                proc.returncode, err, stdout_text, stderr_text,
             )
-            raise SlicingError(
-                f"OrcaSlicer exited with code {proc.returncode}",
-                orca_output=orca_output,
-            )
+            raise err
 
         logger.info("OrcaSlicer finished successfully")
         logger.debug("OrcaSlicer output: %s", orca_output)
@@ -831,6 +972,9 @@ async def slice_3mf_streaming(
     Profile resolution happens before the generator is created, so
     ProfileNotFoundError is raised synchronously (caught by FastAPI → HTTP 400).
     """
+    filament_profile_ids = _trim_unused_filament_ids(
+        filament_profile_ids, file_bytes, plate, file_type
+    )
     machine_profile = get_profile("machine", machine_profile_id)
     process_profile = get_profile("process", process_profile_id)
     filament_profiles = [
@@ -877,10 +1021,12 @@ async def slice_3mf_streaming(
                 orca_output = "\n".join(output_lines)
 
                 if proc.returncode != 0:
-                    logger.error("OrcaSlicer failed (code %d)\n%s", proc.returncode, orca_output)
+                    err = _build_failure(proc.returncode, tmpdir, orca_output)
+                    logger.error("OrcaSlicer failed (code %d): %s\n%s", proc.returncode, err, orca_output)
                     yield _sse_event("error", {
-                        "error": f"OrcaSlicer exited with code {proc.returncode}",
-                        "orca_output": orca_output,
+                        "error": str(err),
+                        "orca_output": err.orca_output,
+                        "critical_warnings": err.critical_warnings,
                     })
                     return
 
@@ -894,6 +1040,7 @@ async def slice_3mf_streaming(
                     yield _sse_event("error", {
                         "error": str(e),
                         "orca_output": e.orca_output,
+                        "critical_warnings": e.critical_warnings,
                     })
                     return
 
