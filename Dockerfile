@@ -55,8 +55,12 @@ ENV LC_ALL=en_US.utf8
 RUN locale-gen $LC_ALL
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Copy OrcaSlicer binary and profiles from extracted AppImage
+# Copy OrcaSlicer binary and resources from extracted AppImage.
+# `/opt/resources/` is where the binary resolves its `resources_dir()` —
+# multi-filament slicing reads `/opt/resources/info/filament_info.json`
+# via `get_filament_temp_type()` and fails if it's missing.
 COPY --from=builder /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
+COPY --from=builder /build/squashfs-root/resources/ /opt/resources/
 COPY --from=builder /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
 
 # Make binary executable and add to PATH
