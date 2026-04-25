@@ -281,12 +281,33 @@ def _overlay_3mf_filament_settings(
     return filament_profile, []
 
 
+_PLATER_NAME_METADATA_RE = re.compile(
+    r'[ \t]*<metadata\s+key="plater_name"\s+value="[^"]*"\s*/>[ \t]*(?:\r?\n)?',
+)
+
+
+def _strip_plater_name_metadata(xml: str) -> tuple[str, int]:
+    """Remove `<metadata key="plater_name" .../>` entries from model_settings XML.
+
+    Works around an OrcaSlicer 2.3.2 CLI bug: `PartPlateList::load_from_3mf_structure`
+    forwards each plate's `plater_name` to `PartPlate::set_plate_name`, which
+    unconditionally calls `generate_plate_name_texture()`. That function does
+    `m_partplate_list->m_plater->get_view3D_canvas3D()` — but `m_plater` is null
+    in CLI mode, so any 3MF whose plate has a non-empty name segfaults the
+    slicer. Stripping the entry leaves orca to call its empty-name path, which
+    is purely cosmetic for slicing output.
+    """
+    new_xml, n = _PLATER_NAME_METADATA_RE.subn("", xml)
+    return new_xml, n
+
+
 def _sanitize_3mf(
     filepath: str,
     tmpdir: str,
     machine_profile: dict[str, Any] | None = None,
 ) -> str:
-    """Fix invalid parameter values and rebrand printer identity in a 3MF.
+    """Fix invalid parameter values, rebrand printer identity, and strip
+    GUI-only metadata that crashes OrcaSlicer's CLI.
 
     When the 3MF was authored for a different printer than the target
     `machine_profile`, OrcaSlicer CLI takes a "foreign vendor" path
@@ -297,61 +318,84 @@ def _sanitize_3mf(
     rewriting `printer_model` / `printer_settings_id` in memory when the user
     changes printer. We mirror that behavior here so CLI slices match GUI
     behavior for cross-printer 3MFs.
+
+    Also strips `plater_name` metadata from `model_settings.config` to dodge
+    OrcaSlicer 2.3.2's null-`m_plater` deref in `generate_plate_name_texture()`.
     """
     settings_file = "Metadata/project_settings.config"
+    model_settings_file = "Metadata/model_settings.config"
     with zipfile.ZipFile(filepath, "r") as zf:
-        if settings_file not in zf.namelist():
+        names = set(zf.namelist())
+        has_settings = settings_file in names
+        has_model_settings = model_settings_file in names
+
+        if not has_settings and not has_model_settings:
             return filepath
 
-        raw = zf.read(settings_file).decode()
-        settings = json.loads(raw)
+        settings: dict[str, Any] | None = None
+        settings_changed = False
+        if has_settings:
+            settings = json.loads(zf.read(settings_file).decode())
 
-        changed = False
+            # Clamp values that must meet minimums
+            for key, min_val in _CLAMP_RULES.items():
+                if key in settings:
+                    val = settings[key]
+                    try:
+                        num = float(val) if isinstance(val, str) else val
+                        if num < min_val:
+                            settings[key] = str(min_val) if isinstance(val, str) else min_val
+                            settings_changed = True
+                    except (ValueError, TypeError):
+                        pass
 
-        # Clamp values that must meet minimums
-        for key, min_val in _CLAMP_RULES.items():
-            if key in settings:
-                val = settings[key]
-                try:
-                    num = float(val) if isinstance(val, str) else val
-                    if num < min_val:
-                        settings[key] = str(min_val) if isinstance(val, str) else min_val
-                        changed = True
-                except (ValueError, TypeError):
-                    pass
+            # Rebrand printer identity to match target, to avoid OrcaSlicer's
+            # foreign-vendor path. The values come from the machine profile's
+            # own `printer_model` and `name` (the profile name doubles as the
+            # printer_settings_id OrcaSlicer embeds on GUI save).
+            if machine_profile:
+                target_model = machine_profile.get("printer_model")
+                target_settings_id = machine_profile.get("name")
+                if target_model and settings.get("printer_model") != target_model:
+                    logger.info(
+                        "Rebranding 3MF printer_model: %r -> %r",
+                        settings.get("printer_model"), target_model,
+                    )
+                    settings["printer_model"] = target_model
+                    settings_changed = True
+                if target_settings_id and settings.get("printer_settings_id") != target_settings_id:
+                    logger.info(
+                        "Rebranding 3MF printer_settings_id: %r -> %r",
+                        settings.get("printer_settings_id"), target_settings_id,
+                    )
+                    settings["printer_settings_id"] = target_settings_id
+                    settings_changed = True
 
-        # Rebrand printer identity to match target, to avoid OrcaSlicer's
-        # foreign-vendor path. The values come from the machine profile's own
-        # `printer_model` and `name` (the profile name doubles as the
-        # printer_settings_id OrcaSlicer embeds on GUI save).
-        if machine_profile:
-            target_model = machine_profile.get("printer_model")
-            target_settings_id = machine_profile.get("name")
-            if target_model and settings.get("printer_model") != target_model:
+        # Strip `plater_name` metadata to work around the CLI null-deref in
+        # `PartPlate::generate_plate_name_texture()` (OrcaSlicer 2.3.2).
+        model_settings_xml: str | None = None
+        if has_model_settings:
+            xml_raw = zf.read(model_settings_file).decode()
+            stripped_xml, n_stripped = _strip_plater_name_metadata(xml_raw)
+            if n_stripped > 0:
                 logger.info(
-                    "Rebranding 3MF printer_model: %r -> %r",
-                    settings.get("printer_model"), target_model,
+                    "Stripped %d plater_name metadata entries from %s "
+                    "(workaround for OrcaSlicer 2.3.2 CLI null-deref)",
+                    n_stripped, model_settings_file,
                 )
-                settings["printer_model"] = target_model
-                changed = True
-            if target_settings_id and settings.get("printer_settings_id") != target_settings_id:
-                logger.info(
-                    "Rebranding 3MF printer_settings_id: %r -> %r",
-                    settings.get("printer_settings_id"), target_settings_id,
-                )
-                settings["printer_settings_id"] = target_settings_id
-                changed = True
+                model_settings_xml = stripped_xml
 
-        if not changed:
+        if not settings_changed and model_settings_xml is None:
             return filepath
 
         sanitized = os.path.join(tmpdir, "sanitized.3mf")
         with zipfile.ZipFile(sanitized, "w") as zf_out:
             with zipfile.ZipFile(filepath, "r") as zf_in:
                 for item in zf_in.infolist():
-                    if item.filename == settings_file:
-                        # Use filename instead of ZipInfo to avoid stale size metadata
+                    if item.filename == settings_file and settings_changed:
                         zf_out.writestr(item.filename, json.dumps(settings, indent=2))
+                    elif item.filename == model_settings_file and model_settings_xml is not None:
+                        zf_out.writestr(item.filename, model_settings_xml)
                     else:
                         zf_out.writestr(item, zf_in.read(item.filename))
         return sanitized
