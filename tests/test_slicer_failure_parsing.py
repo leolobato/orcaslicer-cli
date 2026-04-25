@@ -1,6 +1,7 @@
+import tempfile
 import unittest
 
-from app.slicer import _extract_critical_warnings
+from app.slicer import _build_failure, _extract_critical_warnings, _format_exit_reason
 
 
 class ExtractCriticalWarningsTests(unittest.TestCase):
@@ -77,6 +78,45 @@ class ExtractCriticalWarningsTests(unittest.TestCase):
 
     def test_empty_output_returns_empty_list(self) -> None:
         self.assertEqual(_extract_critical_warnings(""), [])
+
+
+class FormatExitReasonTests(unittest.TestCase):
+    def test_positive_returncode_reports_exit_code(self) -> None:
+        self.assertEqual(_format_exit_reason(1), "OrcaSlicer exited with code 1")
+
+    def test_sigsegv_reports_signal_name_and_mesh_hint(self) -> None:
+        message = _format_exit_reason(-11)
+        self.assertIn("SIGSEGV", message)
+        self.assertIn("crashed", message)
+        self.assertIn("malformed mesh", message)
+
+    def test_sigabrt_reports_signal_name_and_mesh_hint(self) -> None:
+        message = _format_exit_reason(-6)
+        self.assertIn("SIGABRT", message)
+        self.assertIn("malformed mesh", message)
+
+    def test_sigterm_reports_signal_without_mesh_hint(self) -> None:
+        message = _format_exit_reason(-15)
+        self.assertIn("SIGTERM", message)
+        self.assertNotIn("malformed mesh", message)
+
+
+class BuildFailureTests(unittest.TestCase):
+    def test_signal_kill_without_critical_warnings_uses_signal_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            err = _build_failure(-11, tmpdir, orca_output="some orca stdout")
+        self.assertIn("SIGSEGV", str(err))
+        self.assertEqual(err.critical_warnings, [])
+
+    def test_critical_warnings_take_precedence_over_signal_message(self) -> None:
+        output = (
+            "default_status_callback: percent=-1, warning_step=6, "
+            "message=Floating regions detected., message_type=2"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            err = _build_failure(-11, tmpdir, orca_output=output)
+        self.assertIn("Floating regions", str(err))
+        self.assertNotIn("SIGSEGV", str(err))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -142,6 +143,30 @@ def _read_result_json(tmpdir: str) -> str:
         return ""
 
 
+def _format_exit_reason(returncode: int) -> str:
+    """Render a non-zero subprocess returncode as a human-readable message.
+
+    Negative returncodes mean the process was killed by signal `-returncode`
+    (POSIX semantics surfaced by `asyncio.subprocess`). Surface that as the
+    signal name plus a hint, since the binary's stderr is typically empty on
+    a crash and the message would otherwise just be "exited with code -11".
+    """
+    if returncode >= 0:
+        return f"OrcaSlicer exited with code {returncode}"
+    sig = -returncode
+    try:
+        name = signal.Signals(sig).name
+    except ValueError:
+        name = f"signal {sig}"
+    hint = (
+        " — likely a malformed mesh; try opening and re-exporting the file "
+        "in OrcaSlicer or Bambu Studio"
+        if sig in (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE)
+        else ""
+    )
+    return f"OrcaSlicer crashed ({name}){hint}"
+
+
 def _build_failure(
     returncode: int,
     tmpdir: str,
@@ -156,7 +181,7 @@ def _build_failure(
     if critical:
         message = "; ".join(critical)
     else:
-        message = f"OrcaSlicer exited with code {returncode}"
+        message = _format_exit_reason(returncode)
     return SlicingError(message, orca_output=full_output, critical_warnings=critical)
 
 
