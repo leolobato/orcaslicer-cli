@@ -5,7 +5,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from app.slicer import _sanitize_3mf, _strip_plater_name_metadata
+from app.slicer import (
+    _resize_flush_volumes,
+    _sanitize_3mf,
+    _strip_plater_name_metadata,
+    _truncate_per_filament_lists,
+)
 
 
 def _write_3mf(path: Path, settings: dict | None, model_settings_xml: str | None = None) -> None:
@@ -243,6 +248,258 @@ class SanitizePlaterNameInZipTests(unittest.TestCase):
                 model_xml = zf.read("Metadata/model_settings.config").decode()
             self.assertEqual(proj["raft_first_layer_expansion"], "0")
             self.assertNotIn("plater_name", model_xml)
+
+
+class ResizeFlushVolumesTests(unittest.TestCase):
+    def test_shrinks_matrix_to_single_filament(self) -> None:
+        settings = {
+            "flush_volumes_matrix": [
+                "0", "266", "271",
+                "199", "0", "309",
+                "251", "207", "0",
+            ],
+            "flush_volumes_vector": ["140", "140"] * 3,
+        }
+
+        changed = _resize_flush_volumes(settings, target_n=1)
+
+        self.assertTrue(changed)
+        self.assertEqual(settings["flush_volumes_matrix"], ["0"])
+        self.assertEqual(settings["flush_volumes_vector"], ["140", "140"])
+
+    def test_preserves_existing_pairs_when_shrinking(self) -> None:
+        settings = {
+            "flush_volumes_matrix": [
+                "0", "10", "20",
+                "30", "0", "40",
+                "50", "60", "0",
+            ],
+        }
+
+        _resize_flush_volumes(settings, target_n=2)
+
+        self.assertEqual(
+            settings["flush_volumes_matrix"],
+            ["0", "10", "30", "0"],
+        )
+
+    def test_grows_matrix_with_defaults(self) -> None:
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"],
+        }
+
+        _resize_flush_volumes(settings, target_n=3)
+
+        self.assertEqual(
+            settings["flush_volumes_matrix"],
+            ["0", "10", "140", "30", "0", "140", "140", "140", "0"],
+        )
+
+    def test_no_op_when_size_already_matches(self) -> None:
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"],
+            "flush_volumes_vector": ["140", "140", "140", "140"],
+        }
+        snapshot = {k: list(v) for k, v in settings.items()}
+
+        changed = _resize_flush_volumes(settings, target_n=2)
+
+        self.assertFalse(changed)
+        self.assertEqual(settings, snapshot)
+
+    def test_skips_when_target_count_zero(self) -> None:
+        settings = {"flush_volumes_matrix": ["0", "10", "30", "0"]}
+
+        changed = _resize_flush_volumes(settings, target_n=0)
+
+        self.assertFalse(changed)
+        self.assertEqual(settings["flush_volumes_matrix"], ["0", "10", "30", "0"])
+
+    def test_handles_malformed_matrix_length(self) -> None:
+        # Length 3 isn't a perfect square — treat as empty and rebuild.
+        settings = {"flush_volumes_matrix": ["0", "10", "20"]}
+
+        _resize_flush_volumes(settings, target_n=2)
+
+        self.assertEqual(
+            settings["flush_volumes_matrix"],
+            ["0", "140", "140", "0"],
+        )
+
+    def test_resize_writes_through_sanitize_3mf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.3mf"
+            _write_3mf(src, {
+                "flush_volumes_matrix": [
+                    "0", "266", "271",
+                    "199", "0", "309",
+                    "251", "207", "0",
+                ],
+                "flush_volumes_vector": ["140"] * 6,
+            })
+
+            out = _sanitize_3mf(str(src), tmp, None, target_filament_count=1)
+
+            self.assertNotEqual(out, str(src))
+            s = _read_settings(out)
+            self.assertEqual(s["flush_volumes_matrix"], ["0"])
+            self.assertEqual(s["flush_volumes_vector"], ["140", "140"])
+
+
+class TruncatePerFilamentListsTests(unittest.TestCase):
+    def test_truncates_known_per_filament_lists_to_target_n(self) -> None:
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "filament_colour": ["#FF0000", "#00FF00", "#0000FF", "#FFFFFF"],
+            "filament_type": ["PLA", "PLA", "PETG", "PLA"],
+            "nozzle_temperature": ["220", "220", "240", "220"],
+            "hot_plate_temp": ["55", "55", "70", "55"],
+        }
+
+        touched = _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertEqual(set(touched), {
+            "filament_settings_id", "filament_colour", "filament_type",
+            "nozzle_temperature", "hot_plate_temp",
+        })
+        for key in touched:
+            self.assertEqual(len(settings[key]), 1)
+        self.assertEqual(settings["filament_colour"], ["#FF0000"])
+        self.assertEqual(settings["filament_type"], ["PLA"])
+
+    def test_skips_flush_matrix_and_vector(self) -> None:
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "flush_volumes_matrix": ["0"] * 16,
+            "flush_volumes_vector": ["140"] * 8,
+        }
+
+        touched = _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertEqual(touched, {"filament_settings_id": 4})
+        self.assertEqual(len(settings["flush_volumes_matrix"]), 16)
+        self.assertEqual(len(settings["flush_volumes_vector"]), 8)
+
+    def test_ignores_lists_that_do_not_match_filament_count(self) -> None:
+        # `compatible_printers` etc. happen to be lists but aren't per-filament.
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "compatible_printers": ["P1S", "X1C"],
+            "filament_colour": ["#000"] * 4,
+        }
+
+        _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertEqual(settings["compatible_printers"], ["P1S", "X1C"])
+        self.assertEqual(settings["filament_colour"], ["#000"])
+
+    def test_does_not_touch_keys_that_coincidentally_match_filament_count(self) -> None:
+        # Real percussion-frog-instrument.3mf shape: 4 authored filaments,
+        # plus several non-per-filament keys that happen to be length-4:
+        #   - bed_exclude_area / printable_area: 4 polygon vertices (coPoints)
+        #   - print_compatible_printers: 4 printer names (coStrings)
+        #   - chamber_temperatures: per-print-condition values
+        # Truncating any of these to 1 corrupts the project. bed_exclude_area
+        # at length 1 turns a polygon into a single point, which segfaults
+        # OrcaSlicer during area computation (we hit this in production once).
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "filament_colour": ["#000", "#111", "#222", "#333"],
+            "bed_exclude_area": [
+                {"x": 0, "y": 0}, {"x": 100, "y": 0},
+                {"x": 100, "y": 50}, {"x": 0, "y": 50},
+            ],
+            "printable_area": [
+                {"x": 0, "y": 0}, {"x": 180, "y": 0},
+                {"x": 180, "y": 180}, {"x": 0, "y": 180},
+            ],
+            "print_compatible_printers": [
+                "Bambu Lab X1 Carbon 0.4 nozzle", "Bambu Lab X1 0.4 nozzle",
+                "Bambu Lab P1S 0.4 nozzle", "Bambu Lab X1E 0.4 nozzle",
+            ],
+            "chamber_temperatures": ["0", "0", "0", "0"],
+        }
+
+        touched = _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertIn("filament_settings_id", touched)
+        self.assertIn("filament_colour", touched)
+        self.assertNotIn("bed_exclude_area", touched)
+        self.assertNotIn("printable_area", touched)
+        self.assertNotIn("print_compatible_printers", touched)
+        self.assertNotIn("chamber_temperatures", touched)
+        self.assertEqual(len(settings["bed_exclude_area"]), 4)
+        self.assertEqual(len(settings["printable_area"]), 4)
+        self.assertEqual(len(settings["print_compatible_printers"]), 4)
+        self.assertEqual(len(settings["chamber_temperatures"]), 4)
+
+    def test_no_op_when_target_already_matches(self) -> None:
+        settings = {
+            "filament_settings_id": ["A"],
+            "filament_colour": ["#000"],
+        }
+
+        touched = _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertEqual(touched, {})
+
+    def test_no_op_when_target_n_zero_or_negative(self) -> None:
+        settings = {
+            "filament_settings_id": ["A", "B"],
+            "filament_colour": ["#000", "#FFF"],
+        }
+
+        self.assertEqual(_truncate_per_filament_lists(settings, target_n=0), {})
+        self.assertEqual(_truncate_per_filament_lists(settings, target_n=-1), {})
+        self.assertEqual(settings["filament_colour"], ["#000", "#FFF"])
+
+    def test_no_op_when_filament_settings_id_missing(self) -> None:
+        # Without an anchor we have no reliable way to tell which lists are
+        # per-filament — refuse to guess.
+        settings = {
+            "filament_colour": ["#000", "#FFF", "#F0F", "#0FF"],
+            "nozzle_temperature": ["220", "220", "220", "220"],
+        }
+        snapshot = {k: list(v) for k, v in settings.items()}
+
+        touched = _truncate_per_filament_lists(settings, target_n=1)
+
+        self.assertEqual(touched, {})
+        self.assertEqual(settings, snapshot)
+
+    def test_writes_through_sanitize_3mf(self) -> None:
+        # Reproduces the percussion-frog 3MF shape: 4 authored filaments,
+        # plate uses only slot 0, slice runs with target_filament_count=1.
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.3mf"
+            _write_3mf(src, {
+                "filament_settings_id": [
+                    "Bambu PLA Marble @BBL A1M",
+                    "Bambu PLA Marble @BBL A1M",
+                    "Bambu PLA Marble @BBL A1M",
+                    "Bambu PLA Marble @BBL A1M",
+                ],
+                "filament_colour": ["#9B9EA0", "#9B9EA0", "#9B9EA0", "#9B9EA0"],
+                "filament_type": ["PLA", "PLA", "PLA", "PLA"],
+                "nozzle_temperature": ["220", "220", "220", "220"],
+                "flush_volumes_matrix": ["0"] * 16,
+                "flush_volumes_vector": ["140"] * 8,
+            })
+
+            out = _sanitize_3mf(str(src), tmp, None, target_filament_count=1)
+
+            self.assertNotEqual(out, str(src))
+            s = _read_settings(out)
+            # Matrix/vector resized via _resize_flush_volumes.
+            self.assertEqual(len(s["flush_volumes_matrix"]), 1)
+            self.assertEqual(len(s["flush_volumes_vector"]), 2)
+            # Per-filament lists truncated via _truncate_per_filament_lists —
+            # this is the fix for "Flush volumes matrix do not match to the
+            # correct size!" at G-code export.
+            self.assertEqual(len(s["filament_colour"]), 1)
+            self.assertEqual(len(s["filament_settings_id"]), 1)
+            self.assertEqual(len(s["filament_type"]), 1)
+            self.assertEqual(len(s["nozzle_temperature"]), 1)
 
 
 if __name__ == "__main__":

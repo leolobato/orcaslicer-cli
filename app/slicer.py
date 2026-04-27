@@ -301,10 +301,209 @@ def _strip_plater_name_metadata(xml: str) -> tuple[str, int]:
     return new_xml, n
 
 
+# Authoritative per-filament-slot keys from OrcaSlicer's
+# `s_Preset_filament_options` (`OrcaSlicer/src/libslic3r/Preset.cpp:960-998`),
+# plus the three canonical filament-identity keys filtered out of that list
+# (`filament_colour`, `filament_settings_id`, `filament_ids`).
+#
+# A naive "every list whose length matches the filament count" heuristic is
+# unsafe: many project keys coincidentally carry length-N lists for unrelated
+# reasons — `bed_exclude_area` / `printable_area` (polygon vertices),
+# `print_compatible_printers` / `compatible_printers` (string lists),
+# `chamber_temperatures` (per-print-condition values), etc. Truncating those
+# corrupts the project (a 4-vertex polygon becomes a 1-vertex polygon and
+# Orca segfaults on area computation). Only keys explicitly per-filament in
+# OrcaSlicer's data model belong here.
+#
+# Profile metadata keys from `s_Preset_filament_options` that are NOT
+# per-slot in `project_settings.config` are intentionally excluded:
+# `compatible_prints*`, `compatible_printers*`, `inherits`, `filament_vendor`.
+_PER_FILAMENT_KEYS: frozenset[str] = frozenset({
+    # Filament identity — filtered out of s_Preset_filament_options but
+    # always one entry per authored slot in project_settings.config.
+    "filament_colour", "filament_settings_id", "filament_ids",
+    # From s_Preset_filament_options (Preset.cpp:960-998).
+    "default_filament_colour", "required_nozzle_HRC", "filament_diameter",
+    "pellet_flow_coefficient", "volumetric_speed_coefficients", "filament_type",
+    "filament_soluble", "filament_is_support", "filament_printable",
+    "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed",
+    "filament_flow_ratio", "filament_density", "filament_adhesiveness_category",
+    "filament_cost", "filament_minimal_purge_on_wipe_tower",
+    "filament_tower_interface_pre_extrusion_dist",
+    "filament_tower_interface_pre_extrusion_length",
+    "filament_tower_ironing_area", "filament_tower_interface_purge_volume",
+    "filament_tower_interface_print_temp",
+    "nozzle_temperature", "nozzle_temperature_initial_layer",
+    "cool_plate_temp", "textured_cool_plate_temp", "eng_plate_temp",
+    "hot_plate_temp", "textured_plate_temp",
+    "cool_plate_temp_initial_layer", "textured_cool_plate_temp_initial_layer",
+    "eng_plate_temp_initial_layer", "hot_plate_temp_initial_layer",
+    "textured_plate_temp_initial_layer", "supertack_plate_temp_initial_layer",
+    "supertack_plate_temp",
+    "temperature_vitrification", "reduce_fan_stop_start_freq",
+    "dont_slow_down_outer_wall", "slow_down_for_layer_cooling",
+    "fan_min_speed", "fan_max_speed",
+    "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold",
+    "close_fan_the_first_x_layers", "full_fan_speed_layer",
+    "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
+    "filament_start_gcode", "filament_end_gcode",
+    "activate_air_filtration", "during_print_exhaust_fan_speed",
+    "complete_print_exhaust_fan_speed",
+    "filament_retraction_length", "filament_z_hop", "filament_z_hop_types",
+    "filament_retract_lift_above", "filament_retract_lift_below",
+    "filament_retract_lift_enforce", "filament_retraction_speed",
+    "filament_deretraction_speed", "filament_retract_restart_extra",
+    "filament_retraction_minimum_travel", "filament_retract_when_changing_layer",
+    "filament_wipe", "filament_retract_before_wipe",
+    "filament_wipe_distance", "additional_cooling_fan_speed",
+    "nozzle_temperature_range_low", "nozzle_temperature_range_high",
+    "filament_extruder_variant",
+    "enable_pressure_advance", "pressure_advance",
+    "adaptive_pressure_advance", "adaptive_pressure_advance_model",
+    "adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges",
+    "chamber_temperature",
+    "filament_shrink", "filament_shrinkage_compensation_z",
+    "support_material_interface_fan_speed", "internal_bridge_fan_speed",
+    "filament_notes", "ironing_fan_speed",
+    "filament_ironing_flow", "filament_ironing_spacing",
+    "filament_ironing_inset", "filament_ironing_speed",
+    "filament_loading_speed", "filament_loading_speed_start",
+    "filament_unloading_speed", "filament_unloading_speed_start",
+    "filament_toolchange_delay", "filament_cooling_moves",
+    "filament_stamping_loading_speed", "filament_stamping_distance",
+    "filament_cooling_initial_speed", "filament_cooling_final_speed",
+    "filament_ramming_parameters", "filament_multitool_ramming",
+    "filament_multitool_ramming_volume", "filament_multitool_ramming_flow",
+    "activate_chamber_temp_control",
+    "filament_long_retractions_when_cut",
+    "filament_retraction_distances_when_cut", "idle_temperature",
+    "filament_change_length", "filament_flush_volumetric_speed",
+    "filament_flush_temp",
+    "long_retractions_when_ec", "retraction_distances_when_ec",
+})
+
+
+def _truncate_per_filament_lists(
+    settings: dict[str, Any], target_n: int
+) -> dict[str, int]:
+    """Truncate per-filament list-valued keys in project_settings to target_n.
+
+    OrcaSlicer's G-code export validates `flush_volumes_matrix.size()` against
+    `filament_colour.size()` (see `Slic3r::GCode::_post_process` /
+    `OrcaSlicer/src/libslic3r/GCode.cpp:5394-5411`):
+
+        size_t filament_count_tmp = temp_filament_color.size();
+        if (filament_count_tmp * filament_count_tmp * heads_count_tmp
+                == temp_flush_volumes_matrix.size()) { ... }
+        else if (filament_count_tmp == 1) { ... }
+        else throw "Flush volumes matrix do not match to the correct size!";
+
+    `_resize_flush_volumes` rewrites the matrix to N×N, but the 3MF's
+    `project_settings.config` carries dozens of other per-filament list-valued
+    keys (`filament_colour`, `filament_settings_id`, `nozzle_temperature`,
+    `*_plate_temp*`, `filament_max_volumetric_speed`, …) sized to the
+    originally-authored filament count. After `_trim_unused_filament_ids`
+    drops trailing slots, those lists still hold the original count and
+    `filament_colour.size()` no longer agrees with the resized matrix —
+    Orca then aborts at G-code export with the size-mismatch above.
+
+    Truncates exactly the keys OrcaSlicer documents as per-filament (see
+    `_PER_FILAMENT_KEYS`). Anchors on `len(filament_settings_id)` for the
+    sanity check that we'd actually be shrinking and not extending. Only
+    touches keys whose value is a list of the same length as the anchor —
+    that way an upstream Orca change that flips a key from list to scalar
+    won't fight us.
+
+    Returns {key: original_length} for every key touched.
+    """
+    if target_n <= 0:
+        return {}
+
+    anchor = settings.get("filament_settings_id")
+    if not isinstance(anchor, list) or not anchor:
+        return {}
+    original_n = len(anchor)
+    if original_n <= target_n:
+        return {}
+
+    truncated: dict[str, int] = {}
+    for key in _PER_FILAMENT_KEYS:
+        value = settings.get(key)
+        if not isinstance(value, list) or len(value) != original_n:
+            continue
+        settings[key] = value[:target_n]
+        truncated[key] = original_n
+    return truncated
+
+
+def _resize_flush_volumes(
+    settings: dict[str, Any], target_n: int
+) -> bool:
+    """Resize `flush_volumes_matrix` to N×N and `flush_volumes_vector` to 2N.
+
+    OrcaSlicer's G-code writer aborts with `Flush volumes matrix do not match
+    to the correct size!` when the embedded matrix length doesn't equal the
+    loaded filament count squared. The 3MF carries a matrix sized for the
+    filaments it was authored with; when the slice runs with a different
+    count, the matrix must be rewritten.
+
+    Preserves entries `[i][j]` where both indices remain valid; fills new
+    cells with 140 mm³ off-diagonal and 0 on-diagonal (OrcaSlicer's defaults).
+    Returns True if either field was modified.
+
+    NOTE: Resizing the matrix alone is not sufficient — `filament_colour` and
+    other per-filament list keys must also be truncated. See
+    `_truncate_per_filament_lists`.
+    """
+    if target_n <= 0:
+        return False
+    changed = False
+
+    matrix = settings.get("flush_volumes_matrix")
+    if isinstance(matrix, list):
+        target_len = target_n * target_n
+        if len(matrix) != target_len:
+            old_len = len(matrix)
+            old_n = int(old_len ** 0.5)
+            if old_n * old_n != old_len:
+                old_n = 0
+            new_matrix: list[Any] = []
+            for i in range(target_n):
+                for j in range(target_n):
+                    if i < old_n and j < old_n:
+                        new_matrix.append(matrix[i * old_n + j])
+                    else:
+                        new_matrix.append("0" if i == j else "140")
+            logger.info(
+                "Resized flush_volumes_matrix: %d -> %d entries (N=%d)",
+                old_len, target_len, target_n,
+            )
+            settings["flush_volumes_matrix"] = new_matrix
+            changed = True
+
+    vector = settings.get("flush_volumes_vector")
+    if isinstance(vector, list):
+        target_vec_len = target_n * 2
+        if len(vector) != target_vec_len:
+            old_len = len(vector)
+            new_vector = list(vector[:target_vec_len])
+            while len(new_vector) < target_vec_len:
+                new_vector.append("140")
+            logger.info(
+                "Resized flush_volumes_vector: %d -> %d entries",
+                old_len, target_vec_len,
+            )
+            settings["flush_volumes_vector"] = new_vector
+            changed = True
+
+    return changed
+
+
 def _sanitize_3mf(
     filepath: str,
     tmpdir: str,
     machine_profile: dict[str, Any] | None = None,
+    target_filament_count: int = 0,
 ) -> str:
     """Fix invalid parameter values, rebrand printer identity, and strip
     GUI-only metadata that crashes OrcaSlicer's CLI.
@@ -321,6 +520,13 @@ def _sanitize_3mf(
 
     Also strips `plater_name` metadata from `model_settings.config` to dodge
     OrcaSlicer 2.3.2's null-`m_plater` deref in `generate_plate_name_texture()`.
+
+    When `target_filament_count` is positive, resizes `flush_volumes_matrix`
+    and `flush_volumes_vector` to match and truncates every per-filament list
+    key (`filament_colour`, `nozzle_temperature`, `*_plate_temp*`, …) to the
+    same length — OrcaSlicer's G-code writer cross-checks all of these and
+    aborts on size mismatch when the slice runs with fewer filaments than
+    the 3MF was authored with.
     """
     settings_file = "Metadata/project_settings.config"
     model_settings_file = "Metadata/model_settings.config"
@@ -370,6 +576,20 @@ def _sanitize_3mf(
                     )
                     settings["printer_settings_id"] = target_settings_id
                     settings_changed = True
+
+            if _resize_flush_volumes(settings, target_filament_count):
+                settings_changed = True
+
+            truncated = _truncate_per_filament_lists(settings, target_filament_count)
+            if truncated:
+                sample = sorted(truncated.keys())[:8]
+                more = "" if len(truncated) <= len(sample) else f" (+{len(truncated) - len(sample)} more)"
+                logger.info(
+                    "Truncated %d per-filament list key(s) from %d -> %d entries: %s%s",
+                    len(truncated), next(iter(truncated.values())),
+                    target_filament_count, ", ".join(sample), more,
+                )
+                settings_changed = True
 
         # Strip `plater_name` metadata to work around the CLI null-deref in
         # `PartPlate::generate_plate_name_texture()` (OrcaSlicer 2.3.2).
@@ -697,7 +917,9 @@ def _prepare_slice(
         process_profile, override_keys = _apply_parameter_overrides(process_profile, process_overrides)
         settings_transfer.customized_keys |= override_keys
 
-    slice_filepath = _sanitize_3mf(input_path, tmpdir, machine_profile)
+    slice_filepath = _sanitize_3mf(
+        input_path, tmpdir, machine_profile, len(filament_profiles),
+    )
     if slice_filepath != input_path:
         logger.debug("3MF was sanitized")
 
