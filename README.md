@@ -122,6 +122,21 @@ Environment variables (set in `docker-compose.yml`):
 | `USER_PROFILES_DIR` | `/data` | Path for imported/custom profiles |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
+## Related Projects
+
+OrcaSlicer CLI is the **headless slicing engine and profile catalog** in a suite of self-hosted projects that together replace the Bambu Handy app for printers in **Developer Mode** — keeping everything on your LAN, with no Bambu cloud.
+
+**Self-hosted services**
+
+- **[bambu-gateway](https://github.com/leolobato/bambu-gateway)** — Printer control plane and slicing web app. Talks to printers over MQTT/FTPS to monitor status, send commands, and upload jobs. Slices and prints 3MF files from the browser using `orcaslicer-cli`.
+- **OrcaSlicer CLI** — this project.
+- **[bambu-spool-helper](https://github.com/leolobato/bambu-spool-helper)** — Bridge between [Spoolman](https://github.com/Donkie/Spoolman) and the printer's AMS. Links real spools to Bambu filament profiles (via `orcaslicer-cli`) and pushes the settings to a chosen tray over MQTT.
+
+**iOS apps**
+
+- **[bambu-gateway-ios](https://github.com/leolobato/bambu-gateway-ios)** — Phone client for `bambu-gateway`. Browse printers, import 3MF files (including from MakerWorld), preview G-code, and start prints. Live Activities and push notifications for print state changes.
+- **[spool-browser](https://github.com/leolobato/spool-browser)** — Phone client for `bambu-spool-helper` and Spoolman. Browse the spool inventory, link Bambu profiles to spools, activate filaments on the AMS, and print physical spool labels over Bluetooth.
+
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) — the same license as [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer).
