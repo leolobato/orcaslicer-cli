@@ -436,6 +436,66 @@ def _truncate_per_filament_lists(
     return truncated
 
 
+# Project-level structural arrays whose shape is
+# `[process, fil_1, ..., fil_N, printer]` (length N+2). Confirmed in
+# `OrcaSlicer/src/OrcaSlicer.cpp:2710-2713`:
+#
+#     inherits_group.resize(filament_count + 2, std::string());
+#     different_settings.resize(filament_count + 2, std::string());
+#
+# These are NOT per-filament — `[0]` is the process slot and `[N+1]` is the
+# printer slot — so they don't belong in `_PER_FILAMENT_KEYS`. Truncation
+# rule: keep `[0]`, keep `[1..target_n]`, keep `[N+1]` (last entry).
+_STRUCTURAL_FILAMENT_ARRAYS: frozenset[str] = frozenset({
+    "inherits_group",
+    "different_settings_to_system",
+})
+
+
+def _truncate_structural_arrays(
+    settings: dict[str, Any], target_n: int
+) -> dict[str, int]:
+    """Truncate `[process, fil_*, printer]`-shaped arrays to `target_n + 2`.
+
+    OrcaSlicer's CLI segfaults on file load when `inherits_group.size()`
+    disagrees with `filament_settings_id.size()`. The crash site is
+    `OrcaSlicer.cpp:1647-1655`, which reads `current_filaments_name[index-1]`
+    (sourced from `filament_settings_id`) while iterating `index` up to
+    `inherits_group.size() - 1`. If the project carries the original
+    N-filament `inherits_group` but `filament_settings_id` was truncated to
+    M < N, the loop reads past the end of `current_filaments_name`. OrcaSlicer
+    later resizes both arrays itself at line 2712, but the crashing loop
+    runs first.
+
+    Anchors on the original filament count via `len(filament_settings_id)`,
+    so this MUST run before `_truncate_per_filament_lists` truncates that
+    key. Only touches arrays whose length is exactly `original_n + 2`, so
+    a malformed project that ships with a different shape is left alone.
+
+    Returns {key: original_length} for every key touched.
+    """
+    if target_n <= 0:
+        return {}
+
+    anchor = settings.get("filament_settings_id")
+    if not isinstance(anchor, list) or not anchor:
+        return {}
+    original_n = len(anchor)
+    if original_n <= target_n:
+        return {}
+
+    expected_len = original_n + 2
+    truncated: dict[str, int] = {}
+    for key in _STRUCTURAL_FILAMENT_ARRAYS:
+        value = settings.get(key)
+        if not isinstance(value, list) or len(value) != expected_len:
+            continue
+        # [process] + [fil_1..fil_target_n] + [printer]
+        settings[key] = [value[0]] + list(value[1 : target_n + 1]) + [value[-1]]
+        truncated[key] = expected_len
+    return truncated
+
+
 def _resize_flush_volumes(
     settings: dict[str, Any], target_n: int
 ) -> bool:
@@ -578,6 +638,20 @@ def _sanitize_3mf(
                     settings_changed = True
 
             if _resize_flush_volumes(settings, target_filament_count):
+                settings_changed = True
+
+            # Order matters: structural arrays anchor on the *original*
+            # `filament_settings_id` length, which `_truncate_per_filament_lists`
+            # rewrites in place.
+            truncated_structural = _truncate_structural_arrays(
+                settings, target_filament_count,
+            )
+            if truncated_structural:
+                logger.info(
+                    "Truncated %d structural array(s) to %d+2 entries: %s",
+                    len(truncated_structural), target_filament_count,
+                    ", ".join(sorted(truncated_structural.keys())),
+                )
                 settings_changed = True
 
             truncated = _truncate_per_filament_lists(settings, target_filament_count)

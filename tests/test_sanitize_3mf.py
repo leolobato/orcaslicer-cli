@@ -10,6 +10,7 @@ from app.slicer import (
     _sanitize_3mf,
     _strip_plater_name_metadata,
     _truncate_per_filament_lists,
+    _truncate_structural_arrays,
 )
 
 
@@ -500,6 +501,117 @@ class TruncatePerFilamentListsTests(unittest.TestCase):
             self.assertEqual(len(s["filament_settings_id"]), 1)
             self.assertEqual(len(s["filament_type"]), 1)
             self.assertEqual(len(s["nozzle_temperature"]), 1)
+
+
+class TruncateStructuralArraysTests(unittest.TestCase):
+    def test_truncates_inherits_group_preserving_process_and_printer(self) -> None:
+        # Shape: [process, fil_1, fil_2, fil_3, fil_4, printer]
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "inherits_group": [
+                "0.20mm Standard @BBL X1C",
+                "fil_1_inherit", "fil_2_inherit",
+                "fil_3_inherit", "fil_4_inherit",
+                "Bambu Lab X1E 0.4 nozzle",
+            ],
+        }
+
+        touched = _truncate_structural_arrays(settings, target_n=1)
+
+        self.assertEqual(touched, {"inherits_group": 6})
+        self.assertEqual(settings["inherits_group"], [
+            "0.20mm Standard @BBL X1C",
+            "fil_1_inherit",
+            "Bambu Lab X1E 0.4 nozzle",
+        ])
+
+    def test_truncates_different_settings_to_system(self) -> None:
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "different_settings_to_system": [
+                "enable_support;sparse_infill_density",
+                "fil_1_diff", "fil_2_diff", "fil_3_diff", "fil_4_diff",
+                "printer_diff",
+            ],
+        }
+
+        touched = _truncate_structural_arrays(settings, target_n=2)
+
+        self.assertEqual(touched, {"different_settings_to_system": 6})
+        self.assertEqual(settings["different_settings_to_system"], [
+            "enable_support;sparse_infill_density",
+            "fil_1_diff", "fil_2_diff",
+            "printer_diff",
+        ])
+
+    def test_skips_arrays_with_unexpected_length(self) -> None:
+        # Length doesn't match N+2 — leave it alone.
+        settings = {
+            "filament_settings_id": ["A", "B", "C", "D"],
+            "inherits_group": ["a", "b", "c"],
+        }
+
+        touched = _truncate_structural_arrays(settings, target_n=1)
+
+        self.assertEqual(touched, {})
+        self.assertEqual(settings["inherits_group"], ["a", "b", "c"])
+
+    def test_no_op_when_target_already_matches(self) -> None:
+        settings = {
+            "filament_settings_id": ["A"],
+            "inherits_group": ["proc", "fil_1", "printer"],
+        }
+
+        self.assertEqual(_truncate_structural_arrays(settings, target_n=1), {})
+
+    def test_no_op_when_filament_settings_id_missing(self) -> None:
+        settings = {
+            "inherits_group": ["a", "b", "c", "d", "e", "f"],
+        }
+        snapshot = list(settings["inherits_group"])
+
+        self.assertEqual(_truncate_structural_arrays(settings, target_n=1), {})
+        self.assertEqual(settings["inherits_group"], snapshot)
+
+    def test_writes_through_sanitize_3mf_with_percussion_frog_shape(self) -> None:
+        # Reproduces the percussion-frog crash: 4 authored filaments, sliced
+        # with 1. Without truncating `inherits_group`, OrcaSlicer 2.3.2
+        # SIGSEGVs in `OrcaSlicer.cpp:1647-1655` because `inherits_group`
+        # iterates past the end of the truncated `filament_settings_id`.
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "in.3mf"
+            _write_3mf(src, {
+                "filament_settings_id": [
+                    "Bambu PLA Metal @BBL X1C",
+                    "Bambu ASA @BBL X1E 0.4 nozzle",
+                    "Generic PETG",
+                    "Bambu PLA Matte @BBL X1C",
+                ],
+                "filament_colour": ["#AA6443", "#FFFFFF", "#898989", "#E8DBB7"],
+                "inherits_group": ["", "", "", "", "", ""],
+                "different_settings_to_system": [
+                    "enable_support;sparse_infill_density;sparse_infill_pattern;"
+                    "support_critical_regions_only;support_type",
+                    "", "", "", "", "",
+                ],
+                "flush_volumes_matrix": ["0"] * 16,
+                "flush_volumes_vector": ["140"] * 8,
+            })
+
+            out = _sanitize_3mf(str(src), tmp, None, target_filament_count=1)
+
+            self.assertNotEqual(out, str(src))
+            s = _read_settings(out)
+            self.assertEqual(len(s["filament_settings_id"]), 1)
+            # Both structural arrays now match `len(filament_settings_id) + 2`.
+            self.assertEqual(len(s["inherits_group"]), 3)
+            self.assertEqual(len(s["different_settings_to_system"]), 3)
+            # Process slot at [0] preserved, printer slot at [-1] preserved.
+            self.assertEqual(
+                s["different_settings_to_system"][0],
+                "enable_support;sparse_infill_density;sparse_infill_pattern;"
+                "support_critical_regions_only;support_type",
+            )
 
 
 if __name__ == "__main__":
