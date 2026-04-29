@@ -419,7 +419,9 @@ def _check_filament_id_ams_scope(
     Two filament profiles may share `filament_id` iff their resolved
     `compatible_printers` sets are disjoint (different printers ⇒
     different AMS scopes). An empty set is treated as "all printers"
-    and fails closed.
+    and fails closed. A broken inherits chain on an existing profile
+    also fails closed: we cannot verify the printer scope, so we treat
+    the profile as conflicting rather than silently skipping it.
 
     `exclude_setting_id`, when provided, is the setting_id of the user
     profile being replaced — it is excluded from the comparison so a
@@ -450,25 +452,45 @@ def _check_filament_id_ams_scope(
                 other_payload, category="filament"
             )
         except ProfileNotFoundError:
-            # Broken chain on the existing profile — skip it for the
-            # collision check (we cannot conclude a real conflict).
+            # Broken chain on the existing profile — we cannot verify
+            # whether the printer sets overlap, so fail closed (treat
+            # like "all printers" via the downstream empty-set branch).
             logger.warning(
-                "Skipping AMS-scope check against '%s' (filament_id=%s): "
-                "broken inherits chain",
+                "Treating '%s' (filament_id=%s) as conflicting: "
+                "broken inherits chain prevents AMS-scope verification",
                 other_key, filament_id,
             )
-            continue
-
-        # Empty on either side ⇒ "all printers" ⇒ assume conflict.
-        if not compatible_printers or not other_printers:
-            overlap_desc = "<all printers>"
-        else:
-            overlap = compatible_printers & other_printers
-            if not overlap:
-                continue
-            overlap_desc = ", ".join(sorted(overlap))
+            other_printers = set()
 
         existing_name = str(raw.get("name", _display_name(other_key)))
+
+        # Empty on either side ⇒ "all printers" ⇒ assume conflict. Pick
+        # the message variant that names the side with the missing
+        # restriction so the operator knows which profile to fix. When
+        # both sides are empty, surface the candidate side (the user is
+        # importing it now and can act on it).
+        if not compatible_printers:
+            raise ValueError(
+                f"filament_id '{filament_id}' is already used by profile "
+                f"'{existing_name}', and the new profile has no "
+                f"compatible_printers restriction (applies to all printers, "
+                f"so it conflicts with every existing profile sharing this "
+                f"id). Add a compatible_printers list or pick a different "
+                f"filament_id."
+            )
+        if not other_printers:
+            raise ValueError(
+                f"filament_id '{filament_id}' is already used by profile "
+                f"'{existing_name}', which has no compatible_printers "
+                f"restriction (applies to all printers). Pick a different "
+                f"filament_id."
+            )
+
+        overlap = compatible_printers & other_printers
+        if not overlap:
+            continue
+        overlap_desc = ", ".join(sorted(overlap))
+
         raise ValueError(
             f"filament_id '{filament_id}' is already used by profile "
             f"'{existing_name}' on overlapping printers: {overlap_desc}."

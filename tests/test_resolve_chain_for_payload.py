@@ -340,3 +340,41 @@ class CheckFilamentIdAmsScopeTests(unittest.TestCase):
             compatible_printers={"Bambu Lab A1 mini 0.4 nozzle"},
             exclude_setting_id=None,
         )
+
+    def test_broken_chain_on_existing_profile_fails_closed(self) -> None:
+        # Add a third profile that shares filament_id GFA00 but has a
+        # broken inherits chain (parent does not exist in the index).
+        profiles._index_profile(
+            "BBL::Stale Broken",
+            {
+                "name": "Stale Broken",
+                "setting_id": "GFA00_STALE",
+                "instantiation": "true",
+                "inherits": "Does Not Exist",
+                # Note: filament_id is NOT inherited because we set it
+                # directly on this raw profile.
+                "filament_id": "GFA00",
+            },
+            "filament",
+            "BBL",
+        )
+
+        # The candidate's printer set is disjoint from the two healthy
+        # GFA00 profiles (A1M, X1C) — but the broken Stale Broken
+        # profile cannot be verified, so the helper must fail closed
+        # rather than silently skipping.
+        with self.assertRaises(ValueError) as ctx:
+            with self.assertLogs(profiles.logger, level="WARNING") as cap:
+                profiles._check_filament_id_ams_scope(
+                    filament_id="GFA00",
+                    compatible_printers={"Bambu Lab P1S 0.4 nozzle"},
+                    exclude_setting_id=None,
+                )
+
+        self.assertIn("GFA00", str(ctx.exception))
+        self.assertIn("Stale Broken", str(ctx.exception))
+        # Warning was emitted naming the broken profile.
+        self.assertTrue(
+            any("Stale Broken" in record for record in cap.output),
+            f"expected warning naming broken profile, got {cap.output!r}",
+        )
