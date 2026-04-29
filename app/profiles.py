@@ -754,7 +754,14 @@ def get_machine_profiles() -> list[dict[str, Any]]:
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(profile_key)
+        try:
+            resolved = resolve_profile_by_name(profile_key)
+        except ProfileNotFoundError as exc:
+            logger.warning(
+                "Skipping %s '%s' from listing: %s",
+                "machine", profile_key, exc,
+            )
+            continue
         if resolved is None:
             continue
         nozzle = resolved.get("nozzle_diameter", ["0.4"])
@@ -789,7 +796,14 @@ def get_process_profiles(
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(profile_key)
+        try:
+            resolved = resolve_profile_by_name(profile_key)
+        except ProfileNotFoundError as exc:
+            logger.warning(
+                "Skipping %s '%s' from listing: %s",
+                "process", profile_key, exc,
+            )
+            continue
         if resolved is None:
             continue
 
@@ -839,7 +853,14 @@ def get_filament_profiles(
             continue
         if raw.get("instantiation") != "true":
             continue
-        resolved = resolve_profile_by_name(profile_key)
+        try:
+            resolved = resolve_profile_by_name(profile_key)
+        except ProfileNotFoundError as exc:
+            logger.warning(
+                "Skipping %s '%s' from listing: %s",
+                "filament", profile_key, exc,
+            )
+            continue
         if resolved is None:
             continue
         setting_id = _slug_for_profile(profile_key)

@@ -152,3 +152,54 @@ class ListingIterationTolerantWrapTests(unittest.TestCase):
             any("Broken" in record and "Does Not Exist" in record for record in cap.output),
             f"expected a warning naming the broken profile and parent, got {cap.output!r}",
         )
+
+    def test_get_filament_profiles_skips_broken_chain_with_warning(self) -> None:
+        # Healthy filament that resolves cleanly.
+        self._index(
+            "BBL",
+            {
+                "name": "Healthy",
+                "setting_id": "GFA01",
+                "instantiation": "true",
+                "filament_id": "GFA01",
+                "filament_type": ["PLA"],
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            },
+            "filament",
+        )
+        # Broken filament inheriting from a non-existent parent.
+        self._index(
+            "BBL",
+            {
+                "name": "BrokenLeaf",
+                "setting_id": "GFA02",
+                "instantiation": "true",
+                "inherits": "Does Not Exist",
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            },
+            "filament",
+        )
+        # Machine entry referenced by compatible_printers (so the listing
+        # code's machine filter can be exercised without it).
+        self._index(
+            "BBL",
+            {
+                "name": "Bambu Lab A1 mini 0.4 nozzle",
+                "setting_id": "GM020",
+                "instantiation": "true",
+                "printer_model": "Bambu Lab A1 mini",
+                "nozzle_diameter": ["0.4"],
+            },
+            "machine",
+        )
+
+        with self.assertLogs(profiles.logger, level="WARNING") as cap:
+            listed = profiles.get_filament_profiles()
+
+        names = {p["name"] for p in listed}
+        self.assertIn("Healthy", names)
+        self.assertNotIn("BrokenLeaf", names)
+        self.assertTrue(
+            any("BrokenLeaf" in record for record in cap.output),
+            f"expected a warning naming the broken profile, got {cap.output!r}",
+        )
