@@ -25,7 +25,10 @@ _type_map: dict[str, str] = {}
 _vendor_map: dict[str, str] = {}
 # Display-name index: {name: [internal_key, ...]}
 _name_index: dict[str, list[str]] = {}
-# Memoized resolved profiles
+# Memoized resolved profiles. Keyed by profile_key. Cleared by
+# load_all_profiles(); callers that catch ProfileNotFoundError and
+# repair the index must reload before re-resolving, or stale results
+# from previously-cached siblings will leak through.
 _resolved_cache: dict[str, dict[str, Any]] = {}
 # Index: {setting_id (e.g. "GM014"): [internal_key, ...]}
 _setting_id_index: dict[str, list[str]] = {}
@@ -598,7 +601,8 @@ def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
         if parent is None:
             raise ProfileNotFoundError(
                 f"Profile '{_display_name(profile_key)}' inherits from "
-                f"'{parent_name}', which could not be resolved."
+                f"'{parent_name}', whose profile entry is missing from the index "
+                f"(internal state may be inconsistent — try POST /profiles/reload)."
             )
         merged = dict(parent)
         merged.update(profile)
