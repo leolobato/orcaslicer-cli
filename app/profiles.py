@@ -188,11 +188,15 @@ def _is_ams_assignable_filament(
 
 
 def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
-    """Return known (logical_filament_name, filament_id) pairs from loaded profiles.
+    """Return (logical_filament_name, filament_id) pairs for resolvable filament profiles.
 
-    Profiles with broken inherits chains are skipped with a warning, so a
-    single bad vendor JSON cannot block id-collision detection during a
-    user import.
+    Profiles whose inherits chain cannot be resolved are silently dropped
+    from the returned list (and a warning is logged for each). This is
+    appropriate for the only current caller (`_generate_custom_filament_id`,
+    which uses these pairs to detect collisions when minting a new id —
+    a profile that does not resolve cannot contribute an id and therefore
+    cannot collide). New callers that need a complete enumeration must
+    not use this function.
     """
     pairs: list[tuple[str, str]] = []
     for profile_key, raw in _raw_profiles.items():
