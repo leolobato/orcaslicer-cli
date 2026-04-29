@@ -261,14 +261,22 @@ def _resolve_filament_parent_ref(parent_ref: str) -> str | None:
 
 
 def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a clone-style root filament profile from imported JSON.
+    """Lightly stamp an imported filament payload and return its raw form.
 
-    Behavior mirrors Orca/Bambu GUI clone flow for custom filaments:
-    - Resolve inheritance first (if present).
-    - Produce a root profile (clear inherits/base_id).
-    - Ensure explicit filament_id exists:
-      - keep user-provided filament_id when present;
-      - otherwise generate a custom Pxxxxxxx id (do not reuse inherited id).
+    The returned dict preserves `inherits` so the inheritance chain is
+    resolved at slice / listing time. Stamping is limited to the fields
+    needed for indexing and AMS identity:
+
+    - `setting_id`: synthesized from `name` if missing.
+    - `instantiation`: set to `"true"` if missing.
+    - `filament_id`: kept verbatim if directly supplied; otherwise
+      generated via `_generate_custom_filament_id`. Stamping the id at
+      import time prevents it from inheriting from the parent (which
+      would collide AMS identity for every clone of the parent).
+
+    Validates that `inherits`, when set, points to a known filament
+    profile, and that the resulting `filament_id` does not collide
+    with another profile on overlapping `compatible_printers`.
     """
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -279,9 +287,7 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(setting_id, str) or not setting_id.strip():
         raise ValueError("Missing or invalid 'setting_id' field.")
     setting_id = setting_id.strip()
-    has_direct_input_filament_id = _has_direct_filament_id(data)
 
-    merged: dict[str, Any]
     inherits = data.get("inherits")
     if isinstance(inherits, str) and inherits.strip():
         parent_name = _resolve_filament_parent_ref(inherits.strip())
@@ -289,36 +295,30 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
             raise ProfileNotFoundError(
                 f"Filament parent '{inherits.strip()}' not found"
             )
-        parent = resolve_profile_by_name(parent_name)
-        if parent is None:
-            raise ProfileNotFoundError(
-                f"Failed to resolve filament parent '{inherits.strip()}'"
-            )
-        merged = dict(parent)
-        merged.update(data)
-    else:
-        merged = dict(data)
 
-    if "filament_type" not in merged and "filament_id" not in merged:
-        raise ValueError(
-            "Profile must contain 'filament_type' or 'filament_id' (directly or via inherits)."
-        )
-
-    result = dict(merged)
+    result = dict(data)
     result["name"] = name
     result["setting_id"] = setting_id
-    result["from"] = "User"
-    result["instantiation"] = "true"
-    result["filament_settings_id"] = [name]
-    result.pop("inherits", None)
-    result.pop("base_id", None)
+    if "instantiation" not in result:
+        result["instantiation"] = "true"
 
-    filament_id = _extract_filament_id(result)
-    if has_direct_input_filament_id and filament_id and filament_id != "null":
+    # Stamp filament_id (AMS identity).
+    if _has_direct_filament_id(data):
+        # Caller's value wins; keep it verbatim.
+        filament_id = _extract_filament_id(data)
         result["filament_id"] = filament_id
     else:
         logical_name = _logical_filament_name(name)
-        result["filament_id"] = _generate_custom_filament_id(logical_name)
+        filament_id = _generate_custom_filament_id(logical_name)
+        result["filament_id"] = filament_id
+
+    # Validate AMS-scope uniqueness against currently loaded profiles.
+    compat = _compatible_printers_set_for_payload(result, category="filament")
+    _check_filament_id_ams_scope(
+        filament_id=filament_id,
+        compatible_printers=compat,
+        exclude_setting_id=setting_id,
+    )
 
     return result
 

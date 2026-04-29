@@ -110,6 +110,7 @@ class FilamentVendorResolutionTests(unittest.TestCase):
                 "instantiation": "false",
                 "filament_id": "GFSNL03",
                 "filament_type": ["PLA"],
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
             },
         )
 
@@ -155,6 +156,143 @@ class FilamentVendorResolutionTests(unittest.TestCase):
     def _write_json(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class MaterializeFilamentImportRawFormTests(FilamentVendorResolutionTests):
+    """The new raw-form behavior of materialize_filament_import.
+
+    Subclasses FilamentVendorResolutionTests so it inherits the same
+    fixture (SUNLU PLA+ profiles, A1M machine, fdm_filament_pla base).
+    The inherited tests run a second time as part of this class — that's
+    harmless duplication but documents that the existing assertions
+    still hold.
+    """
+
+    def test_preserves_inherits_and_does_not_merge_parent(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["name"], "My SUNLU copy")
+        self.assertEqual(result["inherits"], "SUNLU PLA+ @BBL A1M")
+        # Parent values must NOT be merged into the result.
+        self.assertNotIn("filament_type", result)
+
+    def test_synthesizes_setting_id_from_name_when_missing(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["setting_id"], "My SUNLU copy")
+
+    def test_keeps_directly_supplied_setting_id(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "setting_id": "MYSUNLU",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["setting_id"], "MYSUNLU")
+
+    def test_stamps_instantiation_true_when_missing(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["instantiation"], "true")
+
+    def test_keeps_directly_supplied_filament_id_when_disjoint(self) -> None:
+        # The parent SUNLU PLA+ @BBL A1M is compatible with A1 mini.
+        # We claim a disjoint printer set so the uniqueness check passes.
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "filament_id": "PCUSTOM1",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["filament_id"], "PCUSTOM1")
+
+    def test_generates_filament_id_when_caller_does_not_supply_one(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "My SUNLU copy",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        fid = result["filament_id"]
+        self.assertTrue(fid.startswith("P"))
+        self.assertEqual(len(fid), 8)
+
+    def test_raises_when_inherits_parent_is_unknown(self) -> None:
+        with self.assertRaises(profiles.ProfileNotFoundError):
+            profiles.materialize_filament_import({
+                "name": "My orphan",
+                "inherits": "Does Not Exist",
+            })
+
+    def test_rejects_directly_supplied_filament_id_on_overlapping_printers(self) -> None:
+        # GFSNL03 is the parent's filament_id (SUNLU PLA+ @base), and
+        # the parent's compatible_printers chain ends at @BBL A1M which
+        # targets "Bambu Lab A1 mini 0.4 nozzle". Pasting GFSNL03 into a
+        # new import that ALSO targets A1 mini collides on AMS scope.
+        with self.assertRaises(ValueError) as ctx:
+            profiles.materialize_filament_import({
+                "name": "Pretender",
+                "inherits": "SUNLU PLA+ @BBL A1M",
+                "filament_id": "GFSNL03",
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            })
+
+        msg = str(ctx.exception)
+        self.assertIn("GFSNL03", msg)
+
+    def test_allows_directly_supplied_filament_id_on_disjoint_printers(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "Disjoint Sibling",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "filament_id": "GFSNL03",
+            "compatible_printers": ["My Custom Printer"],
+        })
+        self.assertEqual(result["filament_id"], "GFSNL03")
+
+    def test_does_not_stamp_filament_settings_id(self) -> None:
+        # The old materializer always stamped filament_settings_id=[name].
+        # The new materializer leaves it alone — if the GUI export had
+        # one, it survives; if it didn't, the import doesn't grow one.
+        result = profiles.materialize_filament_import({
+            "name": "No Stamp",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+        self.assertNotIn("filament_settings_id", result)
+
+    def test_does_not_stamp_from_field(self) -> None:
+        # The old materializer stamped from=User. The new one preserves
+        # whatever the input had (typically OrcaSlicer GUI exports
+        # already include from=User).
+        result = profiles.materialize_filament_import({
+            "name": "No From Stamp",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "compatible_printers": ["My Custom Printer"],
+        })
+        self.assertNotIn("from", result)
+
+    def test_preserves_caller_supplied_from_field(self) -> None:
+        result = profiles.materialize_filament_import({
+            "name": "Has From",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "from": "User",
+            "compatible_printers": ["My Custom Printer"],
+        })
+        self.assertEqual(result["from"], "User")
 
 
 if __name__ == "__main__":
