@@ -313,6 +313,9 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
         result["filament_id"] = filament_id
 
     # Validate AMS-scope uniqueness against currently loaded profiles.
+    # The importing profile is not yet indexed, so the chain walk here
+    # resolves through the parent only — that's the right scope for
+    # determining which printers this filament will end up applying to.
     compat = _compatible_printers_set_for_payload(result, category="filament")
     _check_filament_id_ams_scope(
         filament_id=filament_id,
@@ -426,6 +429,13 @@ def _check_filament_id_ams_scope(
     `exclude_setting_id`, when provided, is the setting_id of the user
     profile being replaced — it is excluded from the comparison so a
     profile can be re-imported under itself.
+
+    Vendor `@base` profiles that ship with `filament_id` but no
+    `compatible_printers` will conflict with any user import re-using
+    their id (the empty set is treated as "all printers" → fail
+    closed). This is intentional AMS-identity protection: a user
+    pasting a vendor id should receive a clear rejection rather than a
+    silent collision.
 
     Raises `ValueError` (with a user-facing message) on conflict.
     """

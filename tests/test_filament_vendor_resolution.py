@@ -294,6 +294,34 @@ class MaterializeFilamentImportRawFormTests(FilamentVendorResolutionTests):
         })
         self.assertEqual(result["from"], "User")
 
+    def test_preserves_caller_supplied_instantiation_false(self) -> None:
+        # The materializer only stamps `instantiation: "true"` when the
+        # field is missing. A caller who explicitly sets it to "false"
+        # must have that value preserved.
+        result = profiles.materialize_filament_import({
+            "name": "Caller Says False",
+            "inherits": "SUNLU PLA+ @BBL A1M",
+            "instantiation": "false",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["instantiation"], "false")
+
+    def test_bare_payload_without_inherits_or_filament_id_succeeds(self) -> None:
+        # Under the new contract, a payload with only `name` and
+        # `compatible_printers` is valid: setting_id is synthesized,
+        # filament_id is generated, no parent validation needed.
+        result = profiles.materialize_filament_import({
+            "name": "Bare Bones",
+            "compatible_printers": ["My Custom Printer"],
+        })
+
+        self.assertEqual(result["name"], "Bare Bones")
+        self.assertEqual(result["setting_id"], "Bare Bones")
+        self.assertEqual(result["instantiation"], "true")
+        self.assertTrue(result["filament_id"].startswith("P"))
+        self.assertNotIn("inherits", result)
+
 
 if __name__ == "__main__":
     unittest.main()
