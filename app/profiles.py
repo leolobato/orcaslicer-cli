@@ -188,7 +188,12 @@ def _is_ams_assignable_filament(
 
 
 def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
-    """Return known (logical_filament_name, filament_id) pairs from loaded profiles."""
+    """Return known (logical_filament_name, filament_id) pairs from loaded profiles.
+
+    Profiles with broken inherits chains are skipped with a warning, so a
+    single bad vendor JSON cannot block id-collision detection during a
+    user import.
+    """
     pairs: list[tuple[str, str]] = []
     for profile_key, raw in _raw_profiles.items():
         if _type_map.get(profile_key) != "filament":
@@ -200,7 +205,14 @@ def _iter_known_filament_names_and_ids() -> list[tuple[str, str]]:
         # Prefer the raw profile's id; fallback to the resolved chain id.
         filament_id = _extract_filament_id(raw)
         if not filament_id:
-            resolved = resolve_profile_by_name(profile_key)
+            try:
+                resolved = resolve_profile_by_name(profile_key)
+            except ProfileNotFoundError as exc:
+                logger.warning(
+                    "Skipping filament '%s' during id-collision iteration: %s",
+                    profile_key, exc,
+                )
+                continue
             if resolved:
                 filament_id = _extract_filament_id(resolved)
 
