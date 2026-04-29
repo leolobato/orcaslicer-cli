@@ -4,23 +4,14 @@ import unittest
 from pathlib import Path
 
 from app import profiles
-
-
-def _reset_profiles_state() -> None:
-    """Clear all module-level dicts in app.profiles so a test starts with a known empty index."""
-    profiles._raw_profiles.clear()
-    profiles._type_map.clear()
-    profiles._vendor_map.clear()
-    profiles._name_index.clear()
-    profiles._resolved_cache.clear()
-    profiles._setting_id_index.clear()
+from tests._profile_test_helpers import reset_profiles_state
 
 
 class StrictResolveProfileByNameTests(unittest.TestCase):
     """`resolve_profile_by_name` raises on broken inherits chains."""
 
     def setUp(self) -> None:
-        _reset_profiles_state()
+        reset_profiles_state()
         self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-strict-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
@@ -35,7 +26,7 @@ class StrictResolveProfileByNameTests(unittest.TestCase):
     def tearDown(self) -> None:
         profiles.PROFILES_DIR = self._old_profiles_dir
         profiles.USER_PROFILES_DIR = self._old_user_profiles_dir
-        _reset_profiles_state()
+        reset_profiles_state()
         shutil.rmtree(self.tempdir)
 
     def _index_profile(self, vendor: str, data: dict, category: str) -> str:
@@ -100,7 +91,7 @@ class ListingIterationTolerantWrapTests(unittest.TestCase):
     """Listing-side iteration in profiles.py skips broken chains with a log."""
 
     def setUp(self) -> None:
-        _reset_profiles_state()
+        reset_profiles_state()
         self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-tolerant-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
@@ -115,7 +106,7 @@ class ListingIterationTolerantWrapTests(unittest.TestCase):
     def tearDown(self) -> None:
         profiles.PROFILES_DIR = self._old_profiles_dir
         profiles.USER_PROFILES_DIR = self._old_user_profiles_dir
-        _reset_profiles_state()
+        reset_profiles_state()
         shutil.rmtree(self.tempdir)
 
     def _index(self, vendor: str, data: dict, category: str) -> str:

@@ -350,6 +350,12 @@ def _resolve_chain_for_payload(
 
     `category` must be `"filament"` or `"process"` (machine imports do
     not exist).
+
+    The returned dict is a shallow copy: top-level keys are independent,
+    but nested mutable values (lists, dicts) are shared with both the
+    parent's resolved view and the input payload. Mutating nested values
+    in place may affect the cached parent resolution; callers should
+    treat the result as read-through.
     """
     inherits_raw = payload.get("inherits")
     if not isinstance(inherits_raw, str) or not inherits_raw.strip():
