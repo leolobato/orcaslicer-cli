@@ -153,3 +153,71 @@ class ResolveChainForPayloadTests(unittest.TestCase):
         self.assertEqual(merged["layer_height"], ["0.2"])
         self.assertEqual(merged["outer_wall_speed"], ["150"])
         self.assertEqual(merged["name"], "Custom Process")
+
+
+class CompatiblePrintersSetForPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_profiles_state()
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-cpset-")
+        self.profiles_dir = Path(self.tempdir) / "profiles"
+        self.user_dir = Path(self.tempdir) / "user"
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.user_dir.mkdir(parents=True, exist_ok=True)
+
+        self._old_profiles_dir = profiles.PROFILES_DIR
+        self._old_user_profiles_dir = profiles.USER_PROFILES_DIR
+        profiles.PROFILES_DIR = str(self.profiles_dir)
+        profiles.USER_PROFILES_DIR = str(self.user_dir)
+
+        profiles._index_profile(
+            "BBL::Parent A1M",
+            {
+                "name": "Parent A1M",
+                "setting_id": "GFA00_A1M",
+                "instantiation": "true",
+                "filament_id": "GFA00",
+                "filament_type": ["PLA"],
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            },
+            "filament",
+            "BBL",
+        )
+
+    def tearDown(self) -> None:
+        profiles.PROFILES_DIR = self._old_profiles_dir
+        profiles.USER_PROFILES_DIR = self._old_user_profiles_dir
+        reset_profiles_state()
+        shutil.rmtree(self.tempdir)
+
+    def test_reads_directly_from_payload_when_present(self) -> None:
+        payload = {
+            "name": "Self",
+            "compatible_printers": ["X1C 0.4", "X1C 0.6"],
+        }
+
+        result = profiles._compatible_printers_set_for_payload(
+            payload, category="filament"
+        )
+
+        self.assertEqual(result, {"X1C 0.4", "X1C 0.6"})
+
+    def test_inherits_from_parent_when_absent_on_payload(self) -> None:
+        payload = {
+            "name": "Child",
+            "inherits": "Parent A1M",
+        }
+
+        result = profiles._compatible_printers_set_for_payload(
+            payload, category="filament"
+        )
+
+        self.assertEqual(result, {"Bambu Lab A1 mini 0.4 nozzle"})
+
+    def test_returns_empty_set_when_chain_provides_none(self) -> None:
+        payload = {"name": "Empty"}
+
+        result = profiles._compatible_printers_set_for_payload(
+            payload, category="filament"
+        )
+
+        self.assertEqual(result, set())

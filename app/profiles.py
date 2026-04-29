@@ -385,6 +385,29 @@ def _resolve_chain_for_payload(
     return merged
 
 
+def _compatible_printers_set_for_payload(
+    payload: dict[str, Any],
+    *,
+    category: str,
+) -> set[str]:
+    """Return the resolved `compatible_printers` set for a payload.
+
+    Walks the inherits chain (via `_resolve_chain_for_payload`) so that
+    a payload that does not declare `compatible_printers` inherits it
+    from the parent. Returns an empty set if no value is found anywhere
+    in the chain.
+
+    Used by the AMS-scope uniqueness check in `materialize_filament_import`
+    — two filament profiles may share `filament_id` only when their
+    resolved `compatible_printers` sets are disjoint.
+    """
+    merged = _resolve_chain_for_payload(payload, category=category)
+    raw_value = merged.get("compatible_printers")
+    if not isinstance(raw_value, list):
+        return set()
+    return {str(item) for item in raw_value if isinstance(item, str)}
+
+
 def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
     """Create a clone-style root process profile from imported JSON.
 
