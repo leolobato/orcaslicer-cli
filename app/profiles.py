@@ -563,7 +563,14 @@ def load_all_profiles() -> dict[str, int]:
 
 
 def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
-    """Resolve a single profile's inheritance chain, with memoization."""
+    """Resolve a single profile's inheritance chain, with memoization.
+
+    Raises `ProfileNotFoundError` if any link in the chain cannot be
+    resolved. Returns `None` only when the requested name itself does
+    not exist in the index (the caller can decide whether that is a
+    hard error). Once a profile is found, every parent reference must
+    resolve.
+    """
     profile_key = name if name in _raw_profiles else _select_profile_key_by_name(name)
     if profile_key is None:
         return None
@@ -582,16 +589,19 @@ def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
             category=_type_map.get(profile_key, ""),
             preferred_vendor=_vendor_map.get(profile_key, ""),
         )
-    else:
-        parent_key = None
-
-    if parent_key:
+        if parent_key is None:
+            raise ProfileNotFoundError(
+                f"Profile '{_display_name(profile_key)}' inherits from "
+                f"'{parent_name}', which is not loaded."
+            )
         parent = resolve_profile_by_name(parent_key)
-        if parent is not None:
-            merged = dict(parent)
-            merged.update(profile)
-        else:
-            merged = dict(profile)
+        if parent is None:
+            raise ProfileNotFoundError(
+                f"Profile '{_display_name(profile_key)}' inherits from "
+                f"'{parent_name}', which could not be resolved."
+            )
+        merged = dict(parent)
+        merged.update(profile)
     else:
         merged = dict(profile)
 
