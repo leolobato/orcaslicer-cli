@@ -337,6 +337,48 @@ def _resolve_process_parent_ref(parent_ref: str) -> str | None:
     return _select_profile_key_by_name(parent_ref, category="process")
 
 
+def _resolve_chain_for_payload(
+    payload: dict[str, Any],
+    *,
+    category: str,
+) -> dict[str, Any]:
+    """Resolve a payload's inherits chain in memory without indexing it.
+
+    Returns the fully merged dict (parent values overlaid with the
+    payload's own keys). Raises `ProfileNotFoundError` if `inherits` is
+    set but the parent or any link in its chain cannot be resolved.
+
+    `category` must be `"filament"` or `"process"` (machine imports do
+    not exist).
+    """
+    inherits_raw = payload.get("inherits")
+    if not isinstance(inherits_raw, str) or not inherits_raw.strip():
+        return dict(payload)
+
+    inherits = inherits_raw.strip()
+    if category == "filament":
+        parent_key = _resolve_filament_parent_ref(inherits)
+    elif category == "process":
+        parent_key = _resolve_process_parent_ref(inherits)
+    else:
+        raise ValueError(f"Unsupported category for chain resolution: {category!r}")
+
+    if parent_key is None:
+        raise ProfileNotFoundError(
+            f"Parent {category} profile '{inherits}' not found"
+        )
+
+    parent_resolved = resolve_profile_by_name(parent_key)
+    if parent_resolved is None:
+        raise ProfileNotFoundError(
+            f"Failed to resolve parent {category} profile '{inherits}'"
+        )
+
+    merged = dict(parent_resolved)
+    merged.update(payload)
+    return merged
+
+
 def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
     """Create a clone-style root process profile from imported JSON.
 
