@@ -408,6 +408,73 @@ def _compatible_printers_set_for_payload(
     return {item for item in raw_value if isinstance(item, str)}
 
 
+def _check_filament_id_ams_scope(
+    *,
+    filament_id: str,
+    compatible_printers: set[str],
+    exclude_setting_id: str | None,
+) -> None:
+    """Validate that `filament_id` does not collide on overlapping AMS scope.
+
+    Two filament profiles may share `filament_id` iff their resolved
+    `compatible_printers` sets are disjoint (different printers ⇒
+    different AMS scopes). An empty set is treated as "all printers"
+    and fails closed.
+
+    `exclude_setting_id`, when provided, is the setting_id of the user
+    profile being replaced — it is excluded from the comparison so a
+    profile can be re-imported under itself.
+
+    Raises `ValueError` (with a user-facing message) on conflict.
+    """
+    if not filament_id or filament_id == "null":
+        return
+
+    for other_key, raw in _raw_profiles.items():
+        if _type_map.get(other_key) != "filament":
+            continue
+        if _extract_filament_id(raw) != filament_id:
+            # Only check raw filament_id for performance; profiles that
+            # inherit filament_id will be caught when the parent itself
+            # is iterated (and at slice time inheriting the parent's id
+            # is exactly what we are guarding against by stamping our
+            # own id at import).
+            continue
+        other_setting_id = str(raw.get("setting_id", "")).strip()
+        if exclude_setting_id and other_setting_id == exclude_setting_id:
+            continue
+
+        other_payload = dict(raw)
+        try:
+            other_printers = _compatible_printers_set_for_payload(
+                other_payload, category="filament"
+            )
+        except ProfileNotFoundError:
+            # Broken chain on the existing profile — skip it for the
+            # collision check (we cannot conclude a real conflict).
+            logger.warning(
+                "Skipping AMS-scope check against '%s' (filament_id=%s): "
+                "broken inherits chain",
+                other_key, filament_id,
+            )
+            continue
+
+        # Empty on either side ⇒ "all printers" ⇒ assume conflict.
+        if not compatible_printers or not other_printers:
+            overlap_desc = "<all printers>"
+        else:
+            overlap = compatible_printers & other_printers
+            if not overlap:
+                continue
+            overlap_desc = ", ".join(sorted(overlap))
+
+        existing_name = str(raw.get("name", _display_name(other_key)))
+        raise ValueError(
+            f"filament_id '{filament_id}' is already used by profile "
+            f"'{existing_name}' on overlapping printers: {overlap_desc}."
+        )
+
+
 def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
     """Create a clone-style root process profile from imported JSON.
 

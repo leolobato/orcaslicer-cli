@@ -243,3 +243,100 @@ class CompatiblePrintersSetForPayloadTests(unittest.TestCase):
         )
 
         self.assertEqual(result, set())
+
+
+class CheckFilamentIdAmsScopeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_profiles_state()
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-amscope-")
+        self.profiles_dir = Path(self.tempdir) / "profiles"
+        self.user_dir = Path(self.tempdir) / "user"
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.user_dir.mkdir(parents=True, exist_ok=True)
+
+        self._old_profiles_dir = profiles.PROFILES_DIR
+        self._old_user_profiles_dir = profiles.USER_PROFILES_DIR
+        profiles.PROFILES_DIR = str(self.profiles_dir)
+        profiles.USER_PROFILES_DIR = str(self.user_dir)
+
+        # Two existing vendor profiles share filament_id GFA00 across two
+        # disjoint printers. The AMS-scope check must allow this layout
+        # because the printer sets do not overlap.
+        profiles._index_profile(
+            "BBL::Bambu PLA Basic @BBL A1M",
+            {
+                "name": "Bambu PLA Basic @BBL A1M",
+                "setting_id": "GFA00_A1M",
+                "instantiation": "true",
+                "filament_id": "GFA00",
+                "filament_type": ["PLA"],
+                "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            },
+            "filament",
+            "BBL",
+        )
+        profiles._index_profile(
+            "BBL::Bambu PLA Basic @BBL X1C",
+            {
+                "name": "Bambu PLA Basic @BBL X1C",
+                "setting_id": "GFA00_X1C",
+                "instantiation": "true",
+                "filament_id": "GFA00",
+                "filament_type": ["PLA"],
+                "compatible_printers": ["Bambu Lab X1 Carbon 0.4 nozzle"],
+            },
+            "filament",
+            "BBL",
+        )
+
+    def tearDown(self) -> None:
+        profiles.PROFILES_DIR = self._old_profiles_dir
+        profiles.USER_PROFILES_DIR = self._old_user_profiles_dir
+        reset_profiles_state()
+        shutil.rmtree(self.tempdir)
+
+    def test_disjoint_compatible_printers_allow_shared_id(self) -> None:
+        # No exception expected: P1S printer is disjoint from both A1M
+        # and X1C, so sharing GFA00 is fine.
+        profiles._check_filament_id_ams_scope(
+            filament_id="GFA00",
+            compatible_printers={"Bambu Lab P1S 0.4 nozzle"},
+            exclude_setting_id=None,
+        )
+
+    def test_overlapping_compatible_printers_raise_value_error(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            profiles._check_filament_id_ams_scope(
+                filament_id="GFA00",
+                compatible_printers={"Bambu Lab A1 mini 0.4 nozzle"},
+                exclude_setting_id=None,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("GFA00", msg)
+        self.assertIn("Bambu Lab A1 mini 0.4 nozzle", msg)
+        self.assertIn("Bambu PLA Basic @BBL A1M", msg)
+
+    def test_empty_compatible_printers_fails_closed_against_any_match(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            profiles._check_filament_id_ams_scope(
+                filament_id="GFA00",
+                compatible_printers=set(),
+                exclude_setting_id=None,
+            )
+        self.assertIn("GFA00", str(ctx.exception))
+
+    def test_excluded_setting_id_is_ignored(self) -> None:
+        # Replace flow: the existing A1M profile is being overwritten by
+        # itself; passing its setting_id excludes it from the check.
+        profiles._check_filament_id_ams_scope(
+            filament_id="GFA00",
+            compatible_printers={"Bambu Lab A1 mini 0.4 nozzle"},
+            exclude_setting_id="GFA00_A1M",
+        )
+
+    def test_no_match_for_filament_id_is_a_noop(self) -> None:
+        profiles._check_filament_id_ams_scope(
+            filament_id="GFNOTUSED",
+            compatible_printers={"Bambu Lab A1 mini 0.4 nozzle"},
+            exclude_setting_id=None,
+        )
