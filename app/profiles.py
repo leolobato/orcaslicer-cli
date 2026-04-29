@@ -405,7 +405,7 @@ def _compatible_printers_set_for_payload(
     raw_value = merged.get("compatible_printers")
     if not isinstance(raw_value, list):
         return set()
-    return {str(item) for item in raw_value if isinstance(item, str)}
+    return {item for item in raw_value if isinstance(item, str)}
 
 
 def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:

@@ -221,3 +221,25 @@ class CompatiblePrintersSetForPayloadTests(unittest.TestCase):
         )
 
         self.assertEqual(result, set())
+
+    def test_filters_non_string_items_in_list(self) -> None:
+        payload = {
+            "name": "Mixed",
+            "compatible_printers": ["X1C 0.4", None, 42, "X1C 0.6", ["nested"]],
+        }
+
+        result = profiles._compatible_printers_set_for_payload(
+            payload, category="filament"
+        )
+
+        self.assertEqual(result, {"X1C 0.4", "X1C 0.6"})
+
+    def test_returns_empty_set_when_value_is_not_a_list(self) -> None:
+        # OrcaSlicer JSON is hand-edited; defensive against scalar values.
+        payload = {"name": "Wrong", "compatible_printers": "X1C 0.4"}
+
+        result = profiles._compatible_printers_set_for_payload(
+            payload, category="filament"
+        )
+
+        self.assertEqual(result, set())
