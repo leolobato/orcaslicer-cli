@@ -328,12 +328,22 @@ async def import_process_profile(request: Request, replace: bool = False):
 
     load_all_profiles()
 
+    # Derive response fields from the resolved chain for consistency
+    # with the filament endpoint and to surface the canonical name even
+    # if a thin import only sets `inherits`. Falls back to the raw
+    # saved payload if resolution fails for any reason.
+    try:
+        resolved = get_profile("process", setting_id)
+    except ProfileNotFoundError:
+        resolved = data
+
+    name = str(resolved.get("name", ""))
     return JSONResponse(
         status_code=200 if exists else 201,
         content=ProcessProfileImportResponse(
             setting_id=setting_id,
-            name=str(data.get("name", "")),
-            message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+            name=name,
+            message=f"Profile '{name}' imported successfully.",
         ).model_dump(),
     )
 
@@ -408,7 +418,16 @@ async def import_filament_profile(request: Request, replace: bool = False):
 
     load_all_profiles()
 
-    filament_type = data.get("filament_type", "")
+    # Derive response fields from the resolved chain so thin imports
+    # report parent-inherited values (e.g. `filament_type` from parent).
+    # Falls back to the raw saved payload if resolution fails for any
+    # reason (the file is already on disk and indexed).
+    try:
+        resolved = get_profile("filament", setting_id)
+    except ProfileNotFoundError:
+        resolved = data
+
+    filament_type = resolved.get("filament_type", "")
     if isinstance(filament_type, list):
         filament_type = filament_type[0] if filament_type else ""
 
@@ -416,10 +435,10 @@ async def import_filament_profile(request: Request, replace: bool = False):
         status_code=200 if exists else 201,
         content=FilamentProfileImportResponse(
             setting_id=setting_id,
-            filament_id=str(data.get("filament_id", "")),
-            name=str(data.get("name", "")),
+            filament_id=str(resolved.get("filament_id", "")),
+            name=str(resolved.get("name", "")),
             filament_type=filament_type,
-            message=f"Profile '{str(data.get('name', ''))}' imported successfully.",
+            message=f"Profile '{str(resolved.get('name', ''))}' imported successfully.",
         ).model_dump(),
     )
 

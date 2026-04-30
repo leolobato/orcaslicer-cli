@@ -307,5 +307,70 @@ class UnsafeSettingIdTests(_ProfileEndpointTestBase):
         return Path(self.tempdir)
 
 
+class FilamentImportResponseDerivedFieldsTests(_ProfileEndpointTestBase):
+    """Thin filament imports inherit `filament_type` etc. from their parent.
+
+    Since `materialize_filament_import` no longer flattens parent values
+    into the payload, the POST response must derive inherited fields from
+    the resolved chain (via `get_profile`) rather than from the raw saved
+    payload — otherwise thin imports would report empty strings for
+    fields the GUI expects (e.g. material badge in the editor).
+    """
+
+    def test_thin_import_reports_inherited_filament_type(self) -> None:
+        body = {
+            "name": "Thin User PLA @BBL A1M",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+            "nozzle_temperature": ["222"],
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        payload = resp.json()
+        self.assertEqual(payload["filament_type"], "PLA")
+        self.assertEqual(payload["name"], "Thin User PLA @BBL A1M")
+        self.assertTrue(payload["filament_id"])
+        self.assertEqual(payload["setting_id"], "Thin User PLA @BBL A1M")
+
+    def test_thin_import_filament_id_matches_stamped_value_not_parent(self) -> None:
+        """Stamped filament_id wins over the parent's filament_id (AMS identity).
+
+        The parent's filament_id is `GFA00`. A thin import must NOT report
+        the parent's id because then every clone would collide AMS scope.
+        """
+        body = {
+            "name": "Thin Distinct PLA @BBL A1M",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        payload = resp.json()
+        self.assertNotEqual(payload["filament_id"], "GFA00")
+        self.assertTrue(payload["filament_id"].startswith("P"))
+
+    def test_caller_supplied_filament_type_overrides_parent(self) -> None:
+        body = {
+            "name": "Override Type User @BBL A1M",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+            "filament_type": ["PLA-CF"],
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["filament_type"], "PLA-CF")
+
+    def test_root_profile_without_inherits_reports_own_filament_type(self) -> None:
+        body = {
+            "name": "Standalone PLA",
+            "from": "User",
+            "filament_type": ["PETG"],
+            "filament_id": "STDALN1",
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["filament_type"], "PETG")
+
+
 if __name__ == "__main__":
     unittest.main()
