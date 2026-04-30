@@ -949,6 +949,15 @@ function importProfileModal(category, onImported) {
     saveError: null,
     collisionConfirm: false,
 
+    // Batch import state. When the file picker returns >1 file we skip
+    // the per-file rename step and just confirm-then-import-all.
+    batchMode: false,
+    // Each entry: {fileName, parsed, status, reason, finalName}
+    //   status: "ok" | "skipped" | "imported" | "error"
+    //   reason: human-readable explanation for "skipped" / "error"
+    batchEntries: [],
+    batchResults: null, // { imported: [...], skipped: [...] } once done
+
     endpoints() {
       return {
         resolve: `/profiles/${category}/resolve-import`,
@@ -958,6 +967,11 @@ function importProfileModal(category, onImported) {
 
     label() {
       return category === "filaments" ? "Filament" : "Process";
+    },
+
+    pluralLabel(n) {
+      const word = category === "filaments" ? "filament" : "process";
+      return n === 1 ? word : `${word}${word.endsWith("s") ? "es" : "s"}`;
     },
 
     reset() {
@@ -971,6 +985,9 @@ function importProfileModal(category, onImported) {
       this.saving = false;
       this.saveError = null;
       this.collisionConfirm = false;
+      this.batchMode = false;
+      this.batchEntries = [];
+      this.batchResults = null;
     },
 
     show() {
@@ -990,13 +1007,39 @@ function importProfileModal(category, onImported) {
     },
 
     async onFilePicked(event) {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
-      this.fileName = file.name;
+      const files = Array.from(event.target.files || []);
+      if (files.length === 0) return;
+
+      // Reset transient state from any previous pick.
       this.preview = null;
       this.previewError = null;
       this.saveError = null;
       this.collisionConfirm = false;
+      this.batchResults = null;
+
+      if (files.length === 1) {
+        this.batchMode = false;
+        this.batchEntries = [];
+        await this._loadSingle(files[0]);
+        return;
+      }
+
+      // Multi-file → batch mode. Parse + validate every file up front so
+      // the confirm dialog can show accurate import/skip counts.
+      this.batchMode = true;
+      this.fileName = "";
+      this.rawPayload = null;
+      this.previewLoading = true;
+      const entries = [];
+      for (const file of files) {
+        entries.push(await this._parseBatchFile(file));
+      }
+      this.batchEntries = entries;
+      this.previewLoading = false;
+    },
+
+    async _loadSingle(file) {
+      this.fileName = file.name;
 
       let text;
       try {
@@ -1046,6 +1089,61 @@ function importProfileModal(category, onImported) {
       } finally {
         this.previewLoading = false;
       }
+    },
+
+    async _parseBatchFile(file) {
+      const entry = {
+        fileName: file.name,
+        parsed: null,
+        status: "ok",
+        reason: null,
+        finalName: null,
+      };
+      let text;
+      try {
+        text = await file.text();
+      } catch (err) {
+        entry.status = "skipped";
+        entry.reason = `read error: ${err.message}`;
+        return entry;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        entry.status = "skipped";
+        entry.reason = "not valid JSON";
+        return entry;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        entry.status = "skipped";
+        entry.reason = "not a JSON object";
+        return entry;
+      }
+      if (!parsed.name || typeof parsed.name !== "string") {
+        entry.status = "skipped";
+        entry.reason = "missing 'name' field";
+        return entry;
+      }
+      const detected = detectProfileCategory(parsed);
+      const expected = category === "filaments" ? "filament" : "process";
+      if (detected && detected !== expected) {
+        entry.status = "skipped";
+        entry.reason = `looks like a ${detected} profile`;
+        return entry;
+      }
+      entry.parsed = parsed;
+      return entry;
+    },
+
+    batchOkCount() {
+      return this.batchEntries.filter((e) => e.status === "ok").length;
+    },
+    batchSkipCount() {
+      return this.batchEntries.filter((e) => e.status === "skipped").length;
+    },
+    batchSkippedEntries() {
+      return this.batchEntries.filter((e) => e.status === "skipped");
     },
 
     async applyRename() {
@@ -1136,6 +1234,57 @@ function importProfileModal(category, onImported) {
     async replaceConfirmed() {
       this.collisionConfirm = false;
       await this.submit(true);
+    },
+
+    async submitBatch() {
+      if (!this.batchMode) return;
+      this.saving = true;
+      this.saveError = null;
+
+      for (const entry of this.batchEntries) {
+        if (entry.status !== "ok") continue;
+        try {
+          const resp = await fetch(this.endpoints().save, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(entry.parsed),
+          });
+          let body = null;
+          try { body = await resp.json(); } catch { /* empty */ }
+
+          if (resp.status === 409) {
+            entry.status = "skipped";
+            entry.reason = "already exists";
+          } else if (!resp.ok) {
+            entry.status = "error";
+            entry.reason = (body && body.error) || resp.statusText || "save failed";
+          } else {
+            entry.status = "imported";
+            entry.finalName = (body && body.name) || entry.parsed.name;
+          }
+        } catch (err) {
+          entry.status = "error";
+          entry.reason = err.message || "network error";
+        }
+      }
+
+      this.batchResults = {
+        imported: this.batchEntries.filter((e) => e.status === "imported"),
+        skipped: this.batchEntries.filter(
+          (e) => e.status === "skipped" || e.status === "error"
+        ),
+      };
+      this.saving = false;
+
+      if (this.batchResults.imported.length > 0
+          && typeof onImported === "function") {
+        onImported(null);
+      }
+    },
+
+    closeBatchResults() {
+      this.open = false;
+      this.reset();
     },
 
     cancelCollision() {

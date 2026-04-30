@@ -222,18 +222,19 @@
                 <button class="text-slate-400 hover:text-slate-200" @click="importer.cancel()" aria-label="Close">&times;</button>
               </div>
 
-              <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
-              <input type="file" accept=".json,application/json"
+              <label class="block text-sm text-slate-300 mb-2">Select one or more JSON files exported from OrcaSlicer:</label>
+              <input type="file" accept=".json,application/json" multiple
                      x-ref="fileInput"
                      class="w-full text-sm text-slate-300"
                      @change="importer.onFilePicked($event)" />
-              <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
+              <p x-show="importer.fileName && !importer.batchMode" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
 
               <p x-show="importer.previewLoading" class="mt-3 text-sm text-slate-400">Resolving profile...</p>
-              <p x-show="importer.previewError" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+              <p x-show="importer.previewError && !importer.batchMode" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
                  x-text="importer.previewError"></p>
 
-              <template x-if="importer.preview">
+              <!-- Single-file preview / rename -->
+              <template x-if="!importer.batchMode && importer.preview">
                 <div class="mt-4 space-y-2 text-sm">
                   <div>
                     <label class="block text-slate-400 text-xs mb-1">Name</label>
@@ -252,7 +253,62 @@
                 </div>
               </template>
 
-              <p x-show="importer.saveError && !importer.collisionConfirm" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+              <!-- Batch confirm: shown after picking >1 file, before saving -->
+              <template x-if="importer.batchMode && !importer.saving && !importer.batchResults">
+                <div class="mt-4 rounded-md border border-slate-700 bg-slate-950 px-3 py-3 text-sm">
+                  <p class="font-medium text-slate-100"
+                     x-text="'Import ' + importer.batchOkCount() + ' ' + importer.pluralLabel(importer.batchOkCount()) + '?'"></p>
+                  <ul class="mt-2 max-h-48 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                    <template x-for="entry in importer.batchEntries.filter(e => e.status === 'ok')" :key="entry.fileName">
+                      <li x-text="entry.parsed.name"></li>
+                    </template>
+                  </ul>
+                  <template x-if="importer.batchSkipCount() > 0">
+                    <div class="mt-3 border-t border-slate-700 pt-2 text-xs text-amber-300">
+                      <p x-text="importer.batchSkipCount() + ' file(s) will be skipped:'"></p>
+                      <ul class="mt-1 space-y-0.5">
+                        <template x-for="entry in importer.batchSkippedEntries()" :key="entry.fileName">
+                          <li>
+                            <code class="font-mono text-amber-400" x-text="entry.fileName"></code>
+                            <span class="text-amber-300/80" x-text="' — ' + entry.reason"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Batch results: shown after all imports finish -->
+              <template x-if="importer.batchResults">
+                <div class="mt-4 rounded-md border border-slate-700 bg-slate-950 px-3 py-3 text-sm space-y-3">
+                  <div>
+                    <p class="font-medium text-emerald-300"
+                       x-text="'Imported ' + importer.batchResults.imported.length + ' ' + importer.pluralLabel(importer.batchResults.imported.length) + '.'"></p>
+                    <ul class="mt-1 max-h-40 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                      <template x-for="entry in importer.batchResults.imported" :key="entry.fileName">
+                        <li x-text="entry.finalName || entry.parsed.name"></li>
+                      </template>
+                    </ul>
+                  </div>
+                  <template x-if="importer.batchResults.skipped.length > 0">
+                    <div class="border-t border-slate-700 pt-2">
+                      <p class="font-medium text-amber-300"
+                         x-text="'Skipped ' + importer.batchResults.skipped.length + ':'"></p>
+                      <ul class="mt-1 max-h-40 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                        <template x-for="entry in importer.batchResults.skipped" :key="entry.fileName">
+                          <li>
+                            <span x-text="(entry.parsed && entry.parsed.name) || entry.fileName"></span>
+                            <span class="text-amber-300/80" x-text="' — ' + entry.reason"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <p x-show="importer.saveError && !importer.collisionConfirm && !importer.batchMode" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
                  x-text="importer.saveError"></p>
 
               <template x-if="importer.collisionConfirm">
@@ -268,12 +324,32 @@
               </template>
 
               <div class="mt-5 flex justify-end gap-2">
-                <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
-                        @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
-                <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
-                        :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
-                        @click="importer.submit(false)"
-                        x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+                <!-- Batch results: only a Close button -->
+                <template x-if="importer.batchResults">
+                  <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white"
+                          @click="importer.closeBatchResults()">Close</button>
+                </template>
+                <!-- Active import flow (single or batch) -->
+                <template x-if="!importer.batchResults">
+                  <div class="flex gap-2">
+                    <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
+                            @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
+                    <!-- Single-file Import -->
+                    <button x-show="!importer.batchMode"
+                            class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                            :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
+                            @click="importer.submit(false)"
+                            x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+                    <!-- Batch Import -->
+                    <button x-show="importer.batchMode"
+                            class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                            :disabled="importer.batchOkCount() === 0 || importer.previewLoading || importer.saving"
+                            @click="importer.submitBatch()"
+                            x-text="importer.saving
+                                    ? 'Importing ' + importer.batchOkCount() + '...'
+                                    : 'Import ' + importer.batchOkCount() + ' ' + importer.pluralLabel(importer.batchOkCount())"></button>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -362,18 +438,19 @@
                 <button class="text-slate-400 hover:text-slate-200" @click="importer.cancel()" aria-label="Close">&times;</button>
               </div>
 
-              <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
-              <input type="file" accept=".json,application/json"
+              <label class="block text-sm text-slate-300 mb-2">Select one or more JSON files exported from OrcaSlicer:</label>
+              <input type="file" accept=".json,application/json" multiple
                      x-ref="fileInput"
                      class="w-full text-sm text-slate-300"
                      @change="importer.onFilePicked($event)" />
-              <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
+              <p x-show="importer.fileName && !importer.batchMode" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
 
               <p x-show="importer.previewLoading" class="mt-3 text-sm text-slate-400">Resolving profile...</p>
-              <p x-show="importer.previewError" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+              <p x-show="importer.previewError && !importer.batchMode" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
                  x-text="importer.previewError"></p>
 
-              <template x-if="importer.preview">
+              <!-- Single-file preview / rename -->
+              <template x-if="!importer.batchMode && importer.preview">
                 <div class="mt-4 space-y-2 text-sm">
                   <div>
                     <label class="block text-slate-400 text-xs mb-1">Name</label>
@@ -396,7 +473,62 @@
                 </div>
               </template>
 
-              <p x-show="importer.saveError && !importer.collisionConfirm" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
+              <!-- Batch confirm: shown after picking >1 file, before saving -->
+              <template x-if="importer.batchMode && !importer.saving && !importer.batchResults">
+                <div class="mt-4 rounded-md border border-slate-700 bg-slate-950 px-3 py-3 text-sm">
+                  <p class="font-medium text-slate-100"
+                     x-text="'Import ' + importer.batchOkCount() + ' ' + importer.pluralLabel(importer.batchOkCount()) + '?'"></p>
+                  <ul class="mt-2 max-h-48 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                    <template x-for="entry in importer.batchEntries.filter(e => e.status === 'ok')" :key="entry.fileName">
+                      <li x-text="entry.parsed.name"></li>
+                    </template>
+                  </ul>
+                  <template x-if="importer.batchSkipCount() > 0">
+                    <div class="mt-3 border-t border-slate-700 pt-2 text-xs text-amber-300">
+                      <p x-text="importer.batchSkipCount() + ' file(s) will be skipped:'"></p>
+                      <ul class="mt-1 space-y-0.5">
+                        <template x-for="entry in importer.batchSkippedEntries()" :key="entry.fileName">
+                          <li>
+                            <code class="font-mono text-amber-400" x-text="entry.fileName"></code>
+                            <span class="text-amber-300/80" x-text="' — ' + entry.reason"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Batch results: shown after all imports finish -->
+              <template x-if="importer.batchResults">
+                <div class="mt-4 rounded-md border border-slate-700 bg-slate-950 px-3 py-3 text-sm space-y-3">
+                  <div>
+                    <p class="font-medium text-emerald-300"
+                       x-text="'Imported ' + importer.batchResults.imported.length + ' ' + importer.pluralLabel(importer.batchResults.imported.length) + '.'"></p>
+                    <ul class="mt-1 max-h-40 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                      <template x-for="entry in importer.batchResults.imported" :key="entry.fileName">
+                        <li x-text="entry.finalName || entry.parsed.name"></li>
+                      </template>
+                    </ul>
+                  </div>
+                  <template x-if="importer.batchResults.skipped.length > 0">
+                    <div class="border-t border-slate-700 pt-2">
+                      <p class="font-medium text-amber-300"
+                         x-text="'Skipped ' + importer.batchResults.skipped.length + ':'"></p>
+                      <ul class="mt-1 max-h-40 overflow-y-auto space-y-0.5 text-xs text-slate-300">
+                        <template x-for="entry in importer.batchResults.skipped" :key="entry.fileName">
+                          <li>
+                            <span x-text="(entry.parsed && entry.parsed.name) || entry.fileName"></span>
+                            <span class="text-amber-300/80" x-text="' — ' + entry.reason"></span>
+                          </li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <p x-show="importer.saveError && !importer.collisionConfirm && !importer.batchMode" class="mt-3 rounded-md border border-red-700/60 bg-red-900/30 px-3 py-2 text-sm text-red-300"
                  x-text="importer.saveError"></p>
 
               <template x-if="importer.collisionConfirm">
@@ -412,12 +544,28 @@
               </template>
 
               <div class="mt-5 flex justify-end gap-2">
-                <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
-                        @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
-                <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
-                        :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
-                        @click="importer.submit(false)"
-                        x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+                <template x-if="importer.batchResults">
+                  <button class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white"
+                          @click="importer.closeBatchResults()">Close</button>
+                </template>
+                <template x-if="!importer.batchResults">
+                  <div class="flex gap-2">
+                    <button class="rounded-md border border-slate-600 px-3 py-1.5 text-sm"
+                            @click="importer.cancel()" :disabled="importer.saving">Cancel</button>
+                    <button x-show="!importer.batchMode"
+                            class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                            :disabled="!importer.preview || importer.previewLoading || importer.saving || importer.collisionConfirm"
+                            @click="importer.submit(false)"
+                            x-text="importer.saving ? 'Importing...' : 'Import'"></button>
+                    <button x-show="importer.batchMode"
+                            class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm text-white disabled:opacity-50"
+                            :disabled="importer.batchOkCount() === 0 || importer.previewLoading || importer.saving"
+                            @click="importer.submitBatch()"
+                            x-text="importer.saving
+                                    ? 'Importing ' + importer.batchOkCount() + '...'
+                                    : 'Import ' + importer.batchOkCount() + ' ' + importer.pluralLabel(importer.batchOkCount())"></button>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
