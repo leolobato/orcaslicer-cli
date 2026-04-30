@@ -176,6 +176,31 @@ function isSingleArray(val) {
   return Array.isArray(val) && val.length === 1;
 }
 
+/**
+ * Detect whether a parsed profile JSON describes a filament, process, or
+ * machine. Mirrors the server-side `_detect_profile_type` enough to catch
+ * cross-category import attempts before they hit the API and produce a
+ * misleading "parent not found" error. Returns null when it can't tell.
+ */
+function detectProfileCategory(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const t = typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+  if (t === "filament" || t === "process" || t === "machine") return t;
+  if ("filament_type" in parsed || "filament_id" in parsed
+      || "filament_settings_id" in parsed) {
+    return "filament";
+  }
+  if ("nozzle_diameter" in parsed || "printer_model" in parsed
+      || "printer_variant" in parsed) {
+    return "machine";
+  }
+  if ("print_settings_id" in parsed || "layer_height" in parsed
+      || "outer_wall_speed" in parsed || "sparse_infill_speed" in parsed) {
+    return "process";
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // COMPONENT: app() — Main app shell, routing, and shared state
 // ---------------------------------------------------------------------------
@@ -995,6 +1020,15 @@ function importProfileModal(category, onImported) {
       }
       if (!parsed.name || typeof parsed.name !== "string") {
         this.previewError = "Profile JSON must contain a 'name' field.";
+        return;
+      }
+
+      const detected = detectProfileCategory(parsed);
+      const expected = category === "filaments" ? "filament" : "process";
+      if (detected && detected !== expected) {
+        const otherLabel = detected === "filament" ? "Filaments" : "Processes";
+        this.previewError =
+          `This looks like a ${detected} profile. Use the Import button on the ${otherLabel} page.`;
         return;
       }
 
