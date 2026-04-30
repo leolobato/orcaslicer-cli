@@ -62,9 +62,14 @@ USER_PROFILE_CATEGORIES: tuple[str, ...] = ("filament", "process", "machine")
 
 
 def _ensure_user_profile_dirs() -> None:
-    """Create the typed user-profile subfolders if they don't exist."""
+    """Create the typed user-profile subfolders if they don't exist.
+
+    Also creates the per-category `base/` subfolder, mirroring OrcaSlicer's
+    GUI layout for inherits-less ("detached") user presets — see
+    `Preset.cpp::path_from_name` and `is_base_preset` in OrcaSlicer source.
+    """
     for category in USER_PROFILE_CATEGORIES:
-        os.makedirs(os.path.join(USER_PROFILES_DIR, category), exist_ok=True)
+        os.makedirs(os.path.join(USER_PROFILES_DIR, category, "base"), exist_ok=True)
 
 
 @asynccontextmanager
@@ -116,8 +121,26 @@ async def slicing_error_handler(request, exc: SlicingError):
 
 
 def _typed_user_profile_path(category: str, setting_id: str) -> str:
-    """Canonical write path for a user profile of the given category."""
+    """Canonical write path for a derivative (has `inherits`) user profile."""
     return os.path.join(USER_PROFILES_DIR, category, f"{setting_id}.json")
+
+
+def _base_user_profile_path(category: str, setting_id: str) -> str:
+    """Canonical write path for a detached (no `inherits`) user profile.
+
+    Mirrors OrcaSlicer's GUI which writes inherits-less presets under a
+    `base/` subdir of the user preset directory.
+    """
+    return os.path.join(USER_PROFILES_DIR, category, "base", f"{setting_id}.json")
+
+
+def _user_profile_path_for(category: str, setting_id: str, has_inherits: bool) -> str:
+    """Pick the typed-vs-base write path based on whether the payload inherits."""
+    return (
+        _typed_user_profile_path(category, setting_id)
+        if has_inherits
+        else _base_user_profile_path(category, setting_id)
+    )
 
 
 def _legacy_user_profile_path(setting_id: str) -> str:
@@ -128,16 +151,17 @@ def _legacy_user_profile_path(setting_id: str) -> str:
 def _find_existing_user_profile(category: str, setting_id: str) -> str | None:
     """Return the path of an existing user profile file, or None.
 
-    Searches the typed subfolder first, then the legacy flat root, so a
-    profile that was imported before the typed layout existed still
-    blocks a duplicate import and is reachable for delete.
+    Search order: typed (with-inherits) → typed base/ → legacy flat root.
+    Earlier-found wins, but for collision purposes any of the three blocks
+    a fresh import for the same setting_id.
     """
-    typed = _typed_user_profile_path(category, setting_id)
-    if os.path.isfile(typed):
-        return typed
-    legacy = _legacy_user_profile_path(setting_id)
-    if os.path.isfile(legacy):
-        return legacy
+    for path in (
+        _typed_user_profile_path(category, setting_id),
+        _base_user_profile_path(category, setting_id),
+        _legacy_user_profile_path(setting_id),
+    ):
+        if os.path.isfile(path):
+            return path
     return None
 
 
@@ -345,7 +369,8 @@ async def import_process_profile(request: Request, replace: bool = False):
     if unsafe is not None:
         return unsafe
 
-    file_path = _typed_user_profile_path("process", setting_id)
+    has_inherits = bool(str(data.get("inherits") or "").strip())
+    file_path = _user_profile_path_for("process", setting_id, has_inherits)
     existing_path = _find_existing_user_profile("process", setting_id)
     exists = existing_path is not None
     if exists and not replace:
@@ -444,7 +469,8 @@ async def import_filament_profile(request: Request, replace: bool = False):
     if unsafe is not None:
         return unsafe
 
-    file_path = _typed_user_profile_path("filament", setting_id)
+    has_inherits = bool(str(data.get("inherits") or "").strip())
+    file_path = _user_profile_path_for("filament", setting_id, has_inherits)
     existing_path = _find_existing_user_profile("filament", setting_id)
     exists = existing_path is not None
     if exists and not replace:

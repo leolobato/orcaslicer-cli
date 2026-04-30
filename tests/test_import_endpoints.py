@@ -101,8 +101,12 @@ class _ProfileEndpointTestBase(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     def _typed_user_path(self, category: str, setting_id: str) -> Path:
-        """Path where the import endpoints write user profiles after the typed-layout change."""
+        """Path where derivative (has-inherits) imports land."""
         return self.user_dir / category / f"{setting_id}.json"
+
+    def _base_user_path(self, category: str, setting_id: str) -> Path:
+        """Path where detached (no-inherits) imports land — mirrors OrcaSlicer GUI."""
+        return self.user_dir / category / "base" / f"{setting_id}.json"
 
 
 class ProcessResolveImportEndpointTests(_ProfileEndpointTestBase):
@@ -469,6 +473,111 @@ class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
         names = {p["name"] for p in listing}
         self.assertIn("Nested PLA", names)
 
+    def test_filament_without_inherits_lands_in_base_subfolder(self) -> None:
+        """Detached (no `inherits`) imports go to `<category>/base/`.
+
+        Mirrors OrcaSlicer GUI's `Preset.cpp::path_from_name` behavior, which
+        writes inherits-less user presets under a `base/` subdirectory.
+        """
+        body = {
+            "name": "Detached PLA",
+            "setting_id": "Detached PLA",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "DET001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        setting_id = resp.json()["setting_id"]
+
+        self.assertTrue(self._base_user_path("filament", setting_id).is_file())
+        self.assertFalse(self._typed_user_path("filament", setting_id).is_file())
+
+    def test_filament_with_inherits_does_not_land_in_base(self) -> None:
+        """Derivative (has `inherits`) imports stay in `<category>/`."""
+        body = {
+            "name": "Derivative PLA",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        setting_id = resp.json()["setting_id"]
+
+        self.assertTrue(self._typed_user_path("filament", setting_id).is_file())
+        self.assertFalse(self._base_user_path("filament", setting_id).is_file())
+
+    def test_process_without_inherits_lands_in_base_subfolder(self) -> None:
+        body = {
+            "name": "Detached Process",
+            "setting_id": "Detached Process",
+            "from": "User",
+            "type": "process",
+            "layer_height": ["0.2"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }
+        resp = self.client.post("/profiles/processes", json=body)
+        self.assertEqual(resp.status_code, 201)
+        setting_id = resp.json()["setting_id"]
+
+        self.assertTrue(self._base_user_path("process", setting_id).is_file())
+        self.assertFalse(self._typed_user_path("process", setting_id).is_file())
+
+    def test_base_file_blocks_collision_for_typed_import(self) -> None:
+        """A profile in `base/` blocks a same-name import without `replace`."""
+        existing = self._base_user_path("filament", "Both Layouts")
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text(json.dumps({
+            "name": "Both Layouts",
+            "setting_id": "Both Layouts",
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "BL001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }), encoding="utf-8")
+        self.client.post("/profiles/reload")
+
+        # Try a derivative import with the same setting_id — should 409.
+        body = {
+            "name": "Both Layouts",
+            "setting_id": "Both Layouts",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_replace_migrates_base_to_typed_when_inherits_added(self) -> None:
+        """If a user re-imports with `inherits`, the old base/ copy is removed."""
+        existing = self._base_user_path("filament", "Was Detached")
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_text(json.dumps({
+            "name": "Was Detached",
+            "setting_id": "Was Detached",
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "WD001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }), encoding="utf-8")
+        self.client.post("/profiles/reload")
+
+        body = {
+            "name": "Was Detached",
+            "setting_id": "Was Detached",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+        }
+        resp = self.client.post("/profiles/filaments?replace=true", json=body)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(existing.is_file())
+        self.assertTrue(self._typed_user_path("filament", "Was Detached").is_file())
+
     def test_loader_skips_macos_appledouble_files(self) -> None:
         """`._*.json` AppleDouble metadata must not crash startup.
 
@@ -573,14 +682,15 @@ class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
         )
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(legacy_path.is_file())
-        typed = self._typed_user_path("filament", legacy_setting_id)
-        self.assertTrue(typed.is_file())
+        # The replacement body has no `inherits`, so it lands under base/.
+        base = self._base_user_path("filament", legacy_setting_id)
+        self.assertTrue(base.is_file())
         self.assertEqual(
-            json.loads(typed.read_text())["nozzle_temperature"], ["230"]
+            json.loads(base.read_text())["nozzle_temperature"], ["230"]
         )
 
     def test_ensure_user_profile_dirs_creates_typed_subfolders(self) -> None:
-        """The startup hook materializes the three typed subfolders."""
+        """The startup hook materializes the three typed + base subfolders."""
         # Wipe whatever the test base might have created, then run the helper.
         for category in main.USER_PROFILE_CATEGORIES:
             shutil.rmtree(self.user_dir / category, ignore_errors=True)
@@ -591,6 +701,10 @@ class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
             self.assertTrue(
                 (self.user_dir / category).is_dir(),
                 f"expected {category}/ to exist after startup",
+            )
+            self.assertTrue(
+                (self.user_dir / category / "base").is_dir(),
+                f"expected {category}/base/ to exist after startup",
             )
 
     def test_ensure_user_profile_dirs_is_idempotent(self) -> None:
