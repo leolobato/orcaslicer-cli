@@ -37,6 +37,9 @@ class SafeFilenameTests(unittest.TestCase):
         self.assertEqual(profiles._safe_filename("???", fallback="GFXX01"), "gfxx01.json")
         self.assertEqual(profiles._safe_filename("", fallback="GFXX01"), "gfxx01.json")
 
+    def test_falls_back_to_literal_profile_when_both_empty(self):
+        self.assertEqual(profiles._safe_filename("???", fallback="!!!"), "profile.json")
+
 
 class FilamentAliasTests(unittest.TestCase):
     def test_strips_at_suffix(self):

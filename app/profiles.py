@@ -157,13 +157,12 @@ def _logical_filament_name(name: str) -> str:
 
 
 def _filament_alias(name: str) -> str:
-    """Return the alias portion of a filament name (substring before ' @').
-
-    Used to strip per-printer suffixes from previously-exported filenames
-    so re-exports are idempotent.
+    """Alias of `_logical_filament_name`, used by the export path so the
+    intent ('strip @<printer> for filename idempotency') reads at the call
+    site. Kept as a separate symbol so a future change to one semantic
+    doesn't silently affect the other.
     """
-    base, _, _ = name.partition(" @")
-    return base.strip() if base else name.strip()
+    return _logical_filament_name(name)
 
 
 _SAFE_FILENAME_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
