@@ -38,6 +38,15 @@ class ProfileNotFoundError(Exception):
     pass
 
 
+class UnresolvedChainError(ProfileNotFoundError):
+    """Raised when a profile's inheritance chain cannot be resolved
+    during a flatten/export operation. Subclasses ProfileNotFoundError
+    so existing call sites that catch the parent class still work; new
+    call sites can distinguish chain failures from "profile not found"
+    via this subclass."""
+    pass
+
+
 def _profile_key(vendor_name: str, name: str) -> str:
     """Return a stable internal key for a loaded profile."""
     return f"{vendor_name}::{name}"
