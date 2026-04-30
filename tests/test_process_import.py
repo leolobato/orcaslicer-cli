@@ -46,23 +46,24 @@ class ProcessImportHappyPathTests(unittest.TestCase):
 
         # Identity + metadata
         self.assertEqual(result["name"], "eSUN PLA-Basic @BBL A1M Process")
+        # `from` is preserved from the input (GUI exports include "from": "User"),
+        # but the materializer no longer stamps it itself.
         self.assertEqual(result["from"], "User")
         self.assertEqual(result["instantiation"], "true")
         # setting_id defaults to name when caller doesn't supply one
         self.assertEqual(result["setting_id"], "eSUN PLA-Basic @BBL A1M Process")
-        # print_settings_id mirrors name (process analog of filament_settings_id)
+        # print_settings_id is preserved from the input payload, not stamped.
         self.assertEqual(result["print_settings_id"], "eSUN PLA-Basic @BBL A1M Process")
 
-        # Root profile — inherits chain resolved away
-        self.assertNotIn("inherits", result)
-        self.assertNotIn("base_id", result)
+        # Inheritance is preserved — chain is resolved at slice/listing time.
+        self.assertEqual(result["inherits"], "0.20mm Standard @BBL A1M")
 
-        # User overrides win
+        # User overrides survive untouched.
         self.assertEqual(result["outer_wall_speed"], ["150"])
         self.assertEqual(result["inner_wall_speed"], ["250"])
 
-        # Parent keys merged in
-        self.assertEqual(result["layer_height"], ["0.2"])
+        # Parent keys are NOT merged into the raw payload.
+        self.assertNotIn("layer_height", result)
 
     def _write_fixture(self) -> None:
         self._write_json(
@@ -156,6 +157,103 @@ class ProcessImportErrorPathTests(ProcessImportHappyPathTests):
         result = profiles.materialize_process_import(payload)
         self.assertEqual(result["name"], "Standalone Process")
         self.assertEqual(result["layer_height"], ["0.3"])
+        self.assertNotIn("inherits", result)
+
+
+class MaterializeProcessImportRawFormTests(ProcessImportHappyPathTests):
+    """The new raw-form behavior of `materialize_process_import`.
+
+    Subclasses `ProcessImportHappyPathTests` to reuse the BBL fixture
+    (`0.20mm Standard @BBL A1M` with `layer_height=0.2`,
+    `outer_wall_speed=200`, `inner_wall_speed=300`). The inherited
+    happy-path test runs again as part of this class — harmless.
+    """
+
+    def test_preserves_inherits_and_does_not_merge_parent(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+            "outer_wall_speed": ["150"],
+        })
+
+        self.assertEqual(result["inherits"], "0.20mm Standard @BBL A1M")
+        self.assertEqual(result["outer_wall_speed"], ["150"])
+        self.assertNotIn("inner_wall_speed", result)
+        self.assertNotIn("layer_height", result)
+
+    def test_synthesizes_setting_id_from_name_when_missing(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+        })
+
+        self.assertEqual(result["setting_id"], "Custom Process")
+
+    def test_keeps_directly_supplied_setting_id(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "setting_id": "MYPROC",
+            "inherits": "0.20mm Standard @BBL A1M",
+        })
+
+        self.assertEqual(result["setting_id"], "MYPROC")
+
+    def test_stamps_instantiation_true_when_missing(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+        })
+
+        self.assertEqual(result["instantiation"], "true")
+
+    def test_preserves_caller_supplied_instantiation_false(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Caller Says False",
+            "inherits": "0.20mm Standard @BBL A1M",
+            "instantiation": "false",
+        })
+
+        self.assertEqual(result["instantiation"], "false")
+
+    def test_does_not_stamp_print_settings_id(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+        })
+        self.assertNotIn("print_settings_id", result)
+
+    def test_preserves_caller_supplied_print_settings_id(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Custom Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+            "print_settings_id": "Some Other Name",
+        })
+        self.assertEqual(result["print_settings_id"], "Some Other Name")
+
+    def test_does_not_stamp_from_field(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "No From Stamp",
+            "inherits": "0.20mm Standard @BBL A1M",
+        })
+        self.assertNotIn("from", result)
+
+    def test_preserves_caller_supplied_from_field(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Has From",
+            "inherits": "0.20mm Standard @BBL A1M",
+            "from": "User",
+        })
+        self.assertEqual(result["from"], "User")
+
+    def test_bare_payload_without_inherits_succeeds(self) -> None:
+        result = profiles.materialize_process_import({
+            "name": "Bare Bones Process",
+            "outer_wall_speed": ["100"],
+        })
+
+        self.assertEqual(result["name"], "Bare Bones Process")
+        self.assertEqual(result["setting_id"], "Bare Bones Process")
+        self.assertEqual(result["instantiation"], "true")
         self.assertNotIn("inherits", result)
 
 

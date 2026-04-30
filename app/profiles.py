@@ -508,13 +508,16 @@ def _check_filament_id_ams_scope(
 
 
 def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a clone-style root process profile from imported JSON.
+    """Lightly stamp an imported process payload and return its raw form.
 
-    Mirrors materialize_filament_import for the process category:
-    - Resolve inheritance chain (required for thin JSON exports).
-    - Produce a root profile (strip inherits / base_id).
-    - Stamp from="User", instantiation="true", print_settings_id=name.
-    - Default setting_id to name when caller doesn't supply one.
+    The returned dict preserves `inherits` so the inheritance chain is
+    resolved at slice / listing time. Stamping is limited to:
+
+    - `setting_id`: synthesized from `name` if missing.
+    - `instantiation`: set to `"true"` if missing.
+
+    Validates that `inherits`, when set, points to a known process
+    profile.
     """
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
@@ -526,7 +529,6 @@ def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Missing or invalid 'setting_id' field.")
     setting_id = setting_id.strip()
 
-    merged: dict[str, Any]
     inherits = data.get("inherits")
     if isinstance(inherits, str) and inherits.strip():
         parent_name = _resolve_process_parent_ref(inherits.strip())
@@ -534,24 +536,12 @@ def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
             raise ProfileNotFoundError(
                 f"Process parent '{inherits.strip()}' not found"
             )
-        parent = resolve_profile_by_name(parent_name)
-        if parent is None:
-            raise ProfileNotFoundError(
-                f"Failed to resolve process parent '{inherits.strip()}'"
-            )
-        merged = dict(parent)
-        merged.update(data)
-    else:
-        merged = dict(data)
 
-    result = dict(merged)
+    result = dict(data)
     result["name"] = name
     result["setting_id"] = setting_id
-    result["from"] = "User"
-    result["instantiation"] = "true"
-    result["print_settings_id"] = name
-    result.pop("inherits", None)
-    result.pop("base_id", None)
+    if "instantiation" not in result:
+        result["instantiation"] = "true"
     return result
 
 
