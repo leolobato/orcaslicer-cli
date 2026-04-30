@@ -951,6 +951,12 @@ function importProfileModal(category, onImported) {
     show() {
       this.reset();
       this.open = true;
+      // The file input lives in `x-show` markup, so its DOM value
+      // persists across opens. Clear it so the next pick fires a
+      // `change` event even if the user re-selects the same file.
+      this.$nextTick(() => {
+        if (this.$refs.fileInput) this.$refs.fileInput.value = "";
+      });
     },
 
     cancel() {

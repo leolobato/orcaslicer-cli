@@ -224,6 +224,7 @@
 
               <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
               <input type="file" accept=".json,application/json"
+                     x-ref="fileInput"
                      class="w-full text-sm text-slate-300"
                      @change="importer.onFilePicked($event)" />
               <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
@@ -363,6 +364,7 @@
 
               <label class="block text-sm text-slate-300 mb-2">Select a JSON file exported from OrcaSlicer:</label>
               <input type="file" accept=".json,application/json"
+                     x-ref="fileInput"
                      class="w-full text-sm text-slate-300"
                      @change="importer.onFilePicked($event)" />
               <p x-show="importer.fileName" class="mt-1 text-xs text-slate-500" x-text="'Selected: ' + importer.fileName"></p>
