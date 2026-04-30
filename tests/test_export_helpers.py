@@ -1,6 +1,7 @@
 import unittest
 
 from app import profiles
+from tests._profile_test_helpers import reset_profiles_state
 
 
 class SafeFilenameTests(unittest.TestCase):
@@ -66,6 +67,60 @@ class FilamentAliasTests(unittest.TestCase):
         twice = profiles._filament_alias(once)
         self.assertEqual(once, twice)
         self.assertEqual(once, "PLA")
+
+
+class PrinterVariantCountTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_profiles_state()
+
+    def tearDown(self) -> None:
+        reset_profiles_state()
+
+    def _index_machine(self, name: str, raw: dict) -> None:
+        # Mimic _index_profile but in-place to avoid disk loading.
+        key = profiles._profile_key("BBL", name)
+        profiles._raw_profiles[key] = {**raw, "name": name}
+        profiles._type_map[key] = "machine"
+        profiles._vendor_map[key] = "BBL"
+        profiles._name_index.setdefault(name, []).append(key)
+
+    def test_returns_length_of_printer_extruder_variant(self):
+        self._index_machine(
+            "Bambu Lab P1P 0.4 nozzle",
+            {
+                "printer_extruder_variant": ["Direct Drive Standard", "Direct Drive High Flow"],
+            },
+        )
+        self.assertEqual(profiles._printer_variant_count("Bambu Lab P1P 0.4 nozzle"), 2)
+
+    def test_returns_one_for_single_variant_printer(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {
+                "printer_extruder_variant": ["Direct Drive Standard"],
+            },
+        )
+        self.assertEqual(profiles._printer_variant_count("Bambu Lab A1 mini 0.4 nozzle"), 1)
+
+    def test_inherits_from_parent_when_field_absent(self):
+        self._index_machine(
+            "fdm_bbl_3dp_001_common",
+            {
+                "printer_extruder_variant": ["Direct Drive Standard", "Direct Drive High Flow"],
+            },
+        )
+        self._index_machine(
+            "Bambu Lab P1P 0.4 nozzle",
+            {"inherits": "fdm_bbl_3dp_001_common"},
+        )
+        self.assertEqual(profiles._printer_variant_count("Bambu Lab P1P 0.4 nozzle"), 2)
+
+    def test_returns_one_when_printer_unknown(self):
+        self.assertEqual(profiles._printer_variant_count("Unknown Printer"), 1)
+
+    def test_returns_one_when_field_missing_after_resolution(self):
+        self._index_machine("Plain Printer", {})
+        self.assertEqual(profiles._printer_variant_count("Plain Printer"), 1)
 
 
 if __name__ == "__main__":

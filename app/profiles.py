@@ -899,6 +899,29 @@ def _machine_names_for_slug(machine_slug: str) -> set[str]:
     }
 
 
+def _printer_variant_count(printer_name: str) -> int:
+    """Return the number of extruder variants for a printer profile.
+
+    Resolves the machine profile by name and reads its
+    `printer_extruder_variant` list length. Returns 1 when the
+    printer is unknown or the field is absent — degrades gracefully
+    rather than failing the export.
+    """
+    profile_key = _select_profile_key_by_name(printer_name, category="machine")
+    if profile_key is None:
+        return 1
+    try:
+        resolved = resolve_profile_by_name(profile_key)
+    except ProfileNotFoundError:
+        return 1
+    if not resolved:
+        return 1
+    variants = resolved.get("printer_extruder_variant")
+    if isinstance(variants, list) and variants:
+        return len(variants)
+    return 1
+
+
 def _resolve_by_slug(category: str, slug: str) -> tuple[str, dict[str, Any]]:
     """Look up and resolve a profile by setting_id and category.
 
