@@ -1097,6 +1097,83 @@ def _flatten_user_filament_for_printer(
     return out
 
 
+def export_user_filament(
+    setting_id: str,
+    *,
+    shape: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Export a user filament as one or more (filename, dict) entries.
+
+    `shape` must be 'thin' or 'flattened'.
+
+    `thin` → one entry containing the saved file as-is (with `inherits`
+    preserved). Does not resolve the chain.
+
+    `flattened` → one entry per compatible printer of the resolved
+    filament. Each entry is the OrcaSlicer-GUI-shaped flattened JSON
+    for that printer, suitable for AMS assignment.
+
+    Raises:
+    - `ProfileNotFoundError` if `setting_id` is unknown or does not
+      identify a user-vendor filament.
+    - `UnresolvedChainError` if `shape='flattened'` and the inheritance
+      chain cannot be resolved.
+    - `ValueError` if `shape='flattened'` and the resolved filament
+      has empty `compatible_printers`.
+    """
+    if shape not in ("thin", "flattened"):
+        raise ValueError(f"Invalid shape: {shape!r} (expected 'thin' or 'flattened')")
+
+    keys = _setting_id_index.get(setting_id)
+    if not keys:
+        raise ProfileNotFoundError(
+            f"filament profile with id '{setting_id}' not found"
+        )
+
+    profile_key = None
+    for k in keys:
+        if _type_map.get(k) == "filament" and _vendor_map.get(k) == "User":
+            profile_key = k
+            break
+    if profile_key is None:
+        raise ProfileNotFoundError(
+            f"filament '{setting_id}' is not a user filament"
+        )
+
+    raw = _raw_profiles.get(profile_key, {})
+    name = str(raw.get("name", setting_id))
+
+    if shape == "thin":
+        filename = _safe_filename(name, fallback=setting_id)
+        return [(filename, dict(raw))]
+
+    # shape == "flattened"
+    try:
+        resolved = resolve_profile_by_name(profile_key)
+    except ProfileNotFoundError as e:
+        raise UnresolvedChainError(str(e)) from e
+    if resolved is None:
+        raise UnresolvedChainError(
+            f"filament '{setting_id}' resolved to None"
+        )
+
+    printers = resolved.get("compatible_printers")
+    if not isinstance(printers, list) or not printers:
+        raise ValueError(
+            f"filament '{setting_id}' has empty compatible_printers; "
+            f"cannot flatten for GUI export"
+        )
+
+    alias = _filament_alias(name)
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for printer_name in printers:
+        flat = _flatten_user_filament_for_printer(resolved, printer_name=printer_name)
+        full_name = flat["name"]  # already "<alias> @<printer>"
+        filename = _safe_filename(full_name, fallback=alias or setting_id)
+        entries.append((filename, flat))
+    return entries
+
+
 def _resolve_by_slug(category: str, slug: str) -> tuple[str, dict[str, Any]]:
     """Look up and resolve a profile by setting_id and category.
 

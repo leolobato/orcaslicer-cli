@@ -325,5 +325,152 @@ class FlattenForPrinterTests(unittest.TestCase):
         self.assertEqual(resolved, snapshot)
 
 
+class ExportUserFilamentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_profiles_state()
+
+    def tearDown(self) -> None:
+        reset_profiles_state()
+
+    def _index(self, vendor: str, name: str, category: str, raw: dict) -> None:
+        key = profiles._profile_key(vendor, name)
+        profiles._raw_profiles[key] = {**raw, "name": name}
+        profiles._type_map[key] = category
+        profiles._vendor_map[key] = vendor
+        profiles._name_index.setdefault(name, []).append(key)
+        sid = raw.get("setting_id")
+        if sid:
+            profiles._setting_id_index.setdefault(sid, []).append(key)
+
+    def _scaffold(self) -> None:
+        # Minimal: vendor parent filament, machine profile, user child.
+        self._index(
+            "BBL", "Bambu PLA Matte @BBL A1M", "filament",
+            {
+                "setting_id": "GFSA01_02",
+                "instantiation": "true",
+                "from": "system",
+                "filament_id": "GFA01",
+                "filament_type": ["PLA"],
+                "compatible_printers": [
+                    "Bambu Lab A1 mini 0.4 nozzle",
+                    "Bambu Lab A1 mini 0.6 nozzle",
+                ],
+                "nozzle_temperature": ["220"],
+            },
+        )
+        self._index(
+            "BBL", "Bambu Lab A1 mini 0.4 nozzle", "machine",
+            {
+                "setting_id": "GM_A1MINI04",
+                "instantiation": "true",
+                "from": "system",
+                "printer_extruder_variant": ["Direct Drive Standard"],
+            },
+        )
+        self._index(
+            "BBL", "Bambu Lab A1 mini 0.6 nozzle", "machine",
+            {
+                "setting_id": "GM_A1MINI06",
+                "instantiation": "true",
+                "from": "system",
+                "printer_extruder_variant": ["Direct Drive Standard"],
+            },
+        )
+        self._index(
+            "User", "Eryone Matte Imported", "filament",
+            {
+                "setting_id": "Eryone Matte Imported",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Pfd5d97d",
+                "inherits": "Bambu PLA Matte @BBL A1M",
+                "nozzle_temperature": ["210"],
+                "version": "1.9.0.21",
+            },
+        )
+
+    def test_thin_returns_one_entry_with_saved_file(self):
+        self._scaffold()
+        entries = profiles.export_user_filament("Eryone Matte Imported", shape="thin")
+        self.assertEqual(len(entries), 1)
+        filename, data = entries[0]
+        self.assertEqual(filename, "eryone_matte_imported.json")
+        self.assertEqual(data["inherits"], "Bambu PLA Matte @BBL A1M")
+        self.assertEqual(data["filament_id"], "Pfd5d97d")
+        # Thin returns the saved file — vendor markers preserved.
+        self.assertEqual(data["instantiation"], "true")
+
+    def test_flattened_expands_per_compatible_printer(self):
+        self._scaffold()
+        entries = profiles.export_user_filament("Eryone Matte Imported", shape="flattened")
+        # 2 compatible printers → 2 entries.
+        self.assertEqual(len(entries), 2)
+        names = sorted(e[1]["name"] for e in entries)
+        self.assertEqual(names, [
+            "Eryone Matte Imported @Bambu Lab A1 mini 0.4 nozzle",
+            "Eryone Matte Imported @Bambu Lab A1 mini 0.6 nozzle",
+        ])
+        # Each entry has the GUI-shaped structure.
+        for filename, data in entries:
+            self.assertEqual(data["inherits"], "")
+            self.assertNotIn("setting_id", data)
+            self.assertEqual(len(data["compatible_printers"]), 1)
+
+    def test_flattened_filename_includes_printer(self):
+        self._scaffold()
+        entries = profiles.export_user_filament("Eryone Matte Imported", shape="flattened")
+        filenames = sorted(e[0] for e in entries)
+        self.assertEqual(filenames, [
+            "eryone_matte_imported_bambu_lab_a1_mini_0.4_nozzle.json",
+            "eryone_matte_imported_bambu_lab_a1_mini_0.6_nozzle.json",
+        ])
+
+    def test_unknown_setting_id_raises(self):
+        self._scaffold()
+        with self.assertRaises(profiles.ProfileNotFoundError):
+            profiles.export_user_filament("nonexistent", shape="thin")
+
+    def test_vendor_setting_id_rejected_as_not_user(self):
+        self._scaffold()
+        with self.assertRaises(profiles.ProfileNotFoundError) as ctx:
+            profiles.export_user_filament("GFSA01_02", shape="thin")
+        self.assertIn("not a user filament", str(ctx.exception))
+
+    def test_flattened_chain_failure_raises_unresolved(self):
+        self._scaffold()
+        # Break the parent: rewrite the user profile's inherits to a
+        # name that won't resolve.
+        user_key = profiles._profile_key("User", "Eryone Matte Imported")
+        profiles._raw_profiles[user_key]["inherits"] = "Nonexistent Parent"
+        profiles._resolved_cache.clear()
+        with self.assertRaises(profiles.UnresolvedChainError):
+            profiles.export_user_filament("Eryone Matte Imported", shape="flattened")
+
+    def test_thin_unaffected_by_chain_failure(self):
+        self._scaffold()
+        user_key = profiles._profile_key("User", "Eryone Matte Imported")
+        profiles._raw_profiles[user_key]["inherits"] = "Nonexistent Parent"
+        profiles._resolved_cache.clear()
+        # Thin reads the raw saved file; no resolution happens.
+        entries = profiles.export_user_filament("Eryone Matte Imported", shape="thin")
+        self.assertEqual(len(entries), 1)
+
+    def test_flattened_no_compatible_printers_raises_value_error(self):
+        self._index(
+            "User", "Lonely Filament", "filament",
+            {
+                "setting_id": "Lonely Filament",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Plonely1",
+                "compatible_printers": [],
+            },
+        )
+        with self.assertRaises(ValueError) as ctx:
+            profiles.export_user_filament("Lonely Filament", shape="flattened")
+        self.assertIn("compatible_printers", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
