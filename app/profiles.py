@@ -156,6 +156,46 @@ def _logical_filament_name(name: str) -> str:
     return base.strip() if base else name.strip()
 
 
+def _filament_alias(name: str) -> str:
+    """Return the alias portion of a filament name (substring before ' @').
+
+    Used to strip per-printer suffixes from previously-exported filenames
+    so re-exports are idempotent.
+    """
+    base, _, _ = name.partition(" @")
+    return base.strip() if base else name.strip()
+
+
+_SAFE_FILENAME_ALLOWED = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def _safe_filename(name: str, *, fallback: str) -> str:
+    """Convert a profile name into a safe `.json` filename.
+
+    Rules:
+    - Lowercase.
+    - Replace any character not in [a-z0-9._-] with '_'.
+    - Collapse runs of '_' to a single '_'.
+    - Strip leading/trailing '_'.
+    - If the result is empty, use `fallback` (also sanitized).
+    - Append '.json'.
+    """
+    def _sanitize(value: str) -> str:
+        out_chars = []
+        for ch in value.lower():
+            out_chars.append(ch if ch in _SAFE_FILENAME_ALLOWED else "_")
+        # Collapse runs of '_' and trim.
+        result_parts = "".join(out_chars).split("_")
+        return "_".join(p for p in result_parts if p)
+
+    base = _sanitize(name)
+    if not base:
+        base = _sanitize(fallback)
+    if not base:
+        base = "profile"
+    return f"{base}.json"
+
+
 def _as_scalar_string(value: Any) -> str:
     """Return a scalar string from a profile field that may be a list."""
     if isinstance(value, list):
