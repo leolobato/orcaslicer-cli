@@ -197,5 +197,191 @@ class GetExportEndpointTests(_ExportTestBase):
         self.assertEqual(r.status_code, 500)
 
 
+class PostBatchExportTests(_ExportTestBase):
+    def _add_second_user_filament(self) -> None:
+        self._write_json(
+            self.user_dir / "filament" / "Other PLA.json",
+            {
+                "name": "Other PLA",
+                "setting_id": "Other PLA",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Pother01",
+                "inherits": "Bambu PLA Matte @BBL A1M",
+                "nozzle_temperature": ["205"],
+                "version": "1.9.0.21",
+            },
+        )
+        profiles.load_all_profiles()
+
+    def test_thin_batch_returns_zip(self):
+        self._add_second_user_filament()
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={
+                "setting_ids": ["Eryone Matte Imported", "Other PLA"],
+                "shape": "thin",
+            },
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["content-type"], "application/zip")
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        self.assertEqual(len(zf.namelist()), 2)
+        self.assertNotIn("x-export-skipped", {h.lower() for h in r.headers.keys()})
+
+    def test_flattened_batch_expands_per_printer_per_filament(self):
+        self._add_second_user_filament()
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={
+                "setting_ids": ["Eryone Matte Imported", "Other PLA"],
+                "shape": "flattened",
+            },
+        )
+        self.assertEqual(r.status_code, 200)
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        # 2 filaments × 2 printers each = 4 entries.
+        self.assertEqual(len(zf.namelist()), 4)
+
+    def test_default_shape_is_flattened(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"setting_ids": ["Eryone Matte Imported"]},
+        )
+        self.assertEqual(r.status_code, 200)
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        self.assertEqual(len(zf.namelist()), 2)  # 2 compatible printers
+
+    def test_partial_not_found_reported_in_header(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={
+                "setting_ids": [
+                    "Eryone Matte Imported",
+                    "nonexistent",
+                    "GFSA01_02",  # vendor → not_found in user scope
+                ],
+                "shape": "thin",
+            },
+        )
+        self.assertEqual(r.status_code, 200)
+        skipped = json.loads(r.headers["x-export-skipped"])
+        self.assertEqual(skipped["nonexistent"], "not_found")
+        self.assertEqual(skipped["GFSA01_02"], "not_found")
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        self.assertEqual(len(zf.namelist()), 1)
+
+    def test_unresolved_chain_skipped_in_flattened(self):
+        self._add_second_user_filament()
+        # Break only Eryone's chain (after the reload).
+        user_key = profiles._profile_key("User", "Eryone Matte Imported")
+        profiles._raw_profiles[user_key]["inherits"] = "Nonexistent Parent"
+        profiles._resolved_cache.clear()
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={
+                "setting_ids": ["Eryone Matte Imported", "Other PLA"],
+                "shape": "flattened",
+            },
+        )
+        self.assertEqual(r.status_code, 200)
+        skipped = json.loads(r.headers["x-export-skipped"])
+        self.assertEqual(skipped["Eryone Matte Imported"], "unresolved_chain")
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        # Other PLA × 2 printers = 2 entries; Eryone skipped.
+        self.assertEqual(len(zf.namelist()), 2)
+
+    def test_no_compatible_printers_reported(self):
+        # Add a user filament with empty compatible_printers.
+        self._write_json(
+            self.user_dir / "filament" / "Lonely.json",
+            {
+                "name": "Lonely",
+                "setting_id": "Lonely",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Plonely1",
+                "compatible_printers": [],
+                "version": "1.9.0.21",
+            },
+        )
+        profiles.load_all_profiles()
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"setting_ids": ["Lonely"], "shape": "flattened"},
+        )
+        self.assertEqual(r.status_code, 200)
+        skipped = json.loads(r.headers["x-export-skipped"])
+        self.assertEqual(skipped["Lonely"], "no_compatible_printers")
+
+    def test_filename_collisions_get_suffix(self):
+        # Two user filaments whose flattened names happen to sanitize
+        # the same way after we tweak names to collide.
+        self._write_json(
+            self.user_dir / "filament" / "PLA-A.json",
+            {
+                "name": "PLA A",
+                "setting_id": "PLA-A",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Ppl_a___",
+                "inherits": "Bambu PLA Matte @BBL A1M",
+                "version": "1.9.0.21",
+            },
+        )
+        self._write_json(
+            self.user_dir / "filament" / "PLA-B.json",
+            {
+                "name": "pla a",  # sanitizes the same as "PLA A"
+                "setting_id": "PLA-B",
+                "instantiation": "true",
+                "from": "User",
+                "filament_id": "Ppl_b___",
+                "inherits": "Bambu PLA Matte @BBL A1M",
+                "version": "1.9.0.21",
+            },
+        )
+        profiles.load_all_profiles()
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"setting_ids": ["PLA-A", "PLA-B"], "shape": "thin"},
+        )
+        self.assertEqual(r.status_code, 200)
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = sorted(zf.namelist())
+        # Both files made it in, second got a -2 suffix.
+        self.assertEqual(len(names), 2)
+        self.assertTrue(any("-2.json" in n for n in names))
+
+    def test_empty_setting_ids_returns_400(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"setting_ids": [], "shape": "thin"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_missing_setting_ids_returns_400(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"shape": "thin"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_invalid_shape_returns_400(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            json={"setting_ids": ["Eryone Matte Imported"], "shape": "bogus"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_invalid_json_returns_400(self):
+        r = self.client.post(
+            "/profiles/filaments/export-batch",
+            data="not json",
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

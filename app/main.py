@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 from dataclasses import asdict
+from datetime import datetime, timezone
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -656,6 +657,105 @@ async def export_filament_profile(setting_id: str, shape: str = "flattened"):
         headers={
             "Content-Disposition": f'attachment; filename="{zip_filename}"',
         },
+    )
+
+
+@app.post(
+    "/profiles/filaments/export-batch",
+    tags=["Profiles"],
+    responses={
+        200: {
+            "content": {"application/zip": {}},
+            "description": (
+                "Zip of exported user filaments. The `X-Export-Skipped` "
+                "header (when present) is a JSON-encoded object mapping "
+                "skipped setting_ids to reasons "
+                "(`not_found`, `unresolved_chain`, `no_compatible_printers`)."
+            ),
+        },
+        400: {"description": "Invalid request body or shape."},
+    },
+)
+async def export_filaments_batch(request: Request):
+    """Batch-export a list of user filaments as a zip.
+
+    Request body: `{"setting_ids": [...], "shape": "thin" | "flattened"}`.
+    `shape` defaults to `"flattened"`.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body."})
+
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "Body must be a JSON object."})
+
+    setting_ids = body.get("setting_ids")
+    shape = body.get("shape", "flattened")
+
+    if not isinstance(setting_ids, list) or not setting_ids:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Missing or empty 'setting_ids' (must be a non-empty list)."},
+        )
+
+    if shape not in ("thin", "flattened"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid shape '{shape}'; expected 'thin' or 'flattened'."},
+        )
+
+    skipped: dict[str, str] = {}
+    success_entries: list[tuple[str, dict]] = []
+
+    for sid in setting_ids:
+        if not isinstance(sid, str):
+            skipped[str(sid)] = "not_found"
+            continue
+        try:
+            entries = export_user_filament(sid, shape=shape)
+        except UnresolvedChainError:
+            skipped[sid] = "unresolved_chain"
+            continue
+        except ProfileNotFoundError:
+            skipped[sid] = "not_found"
+            continue
+        except ValueError:
+            skipped[sid] = "no_compatible_printers"
+            continue
+        success_entries.extend(entries)
+
+    # Deduplicate filenames within the zip with `-2`, `-3`, ... suffixes.
+    seen_names: dict[str, int] = {}
+    deduped: list[tuple[str, dict]] = []
+    for filename, data in success_entries:
+        if filename not in seen_names:
+            seen_names[filename] = 1
+            deduped.append((filename, data))
+            continue
+        seen_names[filename] += 1
+        stem, dot, ext = filename.rpartition(".")
+        new_name = f"{stem}-{seen_names[filename]}.{ext}" if dot else f"{filename}-{seen_names[filename]}"
+        deduped.append((new_name, data))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, data in deduped:
+            zf.writestr(filename, json.dumps(data, indent=2))
+
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="user-filaments-'
+            f'{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}.zip"'
+        ),
+    }
+    if skipped:
+        headers["X-Export-Skipped"] = json.dumps(skipped)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers=headers,
     )
 
 
