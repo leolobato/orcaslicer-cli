@@ -33,6 +33,7 @@ from .models import (
 )
 from .profiles import (
     ProfileNotFoundError,
+    _resolve_chain_for_payload,
     get_filament_profiles,
     get_machine_profiles,
     get_process_profiles,
@@ -191,7 +192,13 @@ async def list_plate_types():
     tags=["Profiles"],
 )
 async def resolve_filament_import(request: Request):
-    """Resolve a filament import payload without saving it."""
+    """Preview the materialized + resolved view of a filament import payload.
+
+    Returns the fully merged form in `resolved_profile` for inspection.
+    The saved form on POST is the raw payload — clients should POST
+    their original upload to `/profiles/filaments`, NOT this preview's
+    `resolved_profile`.
+    """
     try:
         raw_data = await request.json()
     except Exception:
@@ -201,16 +208,21 @@ async def resolve_filament_import(request: Request):
     if error_response is not None or data is None:
         return error_response
 
-    filament_type = data.get("filament_type", "")
+    try:
+        merged = _resolve_chain_for_payload(data, category="filament")
+    except ProfileNotFoundError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    filament_type = merged.get("filament_type", "")
     if isinstance(filament_type, list):
         filament_type = filament_type[0] if filament_type else ""
 
     return FilamentProfileImportPreview(
         setting_id=data["setting_id"],
-        filament_id=str(data.get("filament_id", "")),
-        name=str(data.get("name", "")),
+        filament_id=str(merged.get("filament_id", "")),
+        name=str(merged.get("name", "")),
         filament_type=str(filament_type or ""),
-        resolved_payload=data,
+        resolved_profile=merged,
     )
 
 
@@ -243,7 +255,7 @@ def _read_process_import_body(data: Any) -> tuple[dict | None, JSONResponse | No
     tags=["Profiles"],
 )
 async def resolve_process_import(request: Request):
-    """Resolve a process import payload without saving it."""
+    """Preview the materialized + resolved view of a process import payload."""
     try:
         raw_data = await request.json()
     except Exception:
@@ -253,6 +265,11 @@ async def resolve_process_import(request: Request):
     if error_response is not None or data is None:
         return error_response
 
+    try:
+        merged = _resolve_chain_for_payload(data, category="process")
+    except ProfileNotFoundError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
     inherits_resolved = ""
     if isinstance(raw_data, dict):
         raw_inherits = raw_data.get("inherits")
@@ -261,9 +278,9 @@ async def resolve_process_import(request: Request):
 
     return ProcessProfileImportPreview(
         setting_id=data["setting_id"],
-        name=str(data.get("name", "")),
+        name=str(merged.get("name", "")),
         inherits_resolved=inherits_resolved,
-        resolved_payload=data,
+        resolved_profile=merged,
     )
 
 

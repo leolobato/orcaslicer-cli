@@ -102,7 +102,7 @@ class _ProfileEndpointTestBase(unittest.TestCase):
 
 
 class ProcessResolveImportEndpointTests(_ProfileEndpointTestBase):
-    def test_resolve_import_returns_preview_with_resolved_payload(self) -> None:
+    def test_resolve_import_returns_preview_with_resolved_profile(self) -> None:
         body = json.loads((FIXTURE_DIR / "process_esun_pla_basic_a1m.json").read_text())
         resp = self.client.post("/profiles/processes/resolve-import", json=body)
 
@@ -111,7 +111,7 @@ class ProcessResolveImportEndpointTests(_ProfileEndpointTestBase):
         self.assertEqual(data["name"], "eSUN PLA-Basic @BBL A1M Process")
         self.assertEqual(data["setting_id"], "eSUN PLA-Basic @BBL A1M Process")
         self.assertEqual(data["inherits_resolved"], "0.20mm Standard @BBL A1M")
-        payload = data["resolved_payload"]
+        payload = data["resolved_profile"]
         self.assertEqual(payload["from"], "User")
         self.assertEqual(payload["outer_wall_speed"], ["150"])
         self.assertEqual(payload["layer_height"], ["0.2"])
@@ -149,7 +149,7 @@ class ProcessSaveEndpointTests(_ProfileEndpointTestBase):
 
         resp = self.client.post(
             "/profiles/processes",
-            json=preview["resolved_payload"],
+            json=body,
         )
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.json()["setting_id"], "eSUN PLA-Basic @BBL A1M Process")
@@ -158,8 +158,11 @@ class ProcessSaveEndpointTests(_ProfileEndpointTestBase):
         written_path = self.user_dir / f"{setting_id}.json"
         self.assertTrue(written_path.is_file())
         on_disk = json.loads(written_path.read_text())
+        # The fixture supplies these and the new materializer preserves them.
         self.assertEqual(on_disk["from"], "User")
         self.assertEqual(on_disk["print_settings_id"], preview["name"])
+        # The new contract: inherits is preserved on disk.
+        self.assertEqual(on_disk["inherits"], "0.20mm Standard @BBL A1M")
 
         listing = self.client.get("/profiles/processes").json()
         names = {p["name"] for p in listing}
@@ -174,24 +177,24 @@ class ProcessSaveEndpointTests(_ProfileEndpointTestBase):
 
 
 class CollisionSemanticsTests(_ProfileEndpointTestBase):
-    def _import_process_once(self) -> dict:
+    def _import_process_once(self) -> tuple[dict, dict]:
         body = json.loads((FIXTURE_DIR / "process_esun_pla_basic_a1m.json").read_text())
         preview = self.client.post(
             "/profiles/processes/resolve-import", json=body
         ).json()
-        resp = self.client.post("/profiles/processes", json=preview["resolved_payload"])
+        resp = self.client.post("/profiles/processes", json=body)
         self.assertEqual(resp.status_code, 201)
-        return preview
+        return preview, body
 
     def test_process_second_import_without_replace_returns_409(self) -> None:
-        preview = self._import_process_once()
-        resp = self.client.post("/profiles/processes", json=preview["resolved_payload"])
+        _preview, body = self._import_process_once()
+        resp = self.client.post("/profiles/processes", json=body)
         self.assertEqual(resp.status_code, 409)
         self.assertIn("already exists", resp.json()["error"].lower())
 
     def test_process_second_import_with_replace_true_returns_200(self) -> None:
-        preview = self._import_process_once()
-        modified = dict(preview["resolved_payload"])
+        preview, body = self._import_process_once()
+        modified = dict(body)
         modified["outer_wall_speed"] = ["123"]
         resp = self.client.post(
             "/profiles/processes?replace=true", json=modified
@@ -202,24 +205,24 @@ class CollisionSemanticsTests(_ProfileEndpointTestBase):
         )
         self.assertEqual(on_disk["outer_wall_speed"], ["123"])
 
-    def _import_filament_once(self) -> dict:
+    def _import_filament_once(self) -> tuple[dict, dict]:
         body = json.loads((FIXTURE_DIR / "filament_esun_pla_basic_a1m.json").read_text())
         preview = self.client.post(
             "/profiles/filaments/resolve-import", json=body
         ).json()
-        resp = self.client.post("/profiles/filaments", json=preview["resolved_payload"])
+        resp = self.client.post("/profiles/filaments", json=body)
         self.assertEqual(resp.status_code, 201)
-        return preview
+        return preview, body
 
     def test_filament_second_import_without_replace_returns_409(self) -> None:
-        preview = self._import_filament_once()
-        resp = self.client.post("/profiles/filaments", json=preview["resolved_payload"])
+        _preview, body = self._import_filament_once()
+        resp = self.client.post("/profiles/filaments", json=body)
         self.assertEqual(resp.status_code, 409)
         self.assertIn("already exists", resp.json()["error"].lower())
 
     def test_filament_second_import_with_replace_true_returns_200(self) -> None:
-        preview = self._import_filament_once()
-        modified = dict(preview["resolved_payload"])
+        preview, body = self._import_filament_once()
+        modified = dict(body)
         modified["nozzle_temperature"] = ["245"]
         resp = self.client.post(
             "/profiles/filaments?replace=true", json=modified
@@ -237,7 +240,7 @@ class ProcessDeleteEndpointTests(_ProfileEndpointTestBase):
         preview = self.client.post(
             "/profiles/processes/resolve-import", json=body
         ).json()
-        self.client.post("/profiles/processes", json=preview["resolved_payload"])
+        self.client.post("/profiles/processes", json=body)
         setting_id = preview["setting_id"]
         self.assertTrue((self.user_dir / f"{setting_id}.json").is_file())
 

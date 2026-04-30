@@ -93,7 +93,12 @@ class FilamentProfileImportPreview(BaseModel):
     filament_id: str = Field(description="Filament identifier used for AMS assignment.")
     name: str = Field(description="Profile name.")
     filament_type: str = Field(description="Resolved filament material type.", examples=["PLA"])
-    resolved_payload: dict = Field(description="Fully materialized filament profile JSON to be saved.")
+    resolved_profile: dict = Field(
+        description=(
+            "Fully merged filament profile (inheritance resolved) — informational. "
+            "Send the original raw payload to POST /profiles/filaments, not this field."
+        ),
+    )
 
 
 class ProcessProfileImportPreview(BaseModel):
@@ -105,7 +110,12 @@ class ProcessProfileImportPreview(BaseModel):
         default="",
         description="Name of the parent profile that the import resolved against.",
     )
-    resolved_payload: dict = Field(description="Fully materialized process profile JSON to be saved.")
+    resolved_profile: dict = Field(
+        description=(
+            "Fully merged process profile (inheritance resolved) — informational. "
+            "Send the original raw payload to POST /profiles/processes, not this field."
+        ),
+    )
 
 
 class ProcessProfileImportResponse(BaseModel):
