@@ -827,7 +827,7 @@ function filamentEditor() {
 
     // Save the filament profile
     async save() {
-      if (!this.preview || !this.preview.resolved_payload) return;
+      if (!this.preview) return;
       this.saving = true;
       this.saveError = null;
 
@@ -839,11 +839,13 @@ function filamentEditor() {
           });
         }
 
-        // POST the resolved payload to create the new profile
+        // POST the raw payload built from form state. The preview's
+        // resolved_profile is informational only — the saved file is
+        // the raw form (with `inherits` preserved).
         await api("/profiles/filaments", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(this.preview.resolved_payload),
+          body: JSON.stringify(this.buildPayload()),
         });
 
         // Navigate back to the filament list
@@ -867,7 +869,10 @@ function filamentEditor() {
         const copyPayload = { ...this.buildPayload(), name: newName.trim() };
         delete copyPayload.setting_id;
         delete copyPayload.filament_id;
-        const resolveResp = await api("/profiles/filaments/resolve-import", {
+        // Round-trip through resolve-import for validation (parent
+        // existence, materialization errors), but POST the raw copy
+        // payload directly — the saved file is the raw form.
+        await api("/profiles/filaments/resolve-import", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(copyPayload),
@@ -876,7 +881,7 @@ function filamentEditor() {
         await api("/profiles/filaments", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(resolveResp.resolved_payload),
+          body: JSON.stringify(copyPayload),
         });
 
         window.location.hash = "#/filaments?filter=user";
@@ -1051,7 +1056,10 @@ function importProfileModal(category, onImported) {
         resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(this.preview.resolved_payload),
+          // POST the raw uploaded JSON (with `inherits` preserved).
+          // The preview's `resolved_profile` is informational only;
+          // the saved file is the raw form.
+          body: JSON.stringify(this.rawPayload),
         });
       } catch (err) {
         this.saveError = err.message;
