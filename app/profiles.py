@@ -546,42 +546,61 @@ def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_user_profiles() -> int:
-    """Load user-provided profile JSONs from USER_PROFILES_DIR.
+    """Load user-provided profile JSONs from USER_PROFILES_DIR recursively.
 
-    Returns the number of profiles loaded.
+    Files at the root of `USER_PROFILES_DIR` are loaded first (legacy
+    flat layout), followed by files inside any subdirectory walked
+    alphabetically. The typed subfolders `filament/`, `process/`, and
+    `machine/` are the canonical write targets, but any nested layout
+    is accepted. When the same profile `name` appears in multiple
+    files, the file walked later wins — so a typed-subfolder copy
+    overrides a legacy root file with the same name.
     """
     if not os.path.isdir(USER_PROFILES_DIR):
         return 0
 
+    seen_names: set[str] = set()
     count = 0
-    for fname in sorted(os.listdir(USER_PROFILES_DIR)):
-        if not fname.endswith(".json"):
-            continue
-        path = os.path.join(USER_PROFILES_DIR, fname)
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Skipping invalid user profile %s: %s", fname, e)
-            continue
+    # topdown=True yields the root directory before its subdirs, so
+    # legacy flat files load first and typed-subfolder files override.
+    for dirpath, dirnames, filenames in os.walk(USER_PROFILES_DIR, topdown=True):
+        dirnames.sort()
+        for fname in sorted(filenames):
+            if not fname.endswith(".json"):
+                continue
+            path = os.path.join(dirpath, fname)
+            if not os.path.isfile(path):
+                continue
+            rel = os.path.relpath(path, USER_PROFILES_DIR)
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Skipping invalid user profile %s: %s", rel, e)
+                continue
 
-        name = data.get("name")
-        if not name:
-            logger.warning("Skipping user profile %s: missing 'name' field", fname)
-            continue
+            name = data.get("name")
+            if not name:
+                logger.warning(
+                    "Skipping user profile %s: missing 'name' field", rel
+                )
+                continue
 
-        # Use setting_id if present, otherwise use name as identifier
-        if "setting_id" not in data:
-            data["setting_id"] = name
+            if "setting_id" not in data:
+                data["setting_id"] = name
 
-        category = _detect_profile_type(data)
-        profile_key = _profile_key("User", str(name))
-        _index_profile(profile_key, data, category, "User")
+            category = _detect_profile_type(data)
+            profile_key = _profile_key("User", str(name))
+            if str(name) in seen_names:
+                logger.warning(
+                    "User profile %s overrides earlier profile with name '%s'",
+                    rel, name,
+                )
+            _index_profile(profile_key, data, category, "User")
+            seen_names.add(str(name))
 
-        count += 1
-        logger.info("Loaded user %s profile: %s", category, name)
+            count += 1
+            logger.info("Loaded user %s profile: %s (%s)", category, name, rel)
 
     return count
 

@@ -100,6 +100,10 @@ class _ProfileEndpointTestBase(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
+    def _typed_user_path(self, category: str, setting_id: str) -> Path:
+        """Path where the import endpoints write user profiles after the typed-layout change."""
+        return self.user_dir / category / f"{setting_id}.json"
+
 
 class ProcessResolveImportEndpointTests(_ProfileEndpointTestBase):
     def test_resolve_import_returns_preview_with_resolved_profile(self) -> None:
@@ -155,8 +159,10 @@ class ProcessSaveEndpointTests(_ProfileEndpointTestBase):
         self.assertEqual(resp.json()["setting_id"], "eSUN PLA-Basic @BBL A1M Process")
 
         setting_id = preview["setting_id"]
-        written_path = self.user_dir / f"{setting_id}.json"
+        written_path = self._typed_user_path("process", setting_id)
         self.assertTrue(written_path.is_file())
+        # Legacy flat-root path must NOT receive new writes.
+        self.assertFalse((self.user_dir / f"{setting_id}.json").is_file())
         on_disk = json.loads(written_path.read_text())
         # The fixture supplies these and the new materializer preserves them.
         self.assertEqual(on_disk["from"], "User")
@@ -201,7 +207,7 @@ class CollisionSemanticsTests(_ProfileEndpointTestBase):
         )
         self.assertEqual(resp.status_code, 200)
         on_disk = json.loads(
-            (self.user_dir / f"{preview['setting_id']}.json").read_text()
+            self._typed_user_path("process", preview["setting_id"]).read_text()
         )
         self.assertEqual(on_disk["outer_wall_speed"], ["123"])
 
@@ -229,7 +235,7 @@ class CollisionSemanticsTests(_ProfileEndpointTestBase):
         )
         self.assertEqual(resp.status_code, 200)
         on_disk = json.loads(
-            (self.user_dir / f"{preview['setting_id']}.json").read_text()
+            self._typed_user_path("filament", preview["setting_id"]).read_text()
         )
         self.assertEqual(on_disk["nozzle_temperature"], ["245"])
 
@@ -242,11 +248,12 @@ class ProcessDeleteEndpointTests(_ProfileEndpointTestBase):
         ).json()
         self.client.post("/profiles/processes", json=body)
         setting_id = preview["setting_id"]
-        self.assertTrue((self.user_dir / f"{setting_id}.json").is_file())
+        typed_path = self._typed_user_path("process", setting_id)
+        self.assertTrue(typed_path.is_file())
 
         resp = self.client.delete(f"/profiles/processes/{setting_id}")
         self.assertEqual(resp.status_code, 200)
-        self.assertFalse((self.user_dir / f"{setting_id}.json").is_file())
+        self.assertFalse(typed_path.is_file())
 
         listing = self.client.get("/profiles/processes").json()
         names = {p["name"] for p in listing}
@@ -332,8 +339,10 @@ class FilamentImportRoundTripTests(_ProfileEndpointTestBase):
         setting_id = save.json()["setting_id"]
 
         # On-disk file is the raw thin form — `inherits` preserved,
-        # parent fields NOT merged.
-        on_disk = json.loads((self.user_dir / f"{setting_id}.json").read_text())
+        # parent fields NOT merged. Lives under the typed subfolder.
+        on_disk_path = self._typed_user_path("filament", setting_id)
+        self.assertTrue(on_disk_path.is_file())
+        on_disk = json.loads(on_disk_path.read_text())
         self.assertEqual(on_disk["inherits"], "Bambu PLA Basic @BBL A1M")
         self.assertNotIn("filament_type", on_disk)
         self.assertNotIn("compatible_printers", on_disk)
@@ -398,7 +407,9 @@ class FilamentImportRoundTripTests(_ProfileEndpointTestBase):
         self.assertEqual(save.status_code, 201)
         setting_id = save.json()["setting_id"]
 
-        on_disk = json.loads((self.user_dir / f"{setting_id}.json").read_text())
+        on_disk_path = self._typed_user_path("process", setting_id)
+        self.assertTrue(on_disk_path.is_file())
+        on_disk = json.loads(on_disk_path.read_text())
         self.assertEqual(on_disk["inherits"], "0.20mm Standard @BBL A1M")
         self.assertNotIn("layer_height", on_disk)
 
@@ -407,6 +418,140 @@ class FilamentImportRoundTripTests(_ProfileEndpointTestBase):
         self.assertEqual(resolved.get("outer_wall_speed"), ["180"])
         self.assertEqual(resolved.get("layer_height"), ["0.2"])
         self.assertEqual(resolved.get("inner_wall_speed"), ["300"])
+
+
+class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
+    """The user data folder now has typed subfolders.
+
+    - Imports write to `<USER_PROFILES_DIR>/<category>/<setting_id>.json`.
+    - The loader recurses, so nested files are picked up by `/profiles/reload`.
+    - A duplicate at the legacy root path triggers 409 (cross-layout
+      collision) and is migrated to the typed subfolder on `replace=true`.
+    - Delete searches both the typed subfolder and the legacy root.
+    """
+
+    def test_filament_import_writes_to_typed_subfolder(self) -> None:
+        body = json.loads((FIXTURE_DIR / "filament_esun_pla_basic_a1m.json").read_text())
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 201)
+        setting_id = resp.json()["setting_id"]
+        self.assertTrue(self._typed_user_path("filament", setting_id).is_file())
+        self.assertFalse((self.user_dir / f"{setting_id}.json").is_file())
+
+    def test_process_import_writes_to_typed_subfolder(self) -> None:
+        body = json.loads((FIXTURE_DIR / "process_esun_pla_basic_a1m.json").read_text())
+        resp = self.client.post("/profiles/processes", json=body)
+        self.assertEqual(resp.status_code, 201)
+        setting_id = resp.json()["setting_id"]
+        self.assertTrue(self._typed_user_path("process", setting_id).is_file())
+        self.assertFalse((self.user_dir / f"{setting_id}.json").is_file())
+
+    def test_loader_recurses_into_nested_subfolders(self) -> None:
+        """A user profile placed manually under `filament/sub/` is loaded."""
+        nested_dir = self.user_dir / "filament" / "experimental"
+        nested_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "name": "Nested PLA",
+            "setting_id": "Nested PLA",
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "NEST001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }
+        (nested_dir / "Nested PLA.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        self.client.post("/profiles/reload")
+
+        listing = self.client.get("/profiles/filaments").json()
+        names = {p["name"] for p in listing}
+        self.assertIn("Nested PLA", names)
+
+    def test_legacy_root_collision_returns_409_without_replace(self) -> None:
+        """A pre-existing flat-root file blocks a fresh import for the same id."""
+        legacy_setting_id = "Pre-Existing Filament"
+        legacy_path = self.user_dir / f"{legacy_setting_id}.json"
+        legacy_path.write_text(json.dumps({
+            "name": legacy_setting_id,
+            "setting_id": legacy_setting_id,
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "LEG001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }), encoding="utf-8")
+        self.client.post("/profiles/reload")
+
+        body = {
+            "name": legacy_setting_id,
+            "setting_id": legacy_setting_id,
+            "from": "User",
+            "filament_id": "FRESH01",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }
+        resp = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(legacy_path.is_file())
+        self.assertFalse(self._typed_user_path("filament", legacy_setting_id).is_file())
+
+    def test_replace_migrates_legacy_root_file_to_typed_subfolder(self) -> None:
+        legacy_setting_id = "Legacy To Migrate"
+        legacy_path = self.user_dir / f"{legacy_setting_id}.json"
+        legacy_path.write_text(json.dumps({
+            "name": legacy_setting_id,
+            "setting_id": legacy_setting_id,
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "LEG002",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            "nozzle_temperature": ["210"],
+        }), encoding="utf-8")
+        self.client.post("/profiles/reload")
+
+        body = {
+            "name": legacy_setting_id,
+            "setting_id": legacy_setting_id,
+            "from": "User",
+            "filament_id": "LEG002",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            "nozzle_temperature": ["230"],
+        }
+        resp = self.client.post(
+            "/profiles/filaments?replace=true", json=body
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(legacy_path.is_file())
+        typed = self._typed_user_path("filament", legacy_setting_id)
+        self.assertTrue(typed.is_file())
+        self.assertEqual(
+            json.loads(typed.read_text())["nozzle_temperature"], ["230"]
+        )
+
+    def test_delete_finds_legacy_root_file(self) -> None:
+        legacy_setting_id = "Legacy Delete Target"
+        legacy_path = self.user_dir / f"{legacy_setting_id}.json"
+        legacy_path.write_text(json.dumps({
+            "name": legacy_setting_id,
+            "setting_id": legacy_setting_id,
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "LEG003",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }), encoding="utf-8")
+        self.client.post("/profiles/reload")
+
+        resp = self.client.delete(f"/profiles/filaments/{legacy_setting_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(legacy_path.is_file())
 
 
 class FilamentImportResponseDerivedFieldsTests(_ProfileEndpointTestBase):

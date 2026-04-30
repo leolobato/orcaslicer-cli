@@ -105,6 +105,32 @@ async def slicing_error_handler(request, exc: SlicingError):
     )
 
 
+def _typed_user_profile_path(category: str, setting_id: str) -> str:
+    """Canonical write path for a user profile of the given category."""
+    return os.path.join(USER_PROFILES_DIR, category, f"{setting_id}.json")
+
+
+def _legacy_user_profile_path(setting_id: str) -> str:
+    """Pre-typed-layout write path used by older imports at the data root."""
+    return os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
+
+
+def _find_existing_user_profile(category: str, setting_id: str) -> str | None:
+    """Return the path of an existing user profile file, or None.
+
+    Searches the typed subfolder first, then the legacy flat root, so a
+    profile that was imported before the typed layout existed still
+    blocks a duplicate import and is reachable for delete.
+    """
+    typed = _typed_user_profile_path(category, setting_id)
+    if os.path.isfile(typed):
+        return typed
+    legacy = _legacy_user_profile_path(setting_id)
+    if os.path.isfile(legacy):
+        return legacy
+    return None
+
+
 def _reject_unsafe_setting_id(setting_id: str) -> JSONResponse | None:
     """Reject setting_ids that would escape USER_PROFILES_DIR or be otherwise unsafe as a filename.
 
@@ -309,9 +335,9 @@ async def import_process_profile(request: Request, replace: bool = False):
     if unsafe is not None:
         return unsafe
 
-    os.makedirs(USER_PROFILES_DIR, exist_ok=True)
-    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
-    exists = os.path.isfile(file_path)
+    file_path = _typed_user_profile_path("process", setting_id)
+    existing_path = _find_existing_user_profile("process", setting_id)
+    exists = existing_path is not None
     if exists and not replace:
         return JSONResponse(
             status_code=409,
@@ -323,8 +349,17 @@ async def import_process_profile(request: Request, replace: bool = False):
             },
         )
 
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "w") as f:
         json.dump(data, f, indent=2)
+
+    # Migrate-on-touch: if the existing file lived at the legacy flat
+    # root, drop it now that we've written the typed copy.
+    if exists and existing_path != file_path:
+        try:
+            os.remove(existing_path)
+        except OSError:
+            logger.warning("Failed to remove legacy file %s", existing_path)
 
     load_all_profiles()
 
@@ -358,8 +393,8 @@ async def delete_process_profile(setting_id: str):
     unsafe = _reject_unsafe_setting_id(setting_id)
     if unsafe is not None:
         return unsafe
-    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
-    if not os.path.isfile(file_path):
+    file_path = _find_existing_user_profile("process", setting_id)
+    if file_path is None:
         return JSONResponse(
             status_code=404,
             content={"error": f"User process profile '{setting_id}' not found."},
@@ -399,9 +434,9 @@ async def import_filament_profile(request: Request, replace: bool = False):
     if unsafe is not None:
         return unsafe
 
-    os.makedirs(USER_PROFILES_DIR, exist_ok=True)
-    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
-    exists = os.path.isfile(file_path)
+    file_path = _typed_user_profile_path("filament", setting_id)
+    existing_path = _find_existing_user_profile("filament", setting_id)
+    exists = existing_path is not None
     if exists and not replace:
         return JSONResponse(
             status_code=409,
@@ -413,8 +448,15 @@ async def import_filament_profile(request: Request, replace: bool = False):
             },
         )
 
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "w") as f:
         json.dump(data, f, indent=2)
+
+    if exists and existing_path != file_path:
+        try:
+            os.remove(existing_path)
+        except OSError:
+            logger.warning("Failed to remove legacy file %s", existing_path)
 
     load_all_profiles()
 
@@ -453,8 +495,8 @@ async def delete_filament_profile(setting_id: str):
     unsafe = _reject_unsafe_setting_id(setting_id)
     if unsafe is not None:
         return unsafe
-    file_path = os.path.join(USER_PROFILES_DIR, f"{setting_id}.json")
-    if not os.path.isfile(file_path):
+    file_path = _find_existing_user_profile("filament", setting_id)
+    if file_path is None:
         return JSONResponse(
             status_code=404,
             content={"error": f"User filament profile '{setting_id}' not found."},
