@@ -82,6 +82,28 @@ class OverlaySettingsTests(unittest.TestCase):
         self.assertEqual(updated["sparse_infill_pattern"], "gyroid")
         self.assertEqual(overlaid_keys, {"sparse_infill_pattern"})
 
+    def test_overlay_injects_key_absent_from_process_profile(self) -> None:
+        # `brim_type` is not written into any BBL process profile; OrcaSlicer
+        # falls back to a compile-time default. When a 3MF declares it as a
+        # customization, the overlay must inject it onto the target profile
+        # so the user's choice survives. (Regression: previously a `k not in
+        # process_profile` guard skipped this case.)
+        process_profile = {
+            "name": "0.20mm Standard @BBL A1M",
+            "setting_id": "GP004",
+            "sparse_infill_density": "15%",
+        }
+        threemf_settings = {
+            "brim_type": "no_brim",
+            "sparse_infill_density": "15%",
+        }
+        allowed = {"brim_type"}
+
+        updated, overlaid_keys = _overlay_3mf_settings(process_profile, threemf_settings, allowed)
+
+        self.assertEqual(updated["brim_type"], "no_brim")
+        self.assertEqual(overlaid_keys, {"brim_type"})
+
     def test_overlay_transfers_nothing_when_allowlist_empty(self) -> None:
         process_profile = {
             "sparse_infill_pattern": "grid",

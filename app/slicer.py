@@ -706,19 +706,28 @@ def _overlay_3mf_settings(
     `different_settings_to_system[0]` fingerprint) are considered. Passing an
     empty set transfers nothing.
 
+    A key is transferred even when absent from the resolved process profile —
+    `different_settings_to_system` lists keys that diverge from system defaults,
+    and OrcaSlicer often realizes those defaults via compile-time constants
+    rather than profile JSON (e.g. `brim_type` defaults to `auto_brim` and is
+    not written into any BBL profile). Requiring presence would let the slicer
+    silently fall back to the default and discard the user's choice.
+
     Returns (updated_profile, set_of_overlaid_keys).
     """
     overrides = {}
     for k in allowed_keys:
         if (
-            k not in process_profile
-            or k not in threemf_settings
+            k not in threemf_settings
             or k in _PROFILE_META_KEYS
             or not _is_transferable_process_key(k)
         ):
             continue
-        pv = process_profile[k]
         tv = threemf_settings[k]
+        if k not in process_profile:
+            overrides[k] = tv
+            continue
+        pv = process_profile[k]
         if type(pv) == type(tv):
             overrides[k] = tv
         elif isinstance(pv, list) and isinstance(tv, str):
