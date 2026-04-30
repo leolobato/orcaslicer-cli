@@ -564,18 +564,21 @@ def _load_user_profiles() -> int:
     # topdown=True yields the root directory before its subdirs, so
     # legacy flat files load first and typed-subfolder files override.
     for dirpath, dirnames, filenames in os.walk(USER_PROFILES_DIR, topdown=True):
-        dirnames.sort()
+        # Skip hidden directories (e.g. macOS `.fseventsd`).
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for fname in sorted(filenames):
-            if not fname.endswith(".json"):
+            # Skip dotfiles, including macOS AppleDouble forks (`._*.json`)
+            # that share the .json suffix but are AppleDouble-encoded binaries.
+            if fname.startswith(".") or not fname.endswith(".json"):
                 continue
             path = os.path.join(dirpath, fname)
             if not os.path.isfile(path):
                 continue
             rel = os.path.relpath(path, USER_PROFILES_DIR)
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
                 logger.warning("Skipping invalid user profile %s: %s", rel, e)
                 continue
 

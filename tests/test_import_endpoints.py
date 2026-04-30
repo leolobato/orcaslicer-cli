@@ -469,6 +469,51 @@ class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
         names = {p["name"] for p in listing}
         self.assertIn("Nested PLA", names)
 
+    def test_loader_skips_macos_appledouble_files(self) -> None:
+        """`._*.json` AppleDouble metadata must not crash startup.
+
+        macOS volumes mounted into the container expose AppleDouble forks
+        for every file as `._<name>` siblings. Those siblings have a
+        `.json` suffix but are AppleDouble-encoded binaries, not JSON.
+        Loading must skip them silently rather than blowing up startup.
+        """
+        good_payload = {
+            "name": "Real Filament",
+            "setting_id": "Real Filament",
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "REAL001",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+        }
+        filament_dir = self.user_dir / "filament"
+        filament_dir.mkdir(parents=True, exist_ok=True)
+        (filament_dir / "Real Filament.json").write_text(
+            json.dumps(good_payload), encoding="utf-8"
+        )
+        # AppleDouble fork — starts with the magic header bytes 0x00 0x05 0x16 0x07.
+        (filament_dir / "._Real Filament.json").write_bytes(
+            b"\x00\x05\x16\x07\xb0\x00\x00\x00garbage-not-utf8"
+        )
+
+        # Reload must succeed; the AppleDouble file must not appear.
+        resp = self.client.post("/profiles/reload")
+        self.assertEqual(resp.status_code, 200)
+
+        listing = self.client.get("/profiles/filaments").json()
+        names = {p["name"] for p in listing}
+        self.assertIn("Real Filament", names)
+
+    def test_loader_skips_corrupt_user_profile_without_crashing(self) -> None:
+        """A non-JSON file in the user dir must be skipped, not raise."""
+        filament_dir = self.user_dir / "filament"
+        filament_dir.mkdir(parents=True, exist_ok=True)
+        (filament_dir / "broken.json").write_bytes(b"\xb0\xb0\xb0\xb0 not json")
+
+        resp = self.client.post("/profiles/reload")
+        self.assertEqual(resp.status_code, 200)
+
     def test_legacy_root_collision_returns_409_without_replace(self) -> None:
         """A pre-existing flat-root file blocks a fresh import for the same id."""
         legacy_setting_id = "Pre-Existing Filament"
