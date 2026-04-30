@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from app import profiles
@@ -186,6 +187,142 @@ class PadPerVariantKeysTests(unittest.TestCase):
         out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
         self.assertEqual(out["filament_id"], "P1234567")
         self.assertEqual(out["nozzle_temperature"], ["210", "210"])
+
+
+class FlattenForPrinterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_profiles_state()
+
+    def tearDown(self) -> None:
+        reset_profiles_state()
+
+    def _index_machine(self, name: str, raw: dict) -> None:
+        key = profiles._profile_key("BBL", name)
+        profiles._raw_profiles[key] = {**raw, "name": name}
+        profiles._type_map[key] = "machine"
+        profiles._vendor_map[key] = "BBL"
+        profiles._name_index.setdefault(name, []).append(key)
+
+    def _resolved_filament(self) -> dict:
+        # Mimic the result of get_profile("filament", ...) for the
+        # Eryone Matte Imported chain — keys we know matter for the
+        # export shape.
+        return {
+            "type": "filament",
+            "name": "Eryone Matte Imported",
+            "from": "User",
+            "instantiation": "true",
+            "setting_id": "Eryone Matte Imported",
+            "filament_id": "Pfd5d97d",
+            "filament_type": ["PLA"],
+            "filament_vendor": ["Bambu Lab"],
+            "filament_settings_id": ["Eryone Matte Imported"],
+            "nozzle_temperature": ["210"],
+            "nozzle_temperature_initial_layer": ["210"],
+            "filament_extruder_variant": ["Direct Drive Standard"],
+            "compatible_printers": [
+                "Bambu Lab A1 mini 0.4 nozzle",
+                "Bambu Lab A1 mini 0.6 nozzle",
+            ],
+            "version": "1.9.0.21",
+        }
+
+    def test_strips_vendor_markers_and_sets_inherits_empty(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        out = profiles._flatten_user_filament_for_printer(
+            self._resolved_filament(), printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertNotIn("type", out)
+        self.assertNotIn("instantiation", out)
+        self.assertNotIn("setting_id", out)
+        self.assertNotIn("base_id", out)
+        self.assertEqual(out["inherits"], "")
+
+    def test_renames_to_alias_at_printer(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        out = profiles._flatten_user_filament_for_printer(
+            self._resolved_filament(), printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(
+            out["name"], "Eryone Matte Imported @Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(
+            out["filament_settings_id"],
+            ["Eryone Matte Imported @Bambu Lab A1 mini 0.4 nozzle"],
+        )
+
+    def test_scopes_compatible_printers_to_one(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        out = profiles._flatten_user_filament_for_printer(
+            self._resolved_filament(), printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(out["compatible_printers"], ["Bambu Lab A1 mini 0.4 nozzle"])
+
+    def test_adds_empty_default_compat_fields(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        out = profiles._flatten_user_filament_for_printer(
+            self._resolved_filament(), printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(out["compatible_printers_condition"], "")
+        self.assertEqual(out["compatible_prints"], [])
+        self.assertEqual(out["compatible_prints_condition"], "")
+
+    def test_pads_per_variant_keys_against_two_variant_printer(self):
+        self._index_machine(
+            "Bambu Lab P1P 0.4 nozzle",
+            {
+                "printer_extruder_variant": [
+                    "Direct Drive Standard", "Direct Drive High Flow",
+                ],
+            },
+        )
+        out = profiles._flatten_user_filament_for_printer(
+            self._resolved_filament(), printer_name="Bambu Lab P1P 0.4 nozzle",
+        )
+        self.assertEqual(out["nozzle_temperature"], ["210", "210"])
+        self.assertEqual(
+            out["filament_extruder_variant"],
+            ["Direct Drive Standard", "Direct Drive High Flow"],
+        )
+
+    def test_idempotent_re_export(self):
+        # Already has @<old printer> in name — should not stack suffixes.
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        resolved = self._resolved_filament()
+        resolved["name"] = "Eryone Matte Imported @Some Other Printer"
+        out = profiles._flatten_user_filament_for_printer(
+            resolved, printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(
+            out["name"], "Eryone Matte Imported @Bambu Lab A1 mini 0.4 nozzle",
+        )
+
+    def test_does_not_mutate_input(self):
+        self._index_machine(
+            "Bambu Lab A1 mini 0.4 nozzle",
+            {"printer_extruder_variant": ["Direct Drive Standard"]},
+        )
+        resolved = self._resolved_filament()
+        snapshot = json.loads(json.dumps(resolved))
+        profiles._flatten_user_filament_for_printer(
+            resolved, printer_name="Bambu Lab A1 mini 0.4 nozzle",
+        )
+        self.assertEqual(resolved, snapshot)
 
 
 if __name__ == "__main__":

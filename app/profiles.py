@@ -1042,6 +1042,61 @@ def _pad_per_variant_keys(
     return profile
 
 
+# Vendor-profile marker keys stripped on flatten — they identify the
+# input as a vendor preset, which OrcaSlicer's GUI uses to gate user
+# editing and AMS assignment. User filaments do not carry these.
+_FLATTEN_STRIP_KEYS = frozenset({
+    "inherits", "base_id", "type", "instantiation", "setting_id",
+})
+
+
+def _flatten_user_filament_for_printer(
+    resolved: dict[str, Any],
+    *,
+    printer_name: str,
+) -> dict[str, Any]:
+    """Reshape a resolved user filament dict for one target printer.
+
+    Returns a new dict (does not mutate `resolved`) with the
+    OrcaSlicer-GUI-shaped flattened layout described in the spec.
+    The output is suitable for writing as a `.json` file under
+    `~/Library/Application Support/OrcaSlicer/user/<profile>/filament/base/`.
+    """
+    out = {k: v for k, v in resolved.items() if k not in _FLATTEN_STRIP_KEYS}
+    out["inherits"] = ""
+
+    alias = _filament_alias(str(resolved.get("name", "")))
+    new_name = f"{alias} @{printer_name}"
+    out["name"] = new_name
+    out["filament_settings_id"] = [new_name]
+
+    out["compatible_printers"] = [printer_name]
+    out.setdefault("compatible_printers_condition", "")
+    out.setdefault("compatible_prints", [])
+    out.setdefault("compatible_prints_condition", "")
+
+    # Look up the printer's variant labels and count via the indexed
+    # machine profile. Falls back to single-variant when unknown.
+    variant_count = _printer_variant_count(printer_name)
+    variant_labels = None
+    if variant_count > 1:
+        machine_key = _select_profile_key_by_name(printer_name, category="machine")
+        if machine_key is not None:
+            try:
+                machine_resolved = resolve_profile_by_name(machine_key)
+            except ProfileNotFoundError:
+                machine_resolved = None
+            if machine_resolved:
+                labels = machine_resolved.get("printer_extruder_variant")
+                if isinstance(labels, list):
+                    variant_labels = list(labels)
+
+    out = _pad_per_variant_keys(
+        out, variant_count=variant_count, variant_labels=variant_labels,
+    )
+    return out
+
+
 def _resolve_by_slug(category: str, slug: str) -> tuple[str, dict[str, Any]]:
     """Look up and resolve a profile by setting_id and category.
 
