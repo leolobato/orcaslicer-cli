@@ -1,6 +1,8 @@
 """FastAPI app exposing OrcaSlicer as a REST API."""
 
+import io
 import json
+import zipfile
 from dataclasses import asdict
 import logging
 import os
@@ -33,7 +35,11 @@ from .models import (
 )
 from .profiles import (
     ProfileNotFoundError,
+    UnresolvedChainError,
+    _filament_alias,
     _resolve_chain_for_payload,
+    _safe_filename,
+    export_user_filament,
     get_filament_profiles,
     get_machine_profiles,
     get_process_profiles,
@@ -579,6 +585,78 @@ async def get_filament_detail(setting_id: str):
         return get_profile_detail("filament", setting_id)
     except ProfileNotFoundError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
+
+
+@app.get(
+    "/profiles/filaments/{setting_id}/export",
+    tags=["Profiles"],
+    responses={
+        200: {
+            "content": {
+                "application/json": {},
+                "application/zip": {},
+            },
+            "description": "User filament export — JSON for thin, zip for flattened.",
+        },
+        400: {"description": "Invalid shape parameter."},
+        404: {"description": "User filament not found."},
+        500: {"description": "Inheritance chain could not be resolved."},
+    },
+)
+async def export_filament_profile(setting_id: str, shape: str = "flattened"):
+    """Export a user filament for OrcaSlicer GUI import.
+
+    `shape=flattened` (default) returns a zip with one JSON entry per
+    compatible printer, each shaped for the GUI's
+    `user/<profile>/filament/base/` directory and AMS-assignable on
+    import.
+
+    `shape=thin` returns the saved file as-is (with `inherits`
+    preserved). The recipient OrcaSlicer install must already have the
+    parent profile, and the imported result is not AMS-assignable.
+    """
+    if shape not in ("thin", "flattened"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid shape '{shape}'; expected 'thin' or 'flattened'."},
+        )
+
+    try:
+        entries = export_user_filament(setting_id, shape=shape)
+    except UnresolvedChainError as e:
+        logger.warning("Export of '%s' failed: %s", setting_id, e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    except ProfileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    if shape == "thin":
+        filename, data = entries[0]
+        return Response(
+            content=json.dumps(data, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+
+    # flattened — package as zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, data in entries:
+            zf.writestr(filename, json.dumps(data, indent=2))
+    alias = _filament_alias(str(entries[0][1].get("name", setting_id)))
+    zip_filename = _safe_filename(
+        alias or setting_id, fallback=setting_id,
+    ).replace(".json", ".zip")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_filename}"',
+        },
+    )
 
 
 def _collect_process_overrides(
