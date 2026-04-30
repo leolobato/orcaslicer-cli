@@ -427,6 +427,99 @@ function filamentList() {
       window.location.hash = "#/filaments?filter=user";
       setTimeout(() => window.dispatchEvent(new Event("machine-filter-changed")), 50);
     }),
+    exporter: {
+      open: false,
+      shape: "flattened",
+      items: [],
+      selected: [],
+      busy: false,
+      skippedNotice: "",
+
+      get selectedCount() { return this.selected.length; },
+
+      get downloadLabel() {
+        if (this.shape === "thin" && this.selected.length === 1) return "Download JSON";
+        return "Download zip";
+      },
+
+      show(filaments) {
+        this.items = filaments.slice();
+        this.selected = filaments.map(f => f.setting_id);
+        this.shape = "flattened";
+        this.skippedNotice = "";
+        this.open = true;
+      },
+
+      close() { this.open = false; this.busy = false; },
+
+      selectAll() { this.selected = this.items.map(f => f.setting_id); },
+      deselectAll() { this.selected = []; },
+
+      async download() {
+        if (this.selected.length === 0 || this.busy) return;
+        this.busy = true;
+        this.skippedNotice = "";
+        try {
+          let response, suggestedFilename;
+          if (this.shape === "thin" && this.selected.length === 1) {
+            const sid = this.selected[0];
+            response = await fetch(
+              `/profiles/filaments/${encodeURIComponent(sid)}/export?shape=thin`,
+            );
+            suggestedFilename = this._filenameFromResponse(response, `${sid}.json`);
+          } else {
+            response = await fetch("/profiles/filaments/export-batch", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                setting_ids: this.selected,
+                shape: this.shape,
+              }),
+            });
+            suggestedFilename = this._filenameFromResponse(response, "user-filaments.zip");
+          }
+
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: response.statusText }));
+            this.skippedNotice = `Export failed: ${err.error || response.statusText}`;
+            return;
+          }
+
+          const skippedHeader = response.headers.get("X-Export-Skipped");
+          if (skippedHeader) {
+            const skipped = JSON.parse(skippedHeader);
+            const names = Object.keys(skipped);
+            if (names.length > 0) {
+              this.skippedNotice = `Skipped ${names.length}: ${names.join(", ")}`;
+            }
+          }
+
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = suggestedFilename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          this.skippedNotice = `Export failed: ${e.message}`;
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      _filenameFromResponse(response, fallback) {
+        const cd = response.headers.get("Content-Disposition") || "";
+        const match = cd.match(/filename="?([^"]+)"?/);
+        return match ? match[1] : fallback;
+      },
+    },
+
+    get userFilaments() {
+      return this.items.filter(f => f.vendor === "User");
+    },
 
     get filteredItems() {
       const q = this.search.toLowerCase().trim();
