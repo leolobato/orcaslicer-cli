@@ -307,6 +307,108 @@ class UnsafeSettingIdTests(_ProfileEndpointTestBase):
         return Path(self.tempdir)
 
 
+class FilamentImportRoundTripTests(_ProfileEndpointTestBase):
+    """End-to-end coverage for the deferred-flattening contract.
+
+    Two cases worth pinning down:
+
+    1. Thin GUI export → POST → listing reflects parent-inherited values.
+       This is the headline behavior the refactor exists to enable.
+    2. Legacy flattened user profile → reload → listing still works.
+       Previously-imported user files (where the materializer DID merge
+       the parent into the saved JSON) live on user disks and must keep
+       working without migration.
+    """
+
+    def test_thin_export_round_trip_resolves_parent_values(self) -> None:
+        body = {
+            "name": "Round Trip PLA @BBL A1M",
+            "inherits": "Bambu PLA Basic @BBL A1M",
+            "from": "User",
+            "nozzle_temperature": ["222"],
+        }
+        save = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(save.status_code, 201)
+        setting_id = save.json()["setting_id"]
+
+        # On-disk file is the raw thin form — `inherits` preserved,
+        # parent fields NOT merged.
+        on_disk = json.loads((self.user_dir / f"{setting_id}.json").read_text())
+        self.assertEqual(on_disk["inherits"], "Bambu PLA Basic @BBL A1M")
+        self.assertNotIn("filament_type", on_disk)
+        self.assertNotIn("compatible_printers", on_disk)
+
+        # Listing exposes inherited values resolved at read time.
+        listing = self.client.get("/profiles/filaments").json()
+        entry = next((p for p in listing if p["setting_id"] == setting_id), None)
+        self.assertIsNotNone(entry, f"expected {setting_id} in listing")
+        self.assertEqual(entry["filament_type"], "PLA")
+        self.assertEqual(entry["name"], "Round Trip PLA @BBL A1M")
+        self.assertIn("GM020", entry["compatible_printers"])
+
+        # Detail endpoint returns the fully merged form.
+        detail = self.client.get(f"/profiles/filaments/{setting_id}").json()
+        resolved = detail["resolved"]
+        self.assertEqual(resolved.get("nozzle_temperature"), ["222"])
+        self.assertEqual(resolved.get("filament_type"), ["PLA"])
+
+    def test_flattened_legacy_user_profile_still_loads(self) -> None:
+        """A previously-imported flat user profile must still be listed.
+
+        Simulates a file written by the OLD materializer (before this
+        refactor): no `inherits`, with parent values merged in. No
+        migration is performed, so the file must continue to load.
+        """
+        legacy_setting_id = "Legacy Flat PLA"
+        legacy_payload = {
+            "name": "Legacy Flat PLA",
+            "setting_id": legacy_setting_id,
+            "instantiation": "true",
+            "from": "User",
+            "type": "filament",
+            "filament_id": "LEGFL01",
+            "filament_type": ["PLA"],
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            "nozzle_temperature": ["215"],
+        }
+        legacy_path = self.user_dir / f"{legacy_setting_id}.json"
+        legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+        # Reload picks up the file without going through the import path.
+        self.client.post("/profiles/reload")
+
+        listing = self.client.get("/profiles/filaments").json()
+        entry = next(
+            (p for p in listing if p["setting_id"] == legacy_setting_id),
+            None,
+        )
+        self.assertIsNotNone(entry, "legacy flat profile dropped from listing")
+        self.assertEqual(entry["filament_type"], "PLA")
+        self.assertEqual(entry["filament_id"], "LEGFL01")
+        self.assertEqual(entry["name"], "Legacy Flat PLA")
+
+    def test_thin_process_round_trip_resolves_parent_values(self) -> None:
+        body = {
+            "name": "Round Trip Process",
+            "inherits": "0.20mm Standard @BBL A1M",
+            "from": "User",
+            "outer_wall_speed": ["180"],
+        }
+        save = self.client.post("/profiles/processes", json=body)
+        self.assertEqual(save.status_code, 201)
+        setting_id = save.json()["setting_id"]
+
+        on_disk = json.loads((self.user_dir / f"{setting_id}.json").read_text())
+        self.assertEqual(on_disk["inherits"], "0.20mm Standard @BBL A1M")
+        self.assertNotIn("layer_height", on_disk)
+
+        detail = self.client.get(f"/profiles/processes/{setting_id}").json()
+        resolved = detail["resolved"]
+        self.assertEqual(resolved.get("outer_wall_speed"), ["180"])
+        self.assertEqual(resolved.get("layer_height"), ["0.2"])
+        self.assertEqual(resolved.get("inner_wall_speed"), ["300"])
+
+
 class FilamentImportResponseDerivedFieldsTests(_ProfileEndpointTestBase):
     """Thin filament imports inherit `filament_type` etc. from their parent.
 
