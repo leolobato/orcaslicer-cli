@@ -922,6 +922,126 @@ def _printer_variant_count(printer_name: str) -> int:
     return 1
 
 
+# Filament keys whose value is a per-extruder-variant list in OrcaSlicer's
+# GUI user filament shape. Derived from `app/normalize.py`'s _DEFAULTS set
+# (the canonical per-filament-vector set the slicer normalizes) plus the
+# additional per-variant keys observed in working GUI-native exports
+# (temperatures, retraction, fan, scarf seam, cooling, plate temps).
+#
+# This list is intentionally explicit rather than dynamic: per-variant
+# detection from the resolved profile alone is unreliable because some
+# length-1 list keys are NOT per-variant (e.g. compatible_printers,
+# filament_settings_id).
+_FILAMENT_PER_VARIANT_KEYS: frozenset[str] = frozenset({
+    # From normalize._DEFAULTS (the slicer's per-filament-vector set):
+    "activate_chamber_temp_control",
+    "adaptive_pressure_advance",
+    "adaptive_pressure_advance_bridges",
+    "adaptive_pressure_advance_model",
+    "adaptive_pressure_advance_overhangs",
+    "default_filament_colour",
+    "dont_slow_down_outer_wall",
+    "enable_overhang_bridge_fan",
+    "enable_pressure_advance",
+    "filament_colour",
+    "filament_cooling_final_speed",
+    "filament_cooling_initial_speed",
+    "filament_cooling_moves",
+    "filament_extruder_variant",
+    "filament_ironing_flow",
+    "filament_ironing_inset",
+    "filament_ironing_spacing",
+    "filament_ironing_speed",
+    "filament_loading_speed",
+    "filament_loading_speed_start",
+    "filament_map",
+    "filament_multitool_ramming",
+    "filament_multitool_ramming_flow",
+    "filament_multitool_ramming_volume",
+    "filament_notes",
+    "filament_ramming_parameters",
+    "filament_shrinkage_compensation_z",
+    "filament_stamping_distance",
+    "filament_stamping_loading_speed",
+    "filament_toolchange_delay",
+    "filament_unloading_speed",
+    "filament_unloading_speed_start",
+    "idle_temperature",
+    "internal_bridge_fan_speed",
+    "ironing_fan_speed",
+    "pressure_advance",
+    "support_material_interface_fan_speed",
+    "textured_cool_plate_temp",
+    "textured_cool_plate_temp_initial_layer",
+    # Additional per-variant keys observed in working GUI-native exports:
+    "nozzle_temperature",
+    "nozzle_temperature_initial_layer",
+    "filament_max_volumetric_speed",
+    "filament_flow_ratio",
+    "filament_flush_temp",
+    "filament_flush_volumetric_speed",
+    "filament_long_retractions_when_cut",
+    "filament_retract_before_wipe",
+    "filament_retract_lift_above",
+    "filament_retract_lift_below",
+    "filament_retract_lift_enforce",
+    "filament_retract_restart_extra",
+    "filament_retract_when_changing_layer",
+    "filament_retraction_distances_when_cut",
+    "filament_retraction_length",
+    "filament_retraction_minimum_travel",
+    "filament_retraction_speed",
+    "filament_deretraction_speed",
+    "filament_wipe",
+    "filament_wipe_distance",
+    "filament_z_hop",
+    "filament_z_hop_types",
+    "long_retractions_when_ec",
+    "retraction_distances_when_ec",
+    "filament_adaptive_volumetric_speed",
+    "volumetric_speed_coefficients",
+})
+
+
+def _pad_per_variant_keys(
+    profile: dict[str, Any],
+    *,
+    variant_count: int,
+    variant_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Pad every per-variant list key in `profile` to `variant_count`.
+
+    For each key in `_FILAMENT_PER_VARIANT_KEYS` whose current value is
+    a list shorter than `variant_count`, extend it by repeating the
+    last value (or replicating the only value if length 1). If the
+    list already meets or exceeds the target length, leave it.
+
+    `filament_extruder_variant` is special-cased: its slot values are
+    variant *labels* (e.g. "Direct Drive Standard"), so when
+    `variant_labels` is provided and the key needs padding, the
+    label list is substituted whole rather than replicated.
+
+    Mutates `profile` in place and returns it.
+    """
+    if variant_count <= 1:
+        return profile
+
+    for key in _FILAMENT_PER_VARIANT_KEYS:
+        value = profile.get(key)
+        if not isinstance(value, list):
+            continue
+        if len(value) >= variant_count:
+            continue
+        if key == "filament_extruder_variant" and variant_labels is not None:
+            profile[key] = list(variant_labels[:variant_count])
+            continue
+        # Pad by repeating the last value to reach variant_count.
+        last = value[-1] if value else ""
+        padded = list(value) + [last] * (variant_count - len(value))
+        profile[key] = padded
+    return profile
+
+
 def _resolve_by_slug(category: str, slug: str) -> tuple[str, dict[str, Any]]:
     """Look up and resolve a profile by setting_id and category.
 

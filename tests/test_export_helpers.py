@@ -123,5 +123,70 @@ class PrinterVariantCountTests(unittest.TestCase):
         self.assertEqual(profiles._printer_variant_count("Plain Printer"), 1)
 
 
+class PadPerVariantKeysTests(unittest.TestCase):
+    def test_no_padding_when_variant_count_is_one(self):
+        profile = {
+            "nozzle_temperature": ["210"],
+            "compatible_printers": ["Printer A"],
+        }
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=1)
+        # Length-1 list stays length-1 when target is 1.
+        self.assertEqual(out["nozzle_temperature"], ["210"])
+        # Non-per-variant keys untouched.
+        self.assertEqual(out["compatible_printers"], ["Printer A"])
+
+    def test_pads_known_per_variant_key_to_target_length(self):
+        profile = {"nozzle_temperature": ["210"]}
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
+        self.assertEqual(out["nozzle_temperature"], ["210", "210"])
+
+    def test_does_not_pad_compatible_printers(self):
+        profile = {
+            "compatible_printers": ["Bambu Lab A1 mini 0.4 nozzle"],
+            "nozzle_temperature": ["210"],
+        }
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
+        self.assertEqual(out["compatible_printers"], ["Bambu Lab A1 mini 0.4 nozzle"])
+        self.assertEqual(out["nozzle_temperature"], ["210", "210"])
+
+    def test_does_not_pad_unknown_keys(self):
+        profile = {"some_random_key": ["a"]}
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
+        self.assertEqual(out["some_random_key"], ["a"])
+
+    def test_leaves_already_padded_keys_alone(self):
+        profile = {"nozzle_temperature": ["210", "215"]}
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
+        self.assertEqual(out["nozzle_temperature"], ["210", "215"])
+
+    def test_extends_when_existing_length_below_target(self):
+        # Length 2 input, target 3 — pad with last existing value.
+        profile = {"nozzle_temperature": ["210", "215"]}
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=3)
+        self.assertEqual(out["nozzle_temperature"], ["210", "215", "215"])
+
+    def test_overrides_filament_extruder_variant_when_padded(self):
+        # filament_extruder_variant is special: its slot values are the
+        # variant *labels*, not a replicable scalar. We replace it with
+        # the printer's variant labels passed in.
+        profile = {"filament_extruder_variant": ["Direct Drive Standard"]}
+        out = profiles._pad_per_variant_keys(
+            dict(profile),
+            variant_count=2,
+            variant_labels=["Direct Drive Standard", "Direct Drive High Flow"],
+        )
+        self.assertEqual(
+            out["filament_extruder_variant"],
+            ["Direct Drive Standard", "Direct Drive High Flow"],
+        )
+
+    def test_skips_non_list_values(self):
+        # filament_id is a scalar string — must not be wrapped/padded.
+        profile = {"filament_id": "P1234567", "nozzle_temperature": ["210"]}
+        out = profiles._pad_per_variant_keys(dict(profile), variant_count=2)
+        self.assertEqual(out["filament_id"], "P1234567")
+        self.assertEqual(out["nozzle_temperature"], ["210", "210"])
+
+
 if __name__ == "__main__":
     unittest.main()
