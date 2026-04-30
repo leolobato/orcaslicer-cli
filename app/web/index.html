@@ -381,10 +381,10 @@
                 + Import
               </button>
               <button type="button"
-                      class="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm hover:bg-slate-700 disabled:opacity-50"
+                      class="inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-sm text-accent-light transition-colors hover:bg-accent-faint disabled:opacity-50"
                       :disabled="userFilaments.length === 0"
                       @click="exporter.show(userFilaments)">
-                Export...
+                + Export...
               </button>
             </div>
           </div>
@@ -579,9 +579,13 @@
           <!-- Export modal -->
           <div x-show="exporter.open"
                x-cloak
-               class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+               class="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm px-4"
+               @keydown.escape.window="exporter.close()">
             <div class="w-full max-w-xl rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-xl">
-              <h2 class="text-lg font-semibold">Export user filaments</h2>
+              <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-semibold">Export user filaments</h2>
+                <button class="text-slate-400 hover:text-slate-200" @click="exporter.close()" aria-label="Close">&times;</button>
+              </div>
               <p class="mt-1 text-sm text-slate-400">
                 Download your custom filaments to import into OrcaSlicer's GUI.
               </p>
