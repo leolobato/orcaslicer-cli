@@ -58,8 +58,18 @@ from .slicer import (
 )
 
 
+USER_PROFILE_CATEGORIES: tuple[str, ...] = ("filament", "process", "machine")
+
+
+def _ensure_user_profile_dirs() -> None:
+    """Create the typed user-profile subfolders if they don't exist."""
+    for category in USER_PROFILE_CATEGORIES:
+        os.makedirs(os.path.join(USER_PROFILES_DIR, category), exist_ok=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ensure_user_profile_dirs()
     load_all_profiles()
     yield
 

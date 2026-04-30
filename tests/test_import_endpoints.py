@@ -534,6 +534,30 @@ class TypedUserProfileLayoutTests(_ProfileEndpointTestBase):
             json.loads(typed.read_text())["nozzle_temperature"], ["230"]
         )
 
+    def test_ensure_user_profile_dirs_creates_typed_subfolders(self) -> None:
+        """The startup hook materializes the three typed subfolders."""
+        # Wipe whatever the test base might have created, then run the helper.
+        for category in main.USER_PROFILE_CATEGORIES:
+            shutil.rmtree(self.user_dir / category, ignore_errors=True)
+
+        main._ensure_user_profile_dirs()
+
+        for category in main.USER_PROFILE_CATEGORIES:
+            self.assertTrue(
+                (self.user_dir / category).is_dir(),
+                f"expected {category}/ to exist after startup",
+            )
+
+    def test_ensure_user_profile_dirs_is_idempotent(self) -> None:
+        """Subsequent calls leave existing files in the subfolders untouched."""
+        marker = self.user_dir / "filament" / "marker.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{}", encoding="utf-8")
+
+        main._ensure_user_profile_dirs()
+
+        self.assertTrue(marker.is_file())
+
     def test_delete_finds_legacy_root_file(self) -> None:
         legacy_setting_id = "Legacy Delete Target"
         legacy_path = self.user_dir / f"{legacy_setting_id}.json"
