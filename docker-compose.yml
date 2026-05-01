@@ -1,6 +1,13 @@
 services:
   orcaslicer-cli:
-    build: .
+    build:
+      context: .
+      args:
+        # Forward the host's $GIT_COMMIT into the build so the running
+        # container logs which revision it was built from. Set it before
+        # invoking compose, e.g.:
+        #   GIT_COMMIT=$(git rev-parse HEAD) docker compose up --build
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     ports:
       - "8000:8000"
     volumes:

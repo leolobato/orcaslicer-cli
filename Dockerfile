@@ -79,5 +79,13 @@ COPY app/ app/
 COPY tests/ tests/
 COPY conftest.py .
 
+# Bake the source commit hash into the image so the running container can
+# log which revision it was built from. Pass via
+# ``--build-arg GIT_COMMIT=$(git rev-parse HEAD)`` (docker-compose.yml wires
+# this from the host's ``$GIT_COMMIT`` env var). Defaults to ``"unknown"``
+# so plain ``docker build`` still works.
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
