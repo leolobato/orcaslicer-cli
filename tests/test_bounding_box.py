@@ -128,6 +128,52 @@ class BoundingBoxModifierExclusionTests(unittest.TestCase):
         self.assertEqual(bbox.size_x, 25)
 
 
+class BoundingBoxTransformCompositionTests(unittest.TestCase):
+    """The build item's transform places the parent object in world space; a
+    component's transform places its mesh inside the parent's frame. So a
+    vertex must flow ``local -> component -> build`` — meaning the combined
+    transform is "component first, then build". A latent bug applied them
+    in the reverse order, which only manifested when both transforms were
+    non-identity (e.g. the user-reported benchy with a rotated component
+    and a build translation centering it on the bed).
+    """
+
+    def test_component_rotation_does_not_flip_build_translation(self) -> None:
+        # Symmetric vertices around the local origin — the bbox center is
+        # invariant under rotation, so it must land exactly at the build
+        # translation.
+        verts = [(-1, -1, 0), (1, -1, 0), (0, 1, 0)]
+        # Component rotates 90° around Z.
+        comp_t = "0 -1 0 1 0 0 0 0 1 0 0 0"
+        # Build item translates by (90, 90, 24) — A1 Mini bed center.
+        build_t = "1 0 0 0 1 0 0 0 1 90 90 24"
+
+        model_xml = (
+            f'<?xml version="1.0"?>'
+            f"<model {_NS_DECL}>"
+            "<resources>"
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+            '<object id="10" type="model"><components>'
+            f'<component objectid="1" transform="{comp_t}"/>'
+            "</components></object>"
+            "</resources>"
+            f'<build><item objectid="10" transform="{build_t}"/></build>'
+            "</model>"
+        )
+
+        bbox = get_bounding_box(_make_3mf(model_xml, model_settings_xml=None))
+
+        center_x = (bbox.min_x + bbox.max_x) / 2
+        center_y = (bbox.min_y + bbox.max_y) / 2
+        center_z = (bbox.min_z + bbox.max_z) / 2
+
+        # With the wrong composition order, the rotation would have rotated
+        # the build translation vector — flipping Y to -90 (off-bed).
+        self.assertAlmostEqual(center_x, 90.0, places=4)
+        self.assertAlmostEqual(center_y, 90.0, places=4)
+        self.assertAlmostEqual(center_z, 24.0, places=4)
+
+
 class BoundingBoxRealBenchyTests(unittest.TestCase):
     """Regression test for the user-reported benchy 3MF — the file lives outside
     this repo, so the test is skipped when the fixture is unavailable.
@@ -149,6 +195,14 @@ class BoundingBoxRealBenchyTests(unittest.TestCase):
         self.assertLess(bbox.size_x, 70)
         self.assertLess(bbox.size_y, 70)
         self.assertLess(bbox.size_z, 60)
+        # The user centered the model on the A1 Mini bed (180×180); the build
+        # translation in the 3MF is roughly (90.5, 86.8). Before the chain-order
+        # fix, the rotated component pushed Y to ~-90 and the model was
+        # reported off-bed.
+        center_x = (bbox.min_x + bbox.max_x) / 2
+        center_y = (bbox.min_y + bbox.max_y) / 2
+        self.assertAlmostEqual(center_x, 90, delta=5)
+        self.assertAlmostEqual(center_y, 90, delta=5)
 
 
 if __name__ == "__main__":

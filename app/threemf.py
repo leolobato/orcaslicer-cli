@@ -102,7 +102,10 @@ def _collect_vertices_recursive(
         if printable_objectids is not None and comp_obj_id not in printable_objectids:
             continue
         comp_transform = _parse_transform(comp.get("transform"))
-        combined = _chain_transforms(transform, comp_transform)
+        # Vertex flows: local space → component transform → parent's build
+        # transform → world. So the combined map is "comp first, then build" —
+        # `_chain_transforms(comp, build)`, NOT the other way around.
+        combined = _chain_transforms(comp_transform, transform)
         path = comp.get(f"{{{ns_p}}}path")
 
         if path and zf:
