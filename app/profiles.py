@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from typing import Any
 
-from .config import PROFILES_DIR, USER_PROFILES_DIR
+from .config import ORCA_RESOURCES_DIR, PROFILES_DIR, USER_PROFILES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -711,6 +711,61 @@ def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
     return profiles, type_map
 
 
+def _write_bbl_machine_full_shims() -> None:
+    """Materialize ``BBL/machine_full/{printer_model}.json`` shim files.
+
+    OrcaSlicer's CLI reads ``printer_model_id`` (e.g. ``"N1"`` for the A1 Mini)
+    from ``resources_dir()/profiles/BBL/machine_full/{printer_model}.json`` at
+    slice time and stamps it onto ``slice_info.config`` — see ``OrcaSlicer.cpp``
+    (``load_key_values_from_json`` lookups around lines 1948/2205/2286). The
+    directory is populated by the GUI on first run but is absent from the
+    AppImage we extract, so the lookup silently misses and we end up with
+    ``printer_model_id=""``. We mirror what the GUI would write by emitting a
+    minimal ``{"model_id": ...}`` shim per BBL parent machine profile (those
+    that declare ``model_id`` and have no ``inherits``). Targets
+    ``ORCA_RESOURCES_DIR`` — the binary's resources root — not ``PROFILES_DIR``,
+    since those are separate copies in the Docker image. Idempotent: skips
+    files whose content already matches.
+    """
+    bbl_dir = os.path.join(ORCA_RESOURCES_DIR, "profiles", "BBL")
+    if not os.path.isdir(bbl_dir):
+        return
+    target_dir = os.path.join(bbl_dir, "machine_full")
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Cannot create %s: %s", target_dir, exc)
+        return
+
+    written = 0
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != "machine":
+            continue
+        if _vendor_map.get(profile_key) != "BBL":
+            continue
+        if raw.get("inherits"):
+            continue
+        model_id = raw.get("model_id")
+        name = raw.get("name")
+        if not model_id or not name:
+            continue
+        path = os.path.join(target_dir, f"{name}.json")
+        payload = {"model_id": str(model_id)}
+        try:
+            if os.path.isfile(path):
+                with open(path) as f:
+                    if json.load(f) == payload:
+                        continue
+            with open(path, "w") as f:
+                json.dump(payload, f)
+            written += 1
+        except OSError as exc:
+            logger.warning("Failed to write %s: %s", path, exc)
+
+    if written:
+        logger.info("Wrote %d BBL machine_full shim(s)", written)
+
+
 def load_all_profiles() -> dict[str, int]:
     """Read all vendor profile JSONs into memory.
 
@@ -790,6 +845,8 @@ def load_all_profiles() -> dict[str, int]:
 
     # Load user-provided profiles from USER_PROFILES_DIR
     user_count = _load_user_profiles()
+
+    _write_bbl_machine_full_shims()
 
     counts: dict[str, int] = {}
     for cat in _type_map.values():
