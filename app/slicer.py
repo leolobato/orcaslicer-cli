@@ -1066,6 +1066,73 @@ def _prepare_slice(
             e["key"] for e in machine_transferred
         }
 
+    # `wipe_tower_x` / `wipe_tower_y` are stored in ``project_settings.config``
+    # as plate-indexed vectors (one entry per plate) and read by OrcaSlicer
+    # via ``get_at(plate_index)`` — see ``Print.cpp:984/2282/2439/2740``,
+    # ``PartPlate.cpp:2129``. They're NOT listed in the smart-overlay
+    # fingerprint (``different_settings_to_system``), so the overlay above
+    # misses them. After ``extract_plate`` collapses the project to one plate,
+    # the slicer reads index 0 and falls back to OrcaSlicer's C++ defaults
+    # (``{15., 220.}`` from ``PrintConfig.cpp``) — which lands the prime
+    # tower 40 mm above the back edge on a 180×180 A1 mini bed and trips
+    # ``CLI_GCODE_PATH_IN_UNPRINTABLE_AREA`` on any multi-filament slice.
+    plate_idx = max(0, plate - 1)
+    plate_indexed_overlaid: list[dict[str, Any]] = []
+    for key in ("wipe_tower_x", "wipe_tower_y"):
+        src = threemf_settings.get(key)
+        if not isinstance(src, list) or not src:
+            continue
+        idx = plate_idx if plate_idx < len(src) else 0
+        new_val = [src[idx]]
+        original = process_profile.get(key)
+        if original == new_val:
+            continue
+        process_profile[key] = new_val
+        plate_indexed_overlaid.append(
+            {"key": key, "value": new_val, "original": original},
+        )
+    if plate_indexed_overlaid:
+        logger.info(
+            "Transferred %d plate-indexed setting(s) from 3MF (plate %d): %s",
+            len(plate_indexed_overlaid), plate,
+            ", ".join(e["key"] for e in plate_indexed_overlaid),
+        )
+        settings_transfer.customized_keys |= {
+            e["key"] for e in plate_indexed_overlaid
+        }
+
+    # Project-level flush settings (``s_project_options`` in
+    # ``PresetBundle.cpp:37-52``) live in ``project_settings.config`` but are
+    # NOT listed in ``different_settings_to_system`` either, so the smart
+    # overlay above misses them too. The CLI defaults (``flush_multiplier =
+    # 0.3``, uniform 108-mm³ matrix) under-flush badly compared to the
+    # filament-pair-specific values the GUI authored — for a real
+    # multi-color print this means the next color bleeds the previous one.
+    # Lift the source's values straight onto the process profile.
+    project_overlaid: list[dict[str, Any]] = []
+    for key in (
+        "flush_multiplier", "flush_volumes_vector", "flush_volumes_matrix",
+    ):
+        if key not in threemf_settings:
+            continue
+        new_val = threemf_settings[key]
+        original = process_profile.get(key)
+        if original == new_val:
+            continue
+        process_profile[key] = new_val
+        project_overlaid.append(
+            {"key": key, "value": new_val, "original": original},
+        )
+    if project_overlaid:
+        logger.info(
+            "Transferred %d project-level setting(s) from 3MF: %s",
+            len(project_overlaid),
+            ", ".join(e["key"] for e in project_overlaid),
+        )
+        settings_transfer.customized_keys |= {
+            e["key"] for e in project_overlaid
+        }
+
     # Request value takes priority; otherwise preserve 3MF-selected bed type.
     effective_plate_type = plate_type
     if not effective_plate_type:

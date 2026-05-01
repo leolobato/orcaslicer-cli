@@ -540,6 +540,219 @@ class ExtractPlatePreservesPaintAttributesTests(unittest.TestCase):
         self.assertEqual(set(triangles[0].keys()), {"v1", "v2", "v3"})
 
 
+class ExtractPlatePreservesPlateMetadataTests(unittest.TestCase):
+    """Plate-level state (``bed_type``, ``first_layer_print_sequence``,
+    ``filament_map``, …) lives in ``<plate>`` metadata of
+    ``model_settings.config`` and is read by ``bbs_3mf.cpp`` per plate.
+    Rebuilding a single-plate 3MF must carry it over from the source plate or
+    the slicer falls back to defaults that may not match what the GUI did."""
+
+    @staticmethod
+    def _plate_metadata_in(plate_3mf: bytes) -> dict[str, str]:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(io.BytesIO(plate_3mf)) as zf:
+            root = ET.fromstring(
+                zf.read("Metadata/model_settings.config").decode(),
+            )
+        plate = root.find("plate")
+        assert plate is not None
+        return {
+            m.get("key") or "": m.get("value") or ""
+            for m in plate.findall("metadata")
+        }
+
+    def test_per_plate_state_keys_round_trip(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        # A plate carrying state the GUI may have configured (bed type, custom
+        # print sequence, filament map). All of these must end up on the
+        # rebuilt plate.
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate>'
+            '<metadata key="plater_id" value="1"/>'
+            '<metadata key="plater_name" value="Plate 1"/>'
+            '<metadata key="locked" value="false"/>'
+            '<metadata key="bed_type" value="Textured PEI Plate"/>'
+            '<metadata key="first_layer_print_sequence" value="2,1,3"/>'
+            '<metadata key="filament_map" value="1,2,1"/>'
+            '<metadata key="filament_map_mode" value="Manual"/>'
+            '<metadata key="gcode_file" value="Metadata/plate_1.gcode"/>'
+            '<metadata key="thumbnail_file" value="Metadata/plate_1.png"/>'
+            '<model_instance>'
+            '<metadata key="object_id" value="1"/>'
+            "</model_instance>"
+            "</plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        meta = self._plate_metadata_in(out)
+        # State keys preserved from the source plate.
+        self.assertEqual(meta.get("bed_type"), "Textured PEI Plate")
+        self.assertEqual(meta.get("first_layer_print_sequence"), "2,1,3")
+        self.assertEqual(meta.get("filament_map"), "1,2,1")
+        self.assertEqual(meta.get("filament_map_mode"), "Manual")
+        # Identity / file-ref keys NOT carried over (we rewrite plater_id to
+        # 1, force locked=false, blank plater_name, and the source's gcode /
+        # thumbnail paths reference files we don't copy).
+        self.assertEqual(meta.get("plater_id"), "1")
+        self.assertEqual(meta.get("locked"), "false")
+        self.assertNotIn("gcode_file", meta)
+        self.assertNotIn("thumbnail_file", meta)
+
+
+class ExtractPlateStampsBBLApplicationTests(unittest.TestCase):
+    """OrcaSlicer's ``bbs_3mf.cpp:3754-3764`` only sets ``m_is_bbl_3mf=true``
+    when the model XML carries ``<metadata name="Application">`` whose value
+    starts with ``BambuStudio-`` or ``OrcaSlicer-``. Without that tag,
+    ``OrcaSlicer.cpp:1349/1561`` keeps ``need_arrange=true`` and auto-arrange
+    re-centers the model, throwing away the plate-local layout and pushing
+    the model into the wipe-tower's reserved corner."""
+
+    def test_rebuilt_model_carries_orca_application_metadata(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        with zipfile.ZipFile(io.BytesIO(out)) as zf:
+            data = zf.read("3D/3dmodel.model").decode()
+        # The Application tag MUST start with BambuStudio- or OrcaSlicer-,
+        # otherwise OrcaSlicer treats the file as foreign-vendor and runs
+        # auto-arrange.
+        import re as _re
+        m = _re.search(
+            r'<metadata\s+name="Application">([^<]+)</metadata>', data,
+        )
+        self.assertIsNotNone(m, "Application metadata missing")
+        self.assertRegex(m.group(1), r"^(BambuStudio|OrcaSlicer)-")
+
+
+class ExtractPlateCarriesProjectSettingsTests(unittest.TestCase):
+    """Tagging the rebuilt 3MF as a BBL/Orca file (via the ``Application``
+    metadata) routes OrcaSlicer's loader into the BBL branch at
+    ``OrcaSlicer.cpp:1552-1701``. That branch dereferences
+    ``printer_settings_id`` / ``print_settings_id`` /
+    ``filament_settings_id`` / ``nozzle_diameter`` straight off the parsed
+    config without null-checks, so the rebuilt 3MF must carry the source's
+    ``project_settings.config`` through or the slicer SIGSEGVs."""
+
+    def test_project_settings_config_is_carried_through(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+        # A minimal stand-in for the real project_settings.config — the
+        # carry-through should be byte-faithful so OrcaSlicer's loader sees
+        # exactly what the source authored.
+        ps = (
+            '{"printer_settings_id": "Bambu Lab A1 mini 0.4 nozzle",'
+            ' "print_settings_id": "0.20mm Standard @BBL A1M",'
+            ' "filament_settings_id": ["Bambu PLA Basic @BBL A1M"],'
+            ' "nozzle_diameter": ["0.4"]}'
+        )
+
+        # Build a 3MF that includes a project_settings.config sidecar.
+        buf = io.BytesIO()
+        ns_decl = (
+            'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+        )
+        model_xml = (
+            f'<?xml version="1.0"?><model {ns_decl}>'
+            f"<resources>{objects_xml}</resources>"
+            f"<build>{build_xml}</build></model>"
+        )
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("[Content_Types].xml", "")
+            zf.writestr("3D/3dmodel.model", model_xml)
+            zf.writestr("Metadata/model_settings.config", ms)
+            zf.writestr("Metadata/project_settings.config", ps)
+
+        out = extract_plate(buf.getvalue(), 90, 90)
+        self.assertIsNotNone(out)
+        with zipfile.ZipFile(io.BytesIO(out)) as zf:
+            names = set(zf.namelist())
+            self.assertIn("Metadata/project_settings.config", names)
+            self.assertEqual(
+                zf.read("Metadata/project_settings.config").decode(),
+                ps,
+            )
+
+    def test_no_project_settings_when_source_lacks_it(self) -> None:
+        # Synthetic 3MFs without the sidecar still produce a valid output
+        # — the output simply omits project_settings.config, matching the
+        # legacy behavior. Useful so tests for non-Bambu input keep working.
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        with zipfile.ZipFile(io.BytesIO(out)) as zf:
+            self.assertNotIn(
+                "Metadata/project_settings.config", zf.namelist(),
+            )
+
+
 class BoundingBoxRealBenchyTests(unittest.TestCase):
     """Regression test for the user-reported benchy 3MF — the file lives outside
     this repo, so the test is skipped when the fixture is unavailable.

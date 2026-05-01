@@ -2,6 +2,7 @@
 
 import io
 import logging
+import math
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -576,6 +577,105 @@ def _read_object_names(zf: zipfile.ZipFile) -> dict[str, str]:
     return names
 
 
+# OrcaSlicer arranges plates in a grid whose column count is
+# ``round(sqrt(N))``, rounded up when the square is non-perfect (see
+# ``compute_colum_count`` in ``PartPlate.hpp``). Plates step by
+# ``bed_size * (1 + LOGICAL_PART_PLATE_GAP)`` (gap = 1/5) — column index
+# advances +X, row index advances -Y (``compute_shape_position`` in
+# ``PartPlate.cpp``). Mirroring that formula here lets us recover the plate's
+# plater-coords origin from its 1-indexed plate id, which is needed to
+# convert the source's plater-space build transforms back into bed-relative
+# (plate-local) coordinates when collapsing to a single plate.
+_PLATE_GRID_GAP_FACTOR = 1.0 + 1.0 / 5.0
+
+
+def _compute_plate_origin(
+    plate_idx: int,
+    plate_count: int,
+    bed_w: float,
+    bed_h: float,
+) -> tuple[float, float]:
+    """Return the plater-coords origin of plate ``plate_idx`` (0-based).
+
+    Falls back to ``(0, 0)`` when the inputs are degenerate so a malformed
+    multi-plate 3MF still produces some output rather than crashing.
+    """
+    if plate_count <= 0 or bed_w <= 0 or bed_h <= 0:
+        return 0.0, 0.0
+    cols_f = math.sqrt(float(plate_count))
+    cols_round = round(cols_f)
+    cols = cols_round + 1 if cols_f > cols_round else cols_round
+    cols = max(1, cols)
+    row = plate_idx // cols
+    col = plate_idx % cols
+    stride_x = bed_w * _PLATE_GRID_GAP_FACTOR
+    stride_y = bed_h * _PLATE_GRID_GAP_FACTOR
+    return col * stride_x, -row * stride_y
+
+
+# Plate-level metadata in `model_settings.config` that we must NOT carry over
+# when rebuilding a single-plate 3MF: identity / file-reference keys whose
+# values either describe the source layout (and would mismatch our rebuilt
+# plate index of 1) or point at thumbnail/gcode files we are not copying. The
+# important plate-state keys (`bed_type`, `print_sequence`,
+# `first_layer_print_sequence`, `other_layers_print_sequence`, `spiral_mode`,
+# `filament_map_mode`, `filament_map`) DO get preserved — that's the whole
+# point of this carry-over: OrcaSlicer's CLI reads them off the rebuilt
+# `<plate>` element in `bbs_3mf.cpp` and applies them to the per-plate config.
+_PLATE_METADATA_DROP = frozenset({
+    "plater_id",
+    "plater_name",
+    "locked",
+    "gcode_file",
+    "thumbnail_file",
+    "thumbnail_no_light_file",
+    "top_file",
+    "pick_file",
+    "pattern_file",
+    "pattern_bbox_file",
+})
+
+
+def _read_plate_metadata(
+    zf: zipfile.ZipFile, plate_id: str,
+) -> list[tuple[str, str]]:
+    """Return ordered ``(key, value)`` pairs for the requested plate's metadata.
+
+    Skips identity keys we always rewrite (``plater_id``, ``locked``,
+    ``plater_name``) and stale file references (gcode/thumbnail paths that
+    name files in the source archive, not the rebuilt one). Per-plate state
+    keys like ``bed_type`` and the print-sequence overrides survive — these
+    are normally read by ``bbs_3mf.cpp:_handle_start_config_plater`` and
+    applied to ``PlateData::config``, but ``extract_plate`` rebuilt the plate
+    block from scratch and silently dropped them before this function existed.
+    """
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return []
+        raw = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(raw)
+    except (KeyError, ET.ParseError, UnicodeDecodeError):
+        return []
+
+    for plate in root.findall("plate"):
+        pid = ""
+        for meta in plate.findall("metadata"):
+            if meta.get("key") == "plater_id":
+                pid = meta.get("value") or ""
+                break
+        if pid != plate_id:
+            continue
+        preserved: list[tuple[str, str]] = []
+        for meta in plate.findall("metadata"):
+            key = meta.get("key") or ""
+            if not key or key in _PLATE_METADATA_DROP:
+                continue
+            value = meta.get("value") or ""
+            preserved.append((key, value))
+        return preserved
+    return []
+
+
 def _read_plate_instances(
     zf: zipfile.ZipFile, plate_id: str,
 ) -> list[dict[str, str]]:
@@ -628,8 +728,20 @@ def extract_plate(
     Each input build item becomes its own ``<object>`` in the output (with its
     original name + identify_id preserved when ``model_settings.config`` lists
     them), so OrcaSlicer's gcode emits real per-object label_object boundaries
-    instead of collapsing every part into a single ``"Model"`` blob. Vertices
-    are translated as a group so the union bounding box centers on the bed.
+    instead of collapsing every part into a single ``"Model"`` blob.
+
+    Vertex placement: source build transforms live in plater coordinates (the
+    multi-plate grid OrcaSlicer composes via ``compute_shape_position``); to
+    get bed-relative positions we subtract the plate's plater-coords origin.
+    This preserves the GUI's intended layout — e.g. when a plate's wipe tower
+    is configured at (15, 145) and the GUI placed the model offset to leave
+    that corner free, naive bed-centering would re-center the model on top of
+    that corner and trip ``CLI_GCODE_PATH_CONFLICTS`` on the slice.
+
+    When the source's build transforms don't align with our recovered grid
+    (cross-printer 3MFs, hand-crafted files), the plate-local bbox can land
+    off the bed. We fall back to bed-centering in that case so the slice
+    still has a chance to succeed (``--arrange 1`` will tidy it up later).
 
     Returns new 3MF bytes, or None if extraction fails.
     """
@@ -642,6 +754,7 @@ def extract_plate(
             plate_ids = _get_plate_object_ids(ms, plate_id)
             if not plate_ids:
                 return None
+            plate_count = len(re.findall(r'plater_id"\s+value="\d+"', ms))
 
             root_model_path = None
             for name in zf.namelist():
@@ -655,6 +768,23 @@ def extract_plate(
             printable_per_object = _read_printable_objectids(zf)
             object_names = _read_object_names(zf)
             plate_instances = _read_plate_instances(zf, plate_id)
+            plate_metadata = _read_plate_metadata(zf, plate_id)
+            # Carry the source's ``project_settings.config`` through. The
+            # rebuilt 3MF is stamped as a BBL/Orca file (see the
+            # ``Application`` metadata below), which routes OrcaSlicer's
+            # loader into the BBL branch at ``OrcaSlicer.cpp:1552-1701``;
+            # that branch dereferences ``printer_settings_id``,
+            # ``print_settings_id``, ``filament_settings_id``, and
+            # ``nozzle_diameter`` straight off the parsed config without
+            # null-checks (lines 1607-1611), so a missing sidecar means
+            # SIGSEGV. ``slicer.py``'s ``_sanitize_3mf`` then handles
+            # printer-identity rebranding and per-filament truncation on
+            # this same file before it reaches orca-slicer.
+            project_settings_bytes: bytes | None = None
+            if "Metadata/project_settings.config" in zf.namelist():
+                project_settings_bytes = zf.read(
+                    "Metadata/project_settings.config",
+                )
             items = _collect_mesh_data(
                 zf, root_model, plate_ids,
                 printable_per_object=printable_per_object,
@@ -663,15 +793,45 @@ def extract_plate(
         if not items:
             return None
 
-        # Bed-center the union of all object bounding boxes so relative
-        # positions between objects are preserved.
         all_xs = [v[0] for it in items for v in it["verts"]]
         all_ys = [v[1] for it in items for v in it["verts"]]
         all_zs = [v[2] for it in items for v in it["verts"]]
-        cx = (min(all_xs) + max(all_xs)) / 2
-        cy = (min(all_ys) + max(all_ys)) / 2
-        tx = bed_center_x - cx
-        ty = bed_center_y - cy
+        bed_w = bed_center_x * 2
+        bed_h = bed_center_y * 2
+
+        # Try plate-local positioning first: subtract the source plate's
+        # plater-coords origin from every vertex so the model lands wherever
+        # the GUI placed it on its bed.
+        plate_local_used = False
+        try:
+            plate_idx_zero = max(0, int(plate_id) - 1)
+        except ValueError:
+            plate_idx_zero = 0
+        if plate_count > 0:
+            ox, oy = _compute_plate_origin(
+                plate_idx_zero, plate_count, bed_w, bed_h,
+            )
+            local_min_x = min(all_xs) - ox
+            local_max_x = max(all_xs) - ox
+            local_min_y = min(all_ys) - oy
+            local_max_y = max(all_ys) - oy
+            tolerance = 5.0
+            if (
+                local_min_x >= -tolerance
+                and local_max_x <= bed_w + tolerance
+                and local_min_y >= -tolerance
+                and local_max_y <= bed_h + tolerance
+            ):
+                tx = -ox
+                ty = -oy
+                plate_local_used = True
+
+        if not plate_local_used:
+            # Fall back to bed-centering when plate-local would land off-bed.
+            cx = (min(all_xs) + max(all_xs)) / 2
+            cy = (min(all_ys) + max(all_ys)) / 2
+            tx = bed_center_x - cx
+            ty = bed_center_y - cy
         tz = -min(all_zs)
 
         # Walk plate's model_instance entries in order to assign identify_ids
@@ -751,10 +911,22 @@ def extract_plate(
                 ' transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n'
             )
 
+        # Tag the rebuilt model as a BBL/Orca 3MF. Without these metadata
+        # entries, ``bbs_3mf.cpp:3754-3764`` leaves ``m_is_bbl_3mf`` false,
+        # which makes ``OrcaSlicer.cpp`` keep the default ``need_arrange =
+        # true`` (line 1349, only flipped to false at line 1561 when
+        # ``is_bbl_3mf``). Auto-arrange then re-centers the model on the
+        # bed, throwing away the plate-local layout we just computed and
+        # potentially colliding with the wipe tower at its configured
+        # plate-3 position.
         model_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<model unit="millimeter" xml:lang="en-US"'
-            ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
+            ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
+            ' xmlns:BambuStudio='
+            '"http://schemas.bambulab.com/package/2021">\n'
+            ' <metadata name="Application">OrcaSlicer-2.3.2</metadata>\n'
+            ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n'
             " <resources>\n"
             + "".join(object_blocks)
             + " </resources>\n"
@@ -762,6 +934,12 @@ def extract_plate(
             + "".join(build_items)
             + " </build>\n"
             "</model>"
+        )
+
+        plate_meta_xml = "".join(
+            f'    <metadata key="{_xml_escape(k)}"'
+            f' value="{_xml_escape(v)}"/>\n'
+            for k, v in plate_metadata
         )
 
         ms_xml = (
@@ -772,6 +950,7 @@ def extract_plate(
             '    <metadata key="plater_id" value="1"/>\n'
             '    <metadata key="plater_name" value=""/>\n'
             '    <metadata key="locked" value="false"/>\n'
+            + plate_meta_xml
             + "".join(ms_instances)
             + "  </plate>\n"
             "  <assemble>\n"
@@ -805,6 +984,11 @@ def extract_plate(
         with zipfile.ZipFile(buf, "w") as zf_out:
             zf_out.writestr("3D/3dmodel.model", model_xml)
             zf_out.writestr("Metadata/model_settings.config", ms_xml)
+            if project_settings_bytes is not None:
+                zf_out.writestr(
+                    "Metadata/project_settings.config",
+                    project_settings_bytes,
+                )
             zf_out.writestr("[Content_Types].xml", ct_xml)
             zf_out.writestr("_rels/.rels", rels_xml)
 
