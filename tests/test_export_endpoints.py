@@ -127,7 +127,10 @@ class GetExportEndpointTests(_ExportTestBase):
         self.assertEqual(body["inherits"], "Bambu PLA Matte @BBL A1M")
         self.assertEqual(body["filament_id"], "Pfd5d97d")
 
-    def test_flattened_returns_zip_with_one_entry_per_printer(self):
+    def test_flattened_consolidates_compatible_printers_with_common_prefix(self):
+        # A1 mini (variant_count=1) and P1P (variant_count=2) land in
+        # different variant-count groups. Each group has exactly one printer,
+        # so no consolidation occurs — still 2 files.
         r = self.client.get(
             "/profiles/filaments/Eryone Matte Imported/export?shape=flattened",
         )
@@ -240,7 +243,8 @@ class PostBatchExportTests(_ExportTestBase):
         )
         self.assertEqual(r.status_code, 200)
         zf = zipfile.ZipFile(io.BytesIO(r.content))
-        # 2 filaments × 2 printers each = 4 entries.
+        # 2 filaments × 2 variant-count groups (A1 mini vc=1, P1P vc=2) = 4 entries.
+        # Each group has one printer so no consolidation within groups.
         self.assertEqual(len(zf.namelist()), 4)
 
     def test_default_shape_is_flattened(self):
@@ -250,7 +254,7 @@ class PostBatchExportTests(_ExportTestBase):
         )
         self.assertEqual(r.status_code, 200)
         zf = zipfile.ZipFile(io.BytesIO(r.content))
-        self.assertEqual(len(zf.namelist()), 2)  # 2 compatible printers
+        self.assertEqual(len(zf.namelist()), 2)  # 2 variant-count groups
 
     def test_partial_not_found_reported_in_header(self):
         r = self.client.post(
@@ -288,7 +292,7 @@ class PostBatchExportTests(_ExportTestBase):
         skipped = json.loads(r.headers["x-export-skipped"])
         self.assertEqual(skipped["Eryone Matte Imported"], "unresolved_chain")
         zf = zipfile.ZipFile(io.BytesIO(r.content))
-        # Other PLA × 2 printers = 2 entries; Eryone skipped.
+        # Other PLA × 2 variant-count groups = 2 entries; Eryone skipped.
         self.assertEqual(len(zf.namelist()), 2)
 
     def test_no_compatible_printers_reported(self):

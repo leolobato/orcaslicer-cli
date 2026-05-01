@@ -1050,33 +1050,91 @@ _FLATTEN_STRIP_KEYS = frozenset({
 })
 
 
-def _flatten_user_filament_for_printer(
+def _longest_word_prefix(strings: list[str]) -> str:
+    """Return the longest whitespace-token prefix shared by all strings.
+
+    Returns the empty string when fewer than 2 strings are given, or
+    when no tokens are shared at the start. Identical strings return
+    their full value (the caller decides how to handle that case).
+
+    Examples::
+
+        >>> _longest_word_prefix(["Bambu Lab A1 mini 0.4 nozzle",
+        ...                       "Bambu Lab A1 mini 0.6 nozzle"])
+        'Bambu Lab A1 mini'
+        >>> _longest_word_prefix(["Bambu Lab A1 mini 0.4 nozzle",
+        ...                       "Bambu Lab P1P 0.4 nozzle"])
+        'Bambu Lab'
+        >>> _longest_word_prefix(["Foo", "Bar"])
+        ''
+        >>> _longest_word_prefix(["Same", "Same"])
+        'Same'
+    """
+    if len(strings) < 2:
+        return ""
+    split = [s.split() for s in strings]
+    first = split[0]
+    prefix_tokens: list[str] = []
+    for i, token in enumerate(first):
+        if all(len(s) > i and s[i] == token for s in split[1:]):
+            prefix_tokens.append(token)
+        else:
+            break
+    return " ".join(prefix_tokens)
+
+
+def _flatten_user_filament_for_printers(
     resolved: dict[str, Any],
     *,
-    printer_name: str,
+    printers: list[str],
+    name_label: str,
+    variant_count: int,
+    variant_labels: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Reshape a resolved user filament dict for one target printer.
+    """Reshape a resolved user filament dict for one or more target printers
+    sharing the same extruder variant count.
 
-    Returns a new dict (does not mutate `resolved`) with the
-    OrcaSlicer-GUI-shaped flattened layout described in the spec.
-    The output is suitable for writing as a `.json` file under
-    `~/Library/Application Support/OrcaSlicer/user/<profile>/filament/base/`.
+    `printers` populates `compatible_printers`. Must be non-empty.
+    `name_label` is the @<label> suffix of the rewritten name (e.g.
+    "Bambu Lab A1 mini" or "Bambu Lab P1P 0.4 nozzle").
+    `variant_count` is the count to pad per-variant keys to.
+    `variant_labels` (optional) is the printer's variant-label list, used to
+    substitute `filament_extruder_variant` rather than replicate.
+
+    Returns a new dict (does not mutate `resolved`).
     """
     out = {k: v for k, v in resolved.items() if k not in _FLATTEN_STRIP_KEYS}
     out["inherits"] = ""
 
     alias = _filament_alias(str(resolved.get("name", "")))
-    new_name = f"{alias} @{printer_name}"
+    new_name = f"{alias} @{name_label}"
     out["name"] = new_name
     out["filament_settings_id"] = [new_name]
 
-    out["compatible_printers"] = [printer_name]
+    out["compatible_printers"] = list(printers)
     out.setdefault("compatible_printers_condition", "")
     out.setdefault("compatible_prints", [])
     out.setdefault("compatible_prints_condition", "")
 
-    # Look up the printer's variant labels and count via the indexed
-    # machine profile. Falls back to single-variant when unknown.
+    out = _pad_per_variant_keys(
+        out, variant_count=variant_count, variant_labels=variant_labels,
+    )
+    return out
+
+
+# Backward-compatible alias kept so any external callers or tests that
+# reference the old singular name still work during the transition.
+def _flatten_user_filament_for_printer(
+    resolved: dict[str, Any],
+    *,
+    printer_name: str,
+) -> dict[str, Any]:
+    """Deprecated: use `_flatten_user_filament_for_printers` instead.
+
+    Thin wrapper that delegates to the new plural function with a
+    single-printer list and looks up variant info from the machine
+    profile index.
+    """
     variant_count = _printer_variant_count(printer_name)
     variant_labels = None
     if variant_count > 1:
@@ -1090,11 +1148,13 @@ def _flatten_user_filament_for_printer(
                 labels = machine_resolved.get("printer_extruder_variant")
                 if isinstance(labels, list):
                     variant_labels = list(labels)
-
-    out = _pad_per_variant_keys(
-        out, variant_count=variant_count, variant_labels=variant_labels,
+    return _flatten_user_filament_for_printers(
+        resolved,
+        printers=[printer_name],
+        name_label=printer_name,
+        variant_count=variant_count,
+        variant_labels=variant_labels,
     )
-    return out
 
 
 def export_user_filament(
@@ -1164,13 +1224,63 @@ def export_user_filament(
             f"cannot flatten for GUI export"
         )
 
+    # Group compatible_printers by variant count.
+    groups: dict[int, list[str]] = {}
+    for p in printers:
+        vc = _printer_variant_count(p)
+        groups.setdefault(vc, []).append(p)
+
     alias = _filament_alias(name)
     entries: list[tuple[str, dict[str, Any]]] = []
-    for printer_name in printers:
-        flat = _flatten_user_filament_for_printer(resolved, printer_name=printer_name)
-        full_name = flat["name"]  # already "<alias> @<printer>"
-        filename = _safe_filename(full_name, fallback=alias or setting_id)
-        entries.append((filename, flat))
+    for variant_count in sorted(groups.keys()):
+        group_printers = groups[variant_count]
+
+        # Look up variant labels via the FIRST printer in the group (all
+        # printers in the group share variant_count by construction; we use
+        # the first as representative for label lookup).
+        variant_labels = None
+        if variant_count > 1:
+            machine_key = _select_profile_key_by_name(
+                group_printers[0], category="machine"
+            )
+            if machine_key is not None:
+                try:
+                    machine_resolved = resolve_profile_by_name(machine_key)
+                except ProfileNotFoundError:
+                    machine_resolved = None
+                if machine_resolved:
+                    labels = machine_resolved.get("printer_extruder_variant")
+                    if isinstance(labels, list):
+                        variant_labels = list(labels)
+
+        # Decide consolidation: if multiple printers share a non-empty
+        # word-prefix, emit one file. Otherwise fall back to per-printer.
+        if len(group_printers) >= 2:
+            prefix = _longest_word_prefix(group_printers)
+            if prefix:
+                flat = _flatten_user_filament_for_printers(
+                    resolved,
+                    printers=group_printers,
+                    name_label=prefix,
+                    variant_count=variant_count,
+                    variant_labels=variant_labels,
+                )
+                filename = _safe_filename(flat["name"], fallback=alias or setting_id)
+                entries.append((filename, flat))
+                continue
+
+        # Per-printer fallback (single printer in group OR no common prefix).
+        for printer_name in group_printers:
+            flat = _flatten_user_filament_for_printers(
+                resolved,
+                printers=[printer_name],
+                name_label=printer_name,
+                variant_count=variant_count,
+                variant_labels=variant_labels,
+            )
+            filename = _safe_filename(flat["name"], fallback=alias or setting_id)
+            entries.append((filename, flat))
+
     return entries
 
 
