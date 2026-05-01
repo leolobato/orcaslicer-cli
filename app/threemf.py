@@ -414,12 +414,21 @@ def _collect_mesh_data(
     zf: zipfile.ZipFile,
     root_model: str,
     object_ids: set[str],
+    printable_per_object: dict[str, set[str]] | None = None,
 ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
     """Collect world-space vertices and triangles for all plate objects.
 
-    Iterates all build items matching object_ids, applies each item's
-    build transform, and follows component p:path references to sub-model files.
-    Returns (world_vertices, triangles).
+    Iterates build items matching ``object_ids``, composes the build transform
+    with each component's transform as it descends, and follows component refs
+    both inline (same root model) and via ``p:path`` to sub-model files.
+
+    When ``printable_per_object`` is provided, components at the build-item's
+    immediate level whose ``objectid`` is not listed as a printable part for
+    the parent object are skipped (see ``_read_printable_objectids``). This
+    excludes modifier/negative/support volumes which are routinely scaled to
+    extreme dimensions and would otherwise wreck the bed-recentering bbox.
+
+    Returns ``(world_vertices, triangles)``.
     """
     ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
     root = ET.fromstring(root_model)
@@ -432,14 +441,20 @@ def _collect_mesh_data(
     all_verts: list[tuple[float, float, float]] = []
     all_tris: list[tuple[int, int, int]] = []
 
-    def collect_from_element(elem: ET.Element):
+    def collect_from_element(
+        elem: ET.Element,
+        transform: list[float],
+        local_objects: dict[str, ET.Element],
+        printable_objectids: set[str] | None = None,
+    ) -> None:
         mesh = elem.find("m:mesh", _NS)
         if mesh is not None:
             offset = len(all_verts)
             for v in mesh.findall("m:vertices/m:vertex", _NS):
-                all_verts.append((
-                    float(v.get("x")), float(v.get("y")), float(v.get("z")),
-                ))
+                x = float(v.get("x"))
+                y = float(v.get("y"))
+                z = float(v.get("z"))
+                all_verts.append(_apply_transform(x, y, z, transform))
             for t in mesh.findall("m:triangles/m:triangle", _NS):
                 all_tris.append((
                     int(t.get("v1")) + offset,
@@ -448,37 +463,52 @@ def _collect_mesh_data(
                 ))
 
         for comp in elem.findall("m:components/m:component", _NS):
-            path = comp.get(f"{{{ns_p}}}path")
             comp_obj_id = comp.get("objectid")
+            if (
+                printable_objectids is not None
+                and comp_obj_id not in printable_objectids
+            ):
+                continue
+            comp_transform = _parse_transform(comp.get("transform"))
+            combined = _chain_transforms(comp_transform, transform)
+            path = comp.get(f"{{{ns_p}}}path")
             if path:
                 zip_path = path.lstrip("/")
                 try:
                     sub_data = zf.read(zip_path).decode()
                     sub_root = ET.fromstring(sub_data)
-                    for sub_obj in sub_root.findall(".//m:resources/m:object", _NS):
-                        if comp_obj_id is None or sub_obj.get("id") == comp_obj_id:
-                            collect_from_element(sub_obj)
-                            break
+                    sub_objects = {
+                        o.get("id"): o
+                        for o in sub_root.findall(
+                            ".//m:resources/m:object", _NS,
+                        )
+                    }
+                    ref = sub_objects.get(comp_obj_id)
+                    if ref is not None:
+                        collect_from_element(ref, combined, sub_objects)
                 except (KeyError, ET.ParseError):
                     pass
+            else:
+                ref = local_objects.get(comp_obj_id)
+                if ref is not None:
+                    collect_from_element(ref, combined, local_objects)
 
     # Process ALL build items that match plate objects (not just the first)
     for item in root.findall("m:build/m:item", _NS):
-        if item.get("objectid") not in object_ids:
+        item_obj_id = item.get("objectid")
+        if item_obj_id not in object_ids:
             continue
-        obj_elem = objects.get(item.get("objectid"))
+        obj_elem = objects.get(item_obj_id)
         if obj_elem is None:
             continue
 
-        # Collect mesh in object-local space, then apply build-item transform
-        local_verts_start = len(all_verts)
-        collect_from_element(obj_elem)
-
-        # Apply this item's build transform to the vertices just collected
         build_transform = _parse_transform(item.get("transform"))
-        for i in range(local_verts_start, len(all_verts)):
-            x, y, z = all_verts[i]
-            all_verts[i] = _apply_transform(x, y, z, build_transform)
+        printable = (
+            printable_per_object.get(item_obj_id)
+            if printable_per_object is not None
+            else None
+        )
+        collect_from_element(obj_elem, build_transform, objects, printable)
 
     return all_verts, all_tris
 
@@ -513,8 +543,10 @@ def extract_plate(
                 return None
 
             root_model = zf.read(root_model_path).decode()
+            printable_per_object = _read_printable_objectids(zf)
             world_verts, tris = _collect_mesh_data(
                 zf, root_model, plate_ids,
+                printable_per_object=printable_per_object,
             )
 
         if not world_verts or not tris:

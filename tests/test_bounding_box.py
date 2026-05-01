@@ -2,7 +2,7 @@ import io
 import unittest
 import zipfile
 
-from app.threemf import get_bounding_box
+from app.threemf import extract_plate, get_bounding_box
 
 
 _NS_DECL = (
@@ -172,6 +172,162 @@ class BoundingBoxTransformCompositionTests(unittest.TestCase):
         self.assertAlmostEqual(center_x, 90.0, places=4)
         self.assertAlmostEqual(center_y, 90.0, places=4)
         self.assertAlmostEqual(center_z, 24.0, places=4)
+
+
+def _extracted_bbox(plate_3mf: bytes) -> tuple[float, float, float]:
+    """Return (size_x, size_y, size_z) of the inline mesh in an extracted plate."""
+    bbox = get_bounding_box(plate_3mf)
+    assert bbox is not None
+    return bbox.size_x, bbox.size_y, bbox.size_z
+
+
+class ExtractPlateMeshDataTests(unittest.TestCase):
+    """``extract_plate`` rebuilds a multi-plate 3MF as a single-plate 3MF with
+    inline geometry. Three pre-existing bugs were fixed together:
+
+    1. Component transforms were ignored when descending into sub-models (and
+       local component refs were dropped entirely).
+    2. The build-item transform was applied at the end instead of being
+       composed with comp transforms during traversal.
+    3. Modifier parts were included in the geometry, polluting the mesh and
+       skewing the bed-recentering bbox.
+    """
+
+    def _build_3mf(
+        self,
+        objects_xml: str,
+        build_xml: str,
+        model_settings_xml: str,
+        sub_models: dict[str, str] | None = None,
+    ) -> bytes:
+        model_xml = (
+            f'<?xml version="1.0"?>'
+            f"<model {_NS_DECL} "
+            'xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">'
+            f"<resources>{objects_xml}</resources>"
+            f"<build>{build_xml}</build>"
+            "</model>"
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("[Content_Types].xml", "")
+            zf.writestr("3D/3dmodel.model", model_xml)
+            zf.writestr("Metadata/model_settings.config", model_settings_xml)
+            for path, content in (sub_models or {}).items():
+                zf.writestr(path, content)
+        return buf.getvalue()
+
+    def test_local_component_ref_with_rotation_is_honored(self) -> None:
+        # A 6×6×6 cube triangle at the local origin, rotated 90° around Z by
+        # the component transform, then translated by the build item. With the
+        # pre-fix code, both the rotation and the local-ref descent were
+        # silently dropped — the extracted mesh would be empty.
+        # Triangle picked so the rotation produces a different bbox shape:
+        # local extent X=[0,6], Y=[0,2]; after 90° rotation: X=[-2,0], Y=[0,6].
+        verts = [(0, 0, 0), (6, 0, 0), (6, 2, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+            '<object id="10" type="model"><components>'
+            # 90° rotation around Z (column-major: X-basis maps to (0,1,0)).
+            '<component objectid="1" transform="0 1 0 -1 0 0 0 0 1 0 0 0"/>'
+            "</components></object>"
+        )
+        build_xml = (
+            '<item objectid="10" transform="1 0 0 0 1 0 0 0 1 50 50 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="10"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="10"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(self._build_3mf(objects_xml, build_xml, ms), 90, 90)
+        self.assertIsNotNone(out)
+        sx, sy, _ = _extracted_bbox(out)
+        # After the 90° Z rotation, the local 6×2 footprint must become 2×6.
+        self.assertAlmostEqual(sx, 2.0, places=4)
+        self.assertAlmostEqual(sy, 6.0, places=4)
+
+    def test_modifier_part_excluded_from_extracted_mesh(self) -> None:
+        # Two components on the same parent: one normal_part (small) and one
+        # modifier_part (huge). The extracted mesh must come from the normal
+        # part only — otherwise the modifier blows up the bed-recentering bbox.
+        small = [(0, 0, 0), (3, 0, 0), (0, 4, 0)]
+        huge = [(0, 0, 0), (500, 0, 0), (0, 500, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(small)}</object>'
+            f'<object id="2" type="model">{_cube_mesh(huge)}</object>'
+            '<object id="10" type="model"><components>'
+            '<component objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+            '<component objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+            "</components></object>"
+        )
+        build_xml = (
+            '<item objectid="10" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="10">'
+            '<part id="1" subtype="normal_part"/>'
+            '<part id="2" subtype="modifier_part"/>'
+            "</object>"
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="10"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(self._build_3mf(objects_xml, build_xml, ms), 90, 90)
+        self.assertIsNotNone(out)
+        sx, sy, _ = _extracted_bbox(out)
+        self.assertAlmostEqual(sx, 3.0, places=4)
+        self.assertAlmostEqual(sy, 4.0, places=4)
+
+    def test_submodel_path_component_with_rotation_is_honored(self) -> None:
+        # A 3×4 triangle living in a sub-model file, referenced via p:path.
+        # The component rotates it 90° around Z, so the extracted mesh's
+        # footprint must be 4×3.
+        verts = [(0, 0, 0), (3, 0, 0), (0, 4, 0)]
+        sub_model = (
+            f'<?xml version="1.0"?>'
+            f"<model {_NS_DECL}>"
+            "<resources>"
+            f'<object id="5" type="model">{_cube_mesh(verts)}</object>'
+            "</resources>"
+            "</model>"
+        )
+        objects_xml = (
+            '<object id="10" type="model"><components>'
+            '<component p:path="/3D/Objects/sub.model" objectid="5" '
+            'transform="0 1 0 -1 0 0 0 0 1 0 0 0"/>'
+            "</components></object>"
+        )
+        build_xml = (
+            '<item objectid="10" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="10"><part id="5" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="10"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            self._build_3mf(
+                objects_xml, build_xml, ms,
+                sub_models={"3D/Objects/sub.model": sub_model},
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        sx, sy, _ = _extracted_bbox(out)
+        self.assertAlmostEqual(sx, 4.0, places=4)
+        self.assertAlmostEqual(sy, 3.0, places=4)
 
 
 class BoundingBoxRealBenchyTests(unittest.TestCase):
