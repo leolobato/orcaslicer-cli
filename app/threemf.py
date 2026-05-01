@@ -77,8 +77,15 @@ def _collect_vertices_recursive(
     transform: list[float],
     objects: dict[str, ET.Element],
     zf: zipfile.ZipFile | None = None,
+    printable_objectids: set[str] | None = None,
 ) -> list[tuple[float, float, float]]:
-    """Collect transformed vertices from an object, following component refs and sub-models."""
+    """Collect transformed vertices from an object, following component refs and sub-models.
+
+    When ``printable_objectids`` is provided, components whose ``objectid`` is not in
+    the set are skipped — used to exclude modifier/support/negative volumes from the
+    build-volume bounding box. The filter applies only at this call's component level;
+    deeper recursion does not propagate it.
+    """
     ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
     points = []
 
@@ -91,9 +98,11 @@ def _collect_vertices_recursive(
             points.append(_apply_transform(x, y, z, transform))
 
     for comp in obj_elem.findall("m:components/m:component", _NS):
+        comp_obj_id = comp.get("objectid")
+        if printable_objectids is not None and comp_obj_id not in printable_objectids:
+            continue
         comp_transform = _parse_transform(comp.get("transform"))
         combined = _chain_transforms(transform, comp_transform)
-        comp_obj_id = comp.get("objectid")
         path = comp.get(f"{{{ns_p}}}path")
 
         if path and zf:
@@ -121,6 +130,48 @@ def _collect_vertices_recursive(
                 ))
 
     return points
+
+
+def _read_printable_objectids(
+    zf: zipfile.ZipFile,
+) -> dict[str, set[str]] | None:
+    """Read ``Metadata/model_settings.config`` and return parent-objectid → printable part ids.
+
+    OrcaSlicer stores per-volume metadata in this file as ``<part id="N" subtype="...">``
+    inside ``<object id="M">``; the ``id`` attribute matches the ``objectid`` of the
+    corresponding ``<component>`` in the 3D model XML (see OrcaSlicer
+    ``src/libslic3r/Format/bbs_3mf.cpp:_handle_start_config_volume``). Only
+    ``normal_part`` is printable geometry; ``modifier_part``, ``negative_part``,
+    ``support_enforcer`` and ``support_blocker`` are non-printing region markers and
+    are routinely scaled to extreme dimensions, so they must be excluded from the
+    build-volume bounding box.
+
+    Returns ``None`` if the config is missing or unparseable, signalling callers to
+    fall back to including every component (preserves prior behavior for legacy 3MFs
+    without per-part metadata).
+    """
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return None
+        raw = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(raw)
+    except (KeyError, ET.ParseError, UnicodeDecodeError):
+        return None
+
+    result: dict[str, set[str]] = {}
+    for obj in root.findall("object"):
+        obj_id = obj.get("id")
+        if obj_id is None:
+            continue
+        printable: set[str] = set()
+        for part in obj.findall("part"):
+            part_id = part.get("id")
+            if part_id is None:
+                continue
+            if part.get("subtype", "normal_part") == "normal_part":
+                printable.add(part_id)
+        result[obj_id] = printable
+    return result
 
 
 def get_bounding_box(file_bytes: bytes) -> BBox | None:
@@ -151,6 +202,8 @@ def get_bounding_box(file_bytes: bytes) -> BBox | None:
         for obj in root.findall(".//m:resources/m:object", _NS):
             objects[obj.get("id")] = obj
 
+        printable_per_object = _read_printable_objectids(zf)
+
         all_points: list[tuple[float, float, float]] = []
         for item in root.findall("m:build/m:item", _NS):
             obj_id = item.get("objectid")
@@ -158,8 +211,14 @@ def get_bounding_box(file_bytes: bytes) -> BBox | None:
             if obj_elem is None:
                 continue
             item_transform = _parse_transform(item.get("transform"))
+            printable = (
+                printable_per_object.get(obj_id)
+                if printable_per_object is not None
+                else None
+            )
             all_points.extend(_collect_vertices_recursive(
                 obj_elem, item_transform, objects, zf,
+                printable_objectids=printable,
             ))
 
     if not all_points:

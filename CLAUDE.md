@@ -61,6 +61,8 @@ LOG_LEVEL         = INFO
 
 ## Key Details
 
+- The OrcaSlicer source is available at ../OrcaSlicer. We should use the GUI behavior as reference for our CLI wrapper and the source code should be explored whenever needed.
+- OrcaSlicer version pinned to 2.3.2. The Dockerfile uses an AppImage extraction workaround for arm64 (computes ELF offset instead of `--appimage-extract`).
 - The `"from"` key in profiles must NOT be stripped during resolution — OrcaSlicer CLI requires it.
 - The slicer injects `G92 E0` into `layer_change_gcode` if not already present (workaround for extrusion issues on relative extrusion printers like all Bambu Lab models).
 - 3MF project settings use smart transfer driven by the 3MF's own `different_settings_to_system` fingerprint. Slot 0 is the process-level allowlist; slots 2+ are per-filament allowlists. Only declared keys are overlaid onto the target profiles. When the fingerprint is missing or empty, nothing is transferred. Per-filament customizations are applied only when the selected filament's `name` matches the 3MF's `filament_settings_id[slot]` — when the user swaps to a different filament, declared customizations are discarded and reported back so the client can surface the discard. The `/slice` response includes `X-Settings-Transfer-Status` (`applied`, `no_customizations`, `no_3mf_settings`), `X-Settings-Transferred` (process-side JSON array of `{key, value, original}`), and `X-Filament-Settings-Transferred` (JSON array of per-slot entries with `{slot, original_filament, selected_filament, status, transferred, discarded}`) headers.
@@ -70,4 +72,3 @@ LOG_LEVEL         = INFO
 - A filament is AMS-assignable only if it has `instantiation: "true"`, a non-empty `setting_id`, and resolves to a non-empty `filament_id`.
 - Plate types map from snake_case API values (`cool_plate`, `engineering_plate`, `high_temp_plate`, `textured_pei_plate`, `textured_cool_plate`, `supertack_plate`) to OrcaSlicer display names written as `curr_bed_type`.
 - Multi-plate 3MFs are auto-extracted to single-plate; cross-printer scenarios trigger auto-arrange.
-- OrcaSlicer version pinned to 2.3.2. The Dockerfile uses an AppImage extraction workaround for arm64 (computes ELF offset instead of `--appimage-extract`).
