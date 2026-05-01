@@ -227,7 +227,10 @@ function app() {
     async loadMachines() {
       try {
         this.machines = await api("/profiles/machines");
-        // Restore persisted filter after options are available
+        // Re-apply the persisted filter now that the dropdown options exist.
+        // Alpine's `x-model` on a <select> can write back the empty fallback
+        // value when the bound value has no matching <option> at render time,
+        // so we restore from localStorage here as the source of truth.
         const stored = localStorage.getItem("machineFilter") || "";
         if (stored && this.machines.some((m) => m.setting_id === stored)) {
           this.selectedMachineId = stored;
@@ -236,6 +239,10 @@ function app() {
           this.selectedMachineId = "";
           localStorage.removeItem("machineFilter");
         }
+        // Notify list views unconditionally so they fetch with the
+        // restored filter; their initial fetch raced with this one and
+        // may have used an empty filter.
+        window.dispatchEvent(new Event("machine-filter-changed"));
       } catch (err) {
         console.error("Failed to load machines for filter:", err);
       }
@@ -384,6 +391,14 @@ function processList() {
     },
 
     async load() {
+      // Register the filter-change listener BEFORE the first await so a
+      // dispatch from `loadMachines()` (which may race with this fetch)
+      // is never lost. Idempotent — only attaches one listener per
+      // component lifetime.
+      if (!this._machineFilterListenerRegistered) {
+        this._machineFilterListenerRegistered = true;
+        window.addEventListener("machine-filter-changed", () => this.load());
+      }
       this.listLoading = true;
       try {
         const machineId = this.$data.selectedMachineId;
@@ -394,8 +409,6 @@ function processList() {
       } finally {
         this.listLoading = false;
       }
-      // Reload when machine filter changes
-      window.addEventListener("machine-filter-changed", () => this.load(), { once: true });
     },
 
     inspect(type, id) {
@@ -542,6 +555,14 @@ function filamentList() {
     },
 
     async load() {
+      // Register the filter-change listener BEFORE the first await so a
+      // dispatch from `loadMachines()` (which may race with this fetch)
+      // is never lost. Idempotent — only attaches one listener per
+      // component lifetime.
+      if (!this._machineFilterListenerRegistered) {
+        this._machineFilterListenerRegistered = true;
+        window.addEventListener("machine-filter-changed", () => this.load());
+      }
       this.listLoading = true;
       try {
         const machineId = this.$data.selectedMachineId;
@@ -552,8 +573,6 @@ function filamentList() {
       } finally {
         this.listLoading = false;
       }
-      // Reload when machine filter changes
-      window.addEventListener("machine-filter-changed", () => this.load(), { once: true });
     },
 
     inspect(type, id) {
