@@ -498,12 +498,13 @@ function filamentList() {
             return;
           }
 
+          let skipMessage = "";
           const skippedHeader = response.headers.get("X-Export-Skipped");
           if (skippedHeader) {
             const skipped = JSON.parse(skippedHeader);
             const names = Object.keys(skipped);
             if (names.length > 0) {
-              this.skippedNotice = `Skipped ${names.length}: ${names.join(", ")}`;
+              skipMessage = `Skipped ${names.length}: ${names.join(", ")}`;
             }
           }
 
@@ -516,6 +517,14 @@ function filamentList() {
           a.click();
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
+
+          // Download is in flight — close the modal. If anything was
+          // skipped, surface it via alert before closing so the user
+          // doesn't lose the signal when the modal disappears.
+          if (skipMessage) {
+            alert(skipMessage);
+          }
+          this.close();
         } catch (e) {
           this.skippedNotice = `Export failed: ${e.message}`;
         } finally {
