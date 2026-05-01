@@ -14,6 +14,15 @@ _NS = {"m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"}
 _IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
 
 
+def _xml_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 class BBox(NamedTuple):
     min_x: float
     min_y: float
@@ -415,8 +424,8 @@ def _collect_mesh_data(
     root_model: str,
     object_ids: set[str],
     printable_per_object: dict[str, set[str]] | None = None,
-) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
-    """Collect world-space vertices and triangles for all plate objects.
+) -> list[dict[str, Any]]:
+    """Collect world-space mesh data per build item on the plate.
 
     Iterates build items matching ``object_ids``, composes the build transform
     with each component's transform as it descends, and follows component refs
@@ -428,7 +437,12 @@ def _collect_mesh_data(
     excludes modifier/negative/support volumes which are routinely scaled to
     extreme dimensions and would otherwise wreck the bed-recentering bbox.
 
-    Returns ``(world_vertices, triangles)``.
+    Returns a list of per-build-item entries: each entry is a dict with
+    ``src_object_id`` (the build/item's objectid, used for metadata lookup),
+    ``verts`` (world-space vertex list) and ``tris`` (triangle indices into
+    that entry's verts). Multiple entries are emitted when the plate hosts
+    multiple distinct objects or instance copies, so the caller can preserve
+    per-object identity in the output 3MF.
     """
     ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
     root = ET.fromstring(root_model)
@@ -438,25 +452,24 @@ def _collect_mesh_data(
         for obj in root.findall(".//m:resources/m:object", _NS)
     }
 
-    all_verts: list[tuple[float, float, float]] = []
-    all_tris: list[tuple[int, int, int]] = []
-
     def collect_from_element(
         elem: ET.Element,
         transform: list[float],
         local_objects: dict[str, ET.Element],
+        item_verts: list[tuple[float, float, float]],
+        item_tris: list[tuple[int, int, int]],
         printable_objectids: set[str] | None = None,
     ) -> None:
         mesh = elem.find("m:mesh", _NS)
         if mesh is not None:
-            offset = len(all_verts)
+            offset = len(item_verts)
             for v in mesh.findall("m:vertices/m:vertex", _NS):
                 x = float(v.get("x"))
                 y = float(v.get("y"))
                 z = float(v.get("z"))
-                all_verts.append(_apply_transform(x, y, z, transform))
+                item_verts.append(_apply_transform(x, y, z, transform))
             for t in mesh.findall("m:triangles/m:triangle", _NS):
-                all_tris.append((
+                item_tris.append((
                     int(t.get("v1")) + offset,
                     int(t.get("v2")) + offset,
                     int(t.get("v3")) + offset,
@@ -485,15 +498,21 @@ def _collect_mesh_data(
                     }
                     ref = sub_objects.get(comp_obj_id)
                     if ref is not None:
-                        collect_from_element(ref, combined, sub_objects)
+                        collect_from_element(
+                            ref, combined, sub_objects,
+                            item_verts, item_tris,
+                        )
                 except (KeyError, ET.ParseError):
                     pass
             else:
                 ref = local_objects.get(comp_obj_id)
                 if ref is not None:
-                    collect_from_element(ref, combined, local_objects)
+                    collect_from_element(
+                        ref, combined, local_objects,
+                        item_verts, item_tris,
+                    )
 
-    # Process ALL build items that match plate objects (not just the first)
+    items: list[dict[str, Any]] = []
     for item in root.findall("m:build/m:item", _NS):
         item_obj_id = item.get("objectid")
         if item_obj_id not in object_ids:
@@ -508,9 +527,85 @@ def _collect_mesh_data(
             if printable_per_object is not None
             else None
         )
-        collect_from_element(obj_elem, build_transform, objects, printable)
+        item_verts: list[tuple[float, float, float]] = []
+        item_tris: list[tuple[int, int, int]] = []
+        collect_from_element(
+            obj_elem, build_transform, objects,
+            item_verts, item_tris, printable,
+        )
+        if item_verts and item_tris:
+            items.append({
+                "src_object_id": item_obj_id,
+                "verts": item_verts,
+                "tris": item_tris,
+            })
 
-    return all_verts, all_tris
+    return items
+
+
+def _read_object_names(zf: zipfile.ZipFile) -> dict[str, str]:
+    """Map each ``<object id>`` in ``model_settings.config`` to its display name."""
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return {}
+        raw = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(raw)
+    except (KeyError, ET.ParseError, UnicodeDecodeError):
+        return {}
+
+    names: dict[str, str] = {}
+    for obj in root.findall("object"):
+        obj_id = obj.get("id")
+        if obj_id is None:
+            continue
+        for meta in obj.findall("metadata"):
+            if meta.get("key") == "name":
+                value = meta.get("value")
+                if value:
+                    names[obj_id] = value
+                break
+    return names
+
+
+def _read_plate_instances(
+    zf: zipfile.ZipFile, plate_id: str,
+) -> list[dict[str, str]]:
+    """Return ordered ``<model_instance>`` entries for the requested plate.
+
+    Each entry has ``object_id``, ``instance_id`` and ``identify_id`` (any
+    missing key defaults to an empty string). OrcaSlicer's gcode labeling
+    uses ``identify_id`` as the per-object label id, so preserving it from
+    the input keeps the output's per-object boundaries aligned with what
+    the GUI would emit.
+    """
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return []
+        raw = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(raw)
+    except (KeyError, ET.ParseError, UnicodeDecodeError):
+        return []
+
+    for plate in root.findall("plate"):
+        pid = ""
+        for meta in plate.findall("metadata"):
+            if meta.get("key") == "plater_id":
+                pid = meta.get("value") or ""
+                break
+        if pid != plate_id:
+            continue
+        result: list[dict[str, str]] = []
+        for inst in plate.findall("model_instance"):
+            entry: dict[str, str] = {
+                "object_id": "", "instance_id": "", "identify_id": "",
+            }
+            for meta in inst.findall("metadata"):
+                key = meta.get("key")
+                if key in entry:
+                    entry[key] = meta.get("value") or ""
+            result.append(entry)
+        return result
+    return []
 
 
 def extract_plate(
@@ -521,8 +616,13 @@ def extract_plate(
 ) -> bytes | None:
     """Extract a plate's geometry from a multi-plate 3MF into a fresh simple 3MF.
 
-    Returns new 3MF bytes with a single inline mesh centered on the bed,
-    or None if extraction fails.
+    Each input build item becomes its own ``<object>`` in the output (with its
+    original name + identify_id preserved when ``model_settings.config`` lists
+    them), so OrcaSlicer's gcode emits real per-object label_object boundaries
+    instead of collapsing every part into a single ``"Model"`` blob. Vertices
+    are translated as a group so the union bounding box centers on the bed.
+
+    Returns new 3MF bytes, or None if extraction fails.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
@@ -544,88 +644,130 @@ def extract_plate(
 
             root_model = zf.read(root_model_path).decode()
             printable_per_object = _read_printable_objectids(zf)
-            world_verts, tris = _collect_mesh_data(
+            object_names = _read_object_names(zf)
+            plate_instances = _read_plate_instances(zf, plate_id)
+            items = _collect_mesh_data(
                 zf, root_model, plate_ids,
                 printable_per_object=printable_per_object,
             )
 
-        if not world_verts or not tris:
+        if not items:
             return None
 
-        # Compute bounding box and center on target bed
-        xs = [v[0] for v in world_verts]
-        ys = [v[1] for v in world_verts]
-        zs = [v[2] for v in world_verts]
-        cx = (min(xs) + max(xs)) / 2
-        cy = (min(ys) + max(ys)) / 2
-        min_z = min(zs)
-
+        # Bed-center the union of all object bounding boxes so relative
+        # positions between objects are preserved.
+        all_xs = [v[0] for it in items for v in it["verts"]]
+        all_ys = [v[1] for it in items for v in it["verts"]]
+        all_zs = [v[2] for it in items for v in it["verts"]]
+        cx = (min(all_xs) + max(all_xs)) / 2
+        cy = (min(all_ys) + max(all_ys)) / 2
         tx = bed_center_x - cx
         ty = bed_center_y - cy
-        tz = -min_z
+        tz = -min(all_zs)
 
-        final_verts = [(x + tx, y + ty, z + tz) for x, y, z in world_verts]
-        height = max(zs) - min(zs)
+        # Walk plate's model_instance entries in order to assign identify_ids
+        # to build items; each entry is consumed by the first matching item.
+        unused_instances = list(plate_instances)
 
-        # Build minimal 3MF XML
-        v_xml = "".join(
-            f'    <vertex x="{v[0]}" y="{v[1]}" z="{v[2]}"/>\n'
-            for v in final_verts
-        )
-        t_xml = "".join(
-            f'    <triangle v1="{t[0]}" v2="{t[1]}" v3="{t[2]}"/>\n'
-            for t in tris
-        )
+        def take_identify_id(src_obj_id: str) -> str:
+            for idx, inst in enumerate(unused_instances):
+                if inst.get("object_id") == src_obj_id:
+                    return unused_instances.pop(idx).get("identify_id", "") or ""
+            return ""
+
+        object_blocks: list[str] = []
+        build_items: list[str] = []
+        ms_objects: list[str] = []
+        ms_instances: list[str] = []
+        ms_assemble: list[str] = []
+
+        for idx, item in enumerate(items, start=1):
+            obj_id = idx
+            src_obj_id = item["src_object_id"]
+            name = object_names.get(src_obj_id, f"Object {idx}")
+            identify_id = take_identify_id(src_obj_id) or str(obj_id)
+
+            shifted = [
+                (x + tx, y + ty, z + tz) for x, y, z in item["verts"]
+            ]
+            v_xml = "".join(
+                f'    <vertex x="{v[0]}" y="{v[1]}" z="{v[2]}"/>\n'
+                for v in shifted
+            )
+            t_xml = "".join(
+                f'    <triangle v1="{t[0]}" v2="{t[1]}" v3="{t[2]}"/>\n'
+                for t in item["tris"]
+            )
+            object_blocks.append(
+                f'  <object id="{obj_id}" type="model">\n'
+                "   <mesh>\n"
+                "    <vertices>\n" + v_xml + "    </vertices>\n"
+                "    <triangles>\n" + t_xml + "    </triangles>\n"
+                "   </mesh>\n"
+                "  </object>\n"
+            )
+            build_items.append(
+                f'  <item objectid="{obj_id}"'
+                ' transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+            )
+
+            zs = [v[2] for v in item["verts"]]
+            height = max(zs) - min(zs)
+            xml_name = _xml_escape(name)
+            ms_objects.append(
+                f'  <object id="{obj_id}">\n'
+                f'    <metadata key="name" value="{xml_name}"/>\n'
+                '    <metadata key="extruder" value="1"/>\n'
+                f'    <part id="{obj_id}" subtype="normal_part">\n'
+                f'      <metadata key="name" value="{xml_name}"/>\n'
+                '      <metadata key="matrix"'
+                ' value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+                '      <metadata key="source_object_id" value="0"/>\n'
+                '      <metadata key="source_volume_id" value="0"/>\n'
+                '      <metadata key="source_offset_x" value="0"/>\n'
+                '      <metadata key="source_offset_y" value="0"/>\n'
+                f'      <metadata key="source_offset_z" value="{-height / 2}"/>\n'
+                "    </part>\n"
+                "  </object>\n"
+            )
+            ms_instances.append(
+                "    <model_instance>\n"
+                f'      <metadata key="object_id" value="{obj_id}"/>\n'
+                '      <metadata key="instance_id" value="0"/>\n'
+                f'      <metadata key="identify_id" value="{identify_id}"/>\n'
+                "    </model_instance>\n"
+            )
+            ms_assemble.append(
+                f'   <assemble_item object_id="{obj_id}" instance_id="0"'
+                ' transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n'
+            )
 
         model_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<model unit="millimeter" xml:lang="en-US"'
             ' xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
             " <resources>\n"
-            '  <object id="1" type="model">\n'
-            "   <mesh>\n"
-            "    <vertices>\n" + v_xml + "    </vertices>\n"
-            "    <triangles>\n" + t_xml + "    </triangles>\n"
-            "   </mesh>\n"
-            "  </object>\n"
-            " </resources>\n"
+            + "".join(object_blocks)
+            + " </resources>\n"
             " <build>\n"
-            '  <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
-            " </build>\n"
+            + "".join(build_items)
+            + " </build>\n"
             "</model>"
         )
 
         ms_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<config>\n"
-            '  <object id="1">\n'
-            '    <metadata key="name" value="Model"/>\n'
-            '    <metadata key="extruder" value="1"/>\n'
-            '    <part id="1" subtype="normal_part">\n'
-            '      <metadata key="name" value="Model"/>\n'
-            '      <metadata key="matrix"'
-            ' value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
-            '      <metadata key="source_object_id" value="0"/>\n'
-            '      <metadata key="source_volume_id" value="0"/>\n'
-            '      <metadata key="source_offset_x" value="0"/>\n'
-            '      <metadata key="source_offset_y" value="0"/>\n'
-            f'      <metadata key="source_offset_z" value="{-height / 2}"/>\n'
-            "    </part>\n"
-            "  </object>\n"
-            "  <plate>\n"
+            + "".join(ms_objects)
+            + "  <plate>\n"
             '    <metadata key="plater_id" value="1"/>\n'
             '    <metadata key="plater_name" value=""/>\n'
             '    <metadata key="locked" value="false"/>\n'
-            "    <model_instance>\n"
-            '      <metadata key="object_id" value="1"/>\n'
-            '      <metadata key="instance_id" value="0"/>\n'
-            '      <metadata key="identify_id" value="1"/>\n'
-            "    </model_instance>\n"
-            "  </plate>\n"
+            + "".join(ms_instances)
+            + "  </plate>\n"
             "  <assemble>\n"
-            '   <assemble_item object_id="1" instance_id="0"'
-            ' transform="1 0 0 0 1 0 0 0 1 0 0 0" offset="0 0 0" />\n'
-            "  </assemble>\n"
+            + "".join(ms_assemble)
+            + "  </assemble>\n"
             "</config>"
         )
 
@@ -658,9 +800,11 @@ def extract_plate(
             zf_out.writestr("_rels/.rels", rels_xml)
 
         result = buf.getvalue()
+        total_verts = sum(len(it["verts"]) for it in items)
+        total_tris = sum(len(it["tris"]) for it in items)
         logger.info(
-            "Extracted plate %s from multi-plate 3MF: %d vertices, %d triangles, %d bytes",
-            plate_id, len(final_verts), len(tris), len(result),
+            "Extracted plate %s: %d objects, %d vertices, %d triangles, %d bytes",
+            plate_id, len(items), total_verts, total_tris, len(result),
         )
         return result
 

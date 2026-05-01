@@ -330,6 +330,123 @@ class ExtractPlateMeshDataTests(unittest.TestCase):
         self.assertAlmostEqual(sy, 3.0, places=4)
 
 
+class ExtractPlatePreservesObjectsTests(unittest.TestCase):
+    """Multi-object plates must keep each input object as a distinct
+    ``<object>`` in the output 3MF. Without this, OrcaSlicer collapses the
+    whole plate into one ``"Model"`` blob and emits a single label_object id
+    in gcode, which breaks the printer's per-object skip/pause UI.
+    """
+
+    @staticmethod
+    def _objects_in(plate_3mf: bytes) -> list[dict[str, str]]:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(io.BytesIO(plate_3mf)) as zf:
+            ms = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(ms)
+        objs = []
+        for obj in root.findall("object"):
+            entry = {"id": obj.get("id") or "", "name": "", "identify_id": ""}
+            for meta in obj.findall("metadata"):
+                if meta.get("key") == "name":
+                    entry["name"] = meta.get("value") or ""
+            objs.append(entry)
+        for inst in root.findall("plate/model_instance"):
+            inst_obj = ""
+            inst_id = ""
+            for meta in inst.findall("metadata"):
+                k = meta.get("key")
+                if k == "object_id":
+                    inst_obj = meta.get("value") or ""
+                elif k == "identify_id":
+                    inst_id = meta.get("value") or ""
+            for o in objs:
+                if o["id"] == inst_obj:
+                    o["identify_id"] = inst_id
+        return objs
+
+    def test_two_named_objects_remain_distinct(self) -> None:
+        # Two independent objects on plate 1, each with its own normal_part.
+        a_verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        b_verts = [(20, 0, 0), (25, 0, 0), (20, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(a_verts)}</object>'
+            f'<object id="2" type="model">{_cube_mesh(b_verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+            '<item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1">'
+            '<metadata key="name" value="Coaster Holder"/>'
+            '<part id="1" subtype="normal_part"/>'
+            "</object>"
+            '<object id="2">'
+            '<metadata key="name" value="Coaster Top"/>'
+            '<part id="2" subtype="normal_part"/>'
+            "</object>"
+            '<plate>'
+            '<metadata key="plater_id" value="1"/>'
+            '<model_instance>'
+            '<metadata key="object_id" value="1"/>'
+            '<metadata key="instance_id" value="0"/>'
+            '<metadata key="identify_id" value="115"/>'
+            "</model_instance>"
+            '<model_instance>'
+            '<metadata key="object_id" value="2"/>'
+            '<metadata key="instance_id" value="0"/>'
+            '<metadata key="identify_id" value="126"/>'
+            "</model_instance>"
+            "</plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        objs = self._objects_in(out)
+        names = {o["name"] for o in objs}
+        ids = {o["identify_id"] for o in objs}
+        self.assertEqual(names, {"Coaster Holder", "Coaster Top"})
+        self.assertEqual(ids, {"115", "126"})
+
+    def test_object_with_xml_unsafe_name_is_escaped(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        objects_xml = (
+            f'<object id="1" type="model">{_cube_mesh(verts)}</object>'
+        )
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1">'
+            # Embed an ampersand and quotes — must not break the output XML.
+            '<metadata key="name" value="A &amp; B &quot;part&quot;"/>'
+            '<part id="1" subtype="normal_part"/>'
+            "</object>"
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        objs = self._objects_in(out)
+        self.assertEqual(objs[0]["name"], 'A & B "part"')
+
+
 class BoundingBoxRealBenchyTests(unittest.TestCase):
     """Regression test for the user-reported benchy 3MF — the file lives outside
     this repo, so the test is skipped when the fixture is unavailable.

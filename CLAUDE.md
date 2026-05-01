@@ -42,7 +42,7 @@ Unit tests exist in `tests/` and can be run with pytest inside the container:
 
 **`app/normalize.py`** — Per-filament vector-length normalization. Replicates `Preset::normalize` (OrcaSlicer `src/libslic3r/Preset.cpp` 370-415) for the ~38 per-filament keys observed to diverge between the GUI and our CLI output on multi-filament 3MFs (`pressure_advance`, `filament_cooling_*`, `textured_cool_plate_temp`, etc.). Applied to the process profile just before the temp JSON is written. Defaults were extracted from `PrintConfig.cpp` v2.3.2; derivation is in `docs/normalization-research.md`.
 
-**`app/threemf.py`** — 3MF ZIP parsing, model bounding box extraction (affine transform math), build volume validation, multi-plate to single-plate extraction, and thumbnail preservation.
+**`app/threemf.py`** — 3MF ZIP parsing, model bounding box extraction (affine transform math), build volume validation, multi-plate to single-plate extraction, and thumbnail preservation. `extract_plate` keeps each input build item as a distinct `<object>` in the rebuilt 3MF (preserving its original name and `identify_id`), so OrcaSlicer can emit per-object `label_object` boundaries in gcode rather than collapsing the plate into a single "Model".
 
 **`app/slice_request.py`** — Parses `filament_profiles` form field. Supports legacy list format (`["GFSA00", "GFL99"]`) and sparse object format (`{"0": "GFSA00", "1": {"profile_setting_id": "GFL99", "tray_slot": 2}}`).
 
