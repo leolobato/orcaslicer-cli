@@ -619,9 +619,13 @@
               <!-- Selection list -->
               <div class="mt-4 max-h-64 overflow-y-auto rounded-md border border-slate-700">
                 <div class="flex items-center justify-between border-b border-slate-700 bg-slate-800/40 px-3 py-2 text-xs text-slate-300">
-                  <button class="hover:text-white" @click="exporter.selectAll()">Select all</button>
+                  <button type="button"
+                          class="rounded border border-slate-600 px-2 py-0.5 text-slate-300 transition-colors hover:border-accent hover:bg-accent-faint hover:text-accent-light"
+                          @click="exporter.selectAll()">Select all</button>
                   <span x-text="exporter.selectedCount + ' of ' + exporter.items.length + ' selected'"></span>
-                  <button class="hover:text-white" @click="exporter.deselectAll()">Deselect all</button>
+                  <button type="button"
+                          class="rounded border border-slate-600 px-2 py-0.5 text-slate-300 transition-colors hover:border-accent hover:bg-accent-faint hover:text-accent-light"
+                          @click="exporter.deselectAll()">Deselect all</button>
                 </div>
                 <ul class="divide-y divide-slate-800">
                   <template x-for="item in exporter.items" :key="item.setting_id">
