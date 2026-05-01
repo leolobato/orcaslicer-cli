@@ -1,7 +1,7 @@
 import os
 
 ORCA_VERSION = "2.3.2"
-API_REVISION = "18"
+API_REVISION = "19"
 VERSION = f"{ORCA_VERSION}-{API_REVISION}"
 
 ORCA_BINARY = os.environ.get("ORCA_BINARY", "/opt/orcaslicer/bin/orca-slicer")
