@@ -649,7 +649,7 @@
               <!-- Footer -->
               <div class="mt-5 flex justify-end gap-2">
                 <button class="rounded-md border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800"
-                        @click="exporter.close()">Cancel</button>
+                        @click="exporter.close()">Close</button>
                 <button class="rounded-md border border-emerald-600 bg-emerald-600/90 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                         :disabled="exporter.selectedCount === 0 || exporter.busy"
                         @click="exporter.download()"
