@@ -1,10 +1,17 @@
+import json
+import os
+import tempfile
 import unittest
+import zipfile
 
 from app.slicer import (
     _extract_declared_customizations,
     _extract_declared_filament_customizations,
+    _extract_declared_machine_customizations,
     _overlay_3mf_filament_settings,
+    _overlay_3mf_machine_settings,
     _overlay_3mf_settings,
+    _patch_output_settings,
 )
 
 
@@ -144,34 +151,162 @@ class DeclaredCustomizationsTests(unittest.TestCase):
 
 
 class DeclaredFilamentCustomizationsTests(unittest.TestCase):
-    def test_extracts_per_filament_slots(self) -> None:
+    """OrcaSlicer's ``different_settings_to_system`` layout is
+    ``[process, filament_0, ..., filament_{N-1}, printer]`` — the trailing
+    slot is always the printer (extracted separately)."""
+
+    def test_extracts_per_filament_slots_two_filaments(self) -> None:
+        threemf_settings = {
+            "different_settings_to_system": [
+                "sparse_infill_pattern",            # process
+                "nozzle_temperature;fan_min_speed",  # filament 0
+                "filament_max_volumetric_speed",     # filament 1
+                "retraction_speed",                  # printer (skipped here)
+            ],
+        }
+        self.assertEqual(
+            _extract_declared_filament_customizations(threemf_settings),
+            [
+                {"nozzle_temperature", "fan_min_speed"},
+                {"filament_max_volumetric_speed"},
+            ],
+        )
+
+    def test_single_filament_layout(self) -> None:
+        # ``[process, filament_0, printer]`` — exactly one filament slot.
         threemf_settings = {
             "different_settings_to_system": [
                 "sparse_infill_pattern",
-                "",
-                "nozzle_temperature;fan_min_speed",
-                "filament_max_volumetric_speed",
+                "nozzle_temperature",
+                "retraction_speed",
             ],
         }
-        result = _extract_declared_filament_customizations(threemf_settings)
-        self.assertEqual(result, [
-            {"nozzle_temperature", "fan_min_speed"},
-            {"filament_max_volumetric_speed"},
-        ])
+        self.assertEqual(
+            _extract_declared_filament_customizations(threemf_settings),
+            [{"nozzle_temperature"}],
+        )
 
     def test_returns_empty_when_no_filament_slots(self) -> None:
-        threemf_settings = {"different_settings_to_system": ["a", ""]}
+        # Length 2 = ``[process, printer]`` only.
+        threemf_settings = {"different_settings_to_system": ["a", "b"]}
         self.assertEqual(_extract_declared_filament_customizations(threemf_settings), [])
 
     def test_returns_empty_when_field_missing(self) -> None:
         self.assertEqual(_extract_declared_filament_customizations({}), [])
 
     def test_blank_slot_yields_empty_set(self) -> None:
-        threemf_settings = {"different_settings_to_system": ["", "", "", "nozzle_temperature"]}
+        threemf_settings = {
+            "different_settings_to_system": [
+                "",                       # process
+                "",                       # filament 0
+                "nozzle_temperature",     # filament 1
+                "machine_max_jerk_x",     # printer
+            ],
+        }
         self.assertEqual(
             _extract_declared_filament_customizations(threemf_settings),
             [set(), {"nozzle_temperature"}],
         )
+
+
+class DeclaredMachineCustomizationsTests(unittest.TestCase):
+    def test_extracts_trailing_printer_slot(self) -> None:
+        # The user-reported benchy 3MF: 1 filament, printer customizations
+        # in the trailing slot.
+        threemf_settings = {
+            "different_settings_to_system": [
+                "bridge_speed;sparse_infill_density",
+                "",
+                "deretraction_speed;machine_max_jerk_x;retraction_speed;z_hop",
+            ],
+        }
+        self.assertEqual(
+            _extract_declared_machine_customizations(threemf_settings),
+            {"deretraction_speed", "machine_max_jerk_x", "retraction_speed", "z_hop"},
+        )
+
+    def test_extracts_trailing_slot_for_multi_filament(self) -> None:
+        threemf_settings = {
+            "different_settings_to_system": [
+                "process",
+                "filament_0",
+                "filament_1",
+                "machine_max_jerk_x;machine_max_jerk_y",
+            ],
+        }
+        self.assertEqual(
+            _extract_declared_machine_customizations(threemf_settings),
+            {"machine_max_jerk_x", "machine_max_jerk_y"},
+        )
+
+    def test_returns_empty_when_field_missing(self) -> None:
+        self.assertEqual(_extract_declared_machine_customizations({}), set())
+
+    def test_returns_empty_when_too_short(self) -> None:
+        # A single-element list has only a process slot, no printer slot.
+        self.assertEqual(
+            _extract_declared_machine_customizations(
+                {"different_settings_to_system": ["process_only"]},
+            ),
+            set(),
+        )
+
+    def test_returns_empty_when_printer_slot_blank(self) -> None:
+        threemf_settings = {"different_settings_to_system": ["a", "b", ""]}
+        self.assertEqual(_extract_declared_machine_customizations(threemf_settings), set())
+
+
+class OverlayMachineSettingsTests(unittest.TestCase):
+    def test_applies_listed_keys_to_machine_profile(self) -> None:
+        machine_profile = {
+            "name": "Bambu Lab A1 mini 0.4 nozzle",
+            "retraction_speed": ["30"],
+            "z_hop": ["0.4"],
+            "z_hop_types": ["Auto Lift"],
+            "machine_max_jerk_x": ["9", "9"],
+        }
+        threemf_settings = {
+            "retraction_speed": ["40"],
+            "z_hop": ["0"],
+            "z_hop_types": ["Slope Lift"],
+            "machine_max_jerk_x": ["20", "9"],
+            # Not in allowed_keys; must not be applied.
+            "nozzle_temperature": ["220"],
+        }
+        allowed = {"retraction_speed", "z_hop", "z_hop_types", "machine_max_jerk_x"}
+
+        updated, entries = _overlay_3mf_machine_settings(
+            machine_profile, threemf_settings, allowed,
+        )
+
+        self.assertEqual(updated["retraction_speed"], ["40"])
+        self.assertEqual(updated["z_hop"], ["0"])
+        self.assertEqual(updated["z_hop_types"], ["Slope Lift"])
+        self.assertEqual(updated["machine_max_jerk_x"], ["20", "9"])
+        self.assertNotIn("nozzle_temperature", updated)
+        self.assertEqual(
+            {e["key"] for e in entries},
+            {"retraction_speed", "z_hop", "z_hop_types", "machine_max_jerk_x"},
+        )
+
+    def test_skips_keys_already_matching(self) -> None:
+        machine_profile = {"retraction_speed": ["40"]}
+        threemf_settings = {"retraction_speed": ["40"]}
+        updated, entries = _overlay_3mf_machine_settings(
+            machine_profile, threemf_settings, {"retraction_speed"},
+        )
+        self.assertEqual(updated, machine_profile)
+        self.assertEqual(entries, [])
+
+    def test_skips_keys_absent_from_threemf_settings(self) -> None:
+        machine_profile = {"retraction_speed": ["30"]}
+        # The allowlist references a key the 3MF doesn't actually carry —
+        # we can't transfer what isn't there.
+        updated, entries = _overlay_3mf_machine_settings(
+            machine_profile, {}, {"retraction_speed"},
+        )
+        self.assertEqual(updated, machine_profile)
+        self.assertEqual(entries, [])
 
 
 class OverlayFilamentSettingsTests(unittest.TestCase):
@@ -231,6 +366,118 @@ class OverlayFilamentSettingsTests(unittest.TestCase):
 
         self.assertEqual(updated, filament_profile)
         self.assertEqual(entries, [])
+
+
+class PatchOutputSettingsTests(unittest.TestCase):
+    """``_patch_output_settings`` records customizations into the output 3MF's
+    ``different_settings_to_system`` so OrcaSlicer can re-open the file and
+    show the user's overrides instead of silently reverting them to system
+    defaults. The slot layout must match OrcaSlicer's loader:
+    ``[process, filament_0, …, filament_{N-1}, printer]``."""
+
+    def _make_output_3mf(self, settings: dict) -> str:
+        tmp = tempfile.NamedTemporaryFile(suffix=".3mf", delete=False)
+        tmp.close()
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("[Content_Types].xml", "")
+            zf.writestr(
+                "Metadata/project_settings.config",
+                json.dumps(settings),
+            )
+        return tmp.name
+
+    def _read_diff(self, path: str) -> list:
+        with zipfile.ZipFile(path) as zf:
+            settings = json.loads(zf.read("Metadata/project_settings.config"))
+        return settings.get("different_settings_to_system", [])
+
+    def test_writes_machine_keys_to_trailing_slot_single_filament(self) -> None:
+        path = self._make_output_3mf({
+            "different_settings_to_system": ["existing_process", "", ""],
+        })
+        try:
+            _patch_output_settings(
+                path,
+                customized_keys=set(),
+                machine_customized_keys={"retraction_speed", "z_hop"},
+                num_filaments=1,
+            )
+            diff = self._read_diff(path)
+            # 1 filament → length 3, printer at index 2.
+            self.assertEqual(len(diff), 3)
+            self.assertEqual(diff[0], "existing_process")
+            self.assertEqual(diff[1], "")
+            self.assertEqual(
+                set(diff[2].split(";")), {"retraction_speed", "z_hop"},
+            )
+        finally:
+            os.unlink(path)
+
+    def test_writes_filament_at_index_plus_one_two_filaments(self) -> None:
+        path = self._make_output_3mf({
+            "different_settings_to_system": ["", "", "", ""],
+        })
+        try:
+            _patch_output_settings(
+                path,
+                customized_keys=set(),
+                filament_customized_keys={
+                    0: {"nozzle_temperature"},
+                    1: {"fan_min_speed"},
+                },
+                machine_customized_keys={"retraction_speed"},
+                num_filaments=2,
+            )
+            diff = self._read_diff(path)
+            # 2 filaments → [process, filament_0, filament_1, printer], len 4.
+            self.assertEqual(len(diff), 4)
+            self.assertEqual(diff[1], "nozzle_temperature")
+            self.assertEqual(diff[2], "fan_min_speed")
+            self.assertEqual(diff[3], "retraction_speed")
+        finally:
+            os.unlink(path)
+
+    def test_pads_short_diff_to_canonical_width(self) -> None:
+        # An output written by some pipeline that left the field empty —
+        # we must still pad to ``num_filaments + 2`` so machine_idx is correct.
+        path = self._make_output_3mf({"different_settings_to_system": []})
+        try:
+            _patch_output_settings(
+                path,
+                customized_keys=set(),
+                machine_customized_keys={"z_hop"},
+                num_filaments=1,
+            )
+            diff = self._read_diff(path)
+            self.assertEqual(len(diff), 3)
+            self.assertEqual(diff[0], "")
+            self.assertEqual(diff[1], "")
+            self.assertEqual(diff[2], "z_hop")
+        finally:
+            os.unlink(path)
+
+    def test_merges_with_existing_keys_in_each_slot(self) -> None:
+        path = self._make_output_3mf({
+            "different_settings_to_system": [
+                "alpha;beta",
+                "",
+                "existing_machine",
+            ],
+        })
+        try:
+            _patch_output_settings(
+                path,
+                customized_keys={"gamma"},
+                machine_customized_keys={"new_machine"},
+                num_filaments=1,
+            )
+            diff = self._read_diff(path)
+            self.assertEqual(set(diff[0].split(";")), {"alpha", "beta", "gamma"})
+            self.assertEqual(
+                set(diff[2].split(";")), {"existing_machine", "new_machine"},
+            )
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

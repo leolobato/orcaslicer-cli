@@ -89,6 +89,8 @@ class SettingsTransferResult:
     customized_keys: set[str] = field(default_factory=set)
     filaments: list[FilamentTransferEntry] = field(default_factory=list)
     filament_customized_keys: dict[int, set[str]] = field(default_factory=dict)
+    machine_customized_keys: set[str] = field(default_factory=set)
+    machine_transferred: list[dict[str, Any]] = field(default_factory=list)
 
 
 
@@ -214,22 +216,51 @@ def _extract_declared_customizations(threemf_settings: dict[str, Any]) -> set[st
 def _extract_declared_filament_customizations(
     threemf_settings: dict[str, Any],
 ) -> list[set[str]]:
-    """Per-filament customization allowlists from `different_settings_to_system[2+]`.
+    """Per-filament customization allowlists from `different_settings_to_system`.
 
-    Slot `i` in the returned list corresponds to filament slot `i`
-    (= `different_settings_to_system[i + 2]`). Returns an empty list when the
-    fingerprint is missing or has no filament slots.
+    OrcaSlicer stores this field as ``[process, filament_0, filament_1, ...,
+    filament_N-1, printer]`` (see ``PresetBundle::load_3mf_*`` in
+    ``OrcaSlicer/src/libslic3r/PresetBundle.cpp:3585,3595`` — printer is loaded
+    from index ``num_filaments + 1``). So filament slot ``i`` lives at
+    ``different_settings_to_system[i + 1]``, and the LAST slot is always the
+    printer (handled separately by ``_extract_declared_machine_customizations``).
+
+    Returns an empty list when the fingerprint is missing or has no filament
+    slots (length < 3).
     """
     diff_to_system = threemf_settings.get("different_settings_to_system")
-    if not isinstance(diff_to_system, list) or len(diff_to_system) <= 2:
+    if not isinstance(diff_to_system, list) or len(diff_to_system) < 3:
         return []
+    # Filament slots are everything between the process slot (index 0) and
+    # the printer slot (last index).
     result: list[set[str]] = []
-    for entry in diff_to_system[2:]:
+    for entry in diff_to_system[1:-1]:
         if isinstance(entry, str) and entry.strip():
             result.append({k.strip() for k in entry.split(";") if k.strip()})
         else:
             result.append(set())
     return result
+
+
+def _extract_declared_machine_customizations(
+    threemf_settings: dict[str, Any],
+) -> set[str]:
+    """Machine/printer customization allowlist from the LAST entry of
+    ``different_settings_to_system``.
+
+    OrcaSlicer's layout for a 3MF with N filaments is
+    ``[process, filament_0, ..., filament_N-1, printer]`` — so the printer
+    slot is always the trailing entry. Returns an empty set when the
+    fingerprint is missing, too short to contain a printer slot (length < 2),
+    or that slot is blank.
+    """
+    diff_to_system = threemf_settings.get("different_settings_to_system")
+    if not isinstance(diff_to_system, list) or len(diff_to_system) < 2:
+        return set()
+    entry = diff_to_system[-1]
+    if not isinstance(entry, str) or not entry.strip():
+        return set()
+    return {k.strip() for k in entry.split(";") if k.strip()}
 
 
 def _overlay_3mf_filament_settings(
@@ -279,6 +310,42 @@ def _overlay_3mf_filament_settings(
     if overrides:
         return {**filament_profile, **overrides}, entries
     return filament_profile, []
+
+
+def _overlay_3mf_machine_settings(
+    machine_profile: dict[str, Any],
+    threemf_settings: dict[str, Any],
+    allowed_keys: set[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Overlay 3MF-declared machine/printer customizations onto a loaded machine profile.
+
+    Unlike the per-filament overlay, the machine overlay has no name guard:
+    the printer profile is fixed by the slice request, so any customization
+    declared in the 3MF's printer slot of ``different_settings_to_system``
+    applies straight onto the resolved machine profile.
+
+    Per-extruder list values (e.g. ``machine_max_jerk_x: ["20", "9"]`` where
+    each element is one motion profile) are copied wholesale; scalar values
+    are written as-is.
+
+    Returns ``(updated_profile, entries)`` where ``entries`` is a list of
+    ``{key, value, original}`` dicts for surfacing in response headers.
+    """
+    overrides: dict[str, Any] = {}
+    entries: list[dict[str, Any]] = []
+    for key in allowed_keys:
+        if key not in threemf_settings:
+            continue
+        new_val = threemf_settings[key]
+        original = machine_profile.get(key)
+        if original == new_val:
+            continue
+        overrides[key] = new_val
+        entries.append({"key": key, "value": new_val, "original": original})
+
+    if overrides:
+        return {**machine_profile, **overrides}, entries
+    return machine_profile, []
 
 
 _PLATER_NAME_METADATA_RE = re.compile(
@@ -875,6 +942,7 @@ class SliceContext:
     settings_transfer: SettingsTransferResult
     original_thumbnails: dict[str, bytes]
     result_path: str
+    num_filaments: int = 1
 
 
 def _prepare_slice(
@@ -954,7 +1022,23 @@ def _prepare_slice(
     # Extract values before machine-key filter (these may be present in both
     # machine and process contexts and would otherwise be incorrectly excluded).
     declared_customizations = _extract_declared_customizations(threemf_settings)
+    declared_machine_customizations = _extract_declared_machine_customizations(threemf_settings)
     raw_bed_type = threemf_settings.get("curr_bed_type")
+
+    # Apply printer customizations from the 3MF before stripping machine keys
+    # below — they're sourced from ``threemf_settings`` and disappear after the
+    # filter. The machine profile for this slice is fixed by the request, so
+    # there's no equivalent of the filament name guard.
+    machine_transferred: list[dict[str, Any]] = []
+    if declared_machine_customizations:
+        machine_profile, machine_transferred = _overlay_3mf_machine_settings(
+            machine_profile, threemf_settings, declared_machine_customizations,
+        )
+        if machine_transferred:
+            logger.info(
+                "Overlaid %d machine setting(s) from 3MF onto printer profile",
+                len(machine_transferred),
+            )
 
     threemf_settings = {
         k: v for k, v in threemf_settings.items()
@@ -975,6 +1059,12 @@ def _prepare_slice(
             settings_transfer = SettingsTransferResult(status="no_customizations")
     else:
         settings_transfer = SettingsTransferResult(status="no_3mf_settings")
+
+    if machine_transferred:
+        settings_transfer.machine_transferred = machine_transferred
+        settings_transfer.machine_customized_keys = {
+            e["key"] for e in machine_transferred
+        }
 
     # Request value takes priority; otherwise preserve 3MF-selected bed type.
     effective_plate_type = plate_type
@@ -1115,6 +1205,7 @@ def _prepare_slice(
         settings_transfer=settings_transfer,
         original_thumbnails=original_thumbnails,
         result_path=result_path,
+        num_filaments=len(filament_profiles),
     )
 
 
@@ -1122,6 +1213,8 @@ def _patch_output_settings(
     result_path: str,
     customized_keys: set[str],
     filament_customized_keys: dict[int, set[str]] | None = None,
+    machine_customized_keys: set[str] | None = None,
+    num_filaments: int = 1,
 ) -> None:
     """Ensure transferred keys appear in the output 3MF's different_settings_to_system.
 
@@ -1131,12 +1224,15 @@ def _patch_output_settings(
     the field after slicing ensures the user's customizations are visible when
     reopening the file in OrcaSlicer.
 
-    `customized_keys` patches slot 0 (process). `filament_customized_keys` maps
-    filament slot index to per-filament customization keys; each mapped slot is
-    patched into `different_settings_to_system[slot + 2]`.
+    The field is laid out as ``[process, filament_0, ..., filament_{N-1}, printer]``
+    (see ``PresetBundle::load_3mf_*`` in OrcaSlicer source). ``customized_keys``
+    patches slot 0 (process); ``filament_customized_keys`` maps slot ``i`` →
+    index ``i + 1``; ``machine_customized_keys`` patches the trailing
+    printer slot at index ``num_filaments + 1``.
     """
     filament_customized_keys = filament_customized_keys or {}
-    if not customized_keys and not filament_customized_keys:
+    machine_customized_keys = machine_customized_keys or set()
+    if not customized_keys and not filament_customized_keys and not machine_customized_keys:
         return
 
     settings_file = "Metadata/project_settings.config"
@@ -1151,12 +1247,15 @@ def _patch_output_settings(
     if not isinstance(diff_to_system, list):
         diff_to_system = []
 
+    # Pad to the canonical OrcaSlicer width so every slot has a stable index.
     required_len = max(
-        [1]
-        + ([2 + s for s in filament_customized_keys] if filament_customized_keys else []),
+        num_filaments + 2,
+        len(diff_to_system),
+        max((1 + s for s in filament_customized_keys), default=0) + 1,
     )
     while len(diff_to_system) < required_len:
         diff_to_system.append("")
+    machine_idx = len(diff_to_system) - 1
 
     changed = False
 
@@ -1174,7 +1273,11 @@ def _patch_output_settings(
     for slot_idx, keys in filament_customized_keys.items():
         if not keys:
             continue
-        target_idx = slot_idx + 2
+        target_idx = slot_idx + 1
+        if target_idx >= machine_idx:
+            # Defensive: a stale slot index that would collide with the printer
+            # slot would silently corrupt the layout. Skip it.
+            continue
         existing_entry = diff_to_system[target_idx]
         existing = (
             {k.strip() for k in existing_entry.split(";") if k.strip()}
@@ -1184,6 +1287,18 @@ def _patch_output_settings(
         merged = existing | keys
         if merged != existing:
             diff_to_system[target_idx] = ";".join(sorted(merged))
+            changed = True
+
+    if machine_customized_keys:
+        existing_entry = diff_to_system[machine_idx]
+        existing = (
+            {k.strip() for k in existing_entry.split(";") if k.strip()}
+            if isinstance(existing_entry, str)
+            else set()
+        )
+        merged = existing | machine_customized_keys
+        if merged != existing:
+            diff_to_system[machine_idx] = ";".join(sorted(merged))
             changed = True
 
     if not changed:
@@ -1217,6 +1332,8 @@ def _post_process(ctx: SliceContext, orca_output: str | None = None) -> bytes:
             ctx.result_path,
             ctx.settings_transfer.customized_keys,
             ctx.settings_transfer.filament_customized_keys,
+            machine_customized_keys=ctx.settings_transfer.machine_customized_keys,
+            num_filaments=ctx.num_filaments,
         )
     except Exception:
         logger.warning("Failed to patch different_settings_to_system; continuing", exc_info=True)
@@ -1426,6 +1543,10 @@ async def slice_3mf_streaming(
                     transfer_info["filaments"] = [
                         asdict(f) for f in ctx.settings_transfer.filaments
                     ]
+                if ctx.settings_transfer.machine_transferred:
+                    transfer_info["machine_transferred"] = (
+                        ctx.settings_transfer.machine_transferred
+                    )
 
                 yield _sse_event("result", {
                     "file_base64": result_b64,

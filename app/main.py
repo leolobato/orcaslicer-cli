@@ -931,6 +931,10 @@ async def slice_file(
         headers["X-Filament-Settings-Transferred"] = json.dumps(
             [asdict(f) for f in settings_transfer.filaments]
         )
+    if settings_transfer.machine_transferred:
+        headers["X-Machine-Settings-Transferred"] = json.dumps(
+            settings_transfer.machine_transferred,
+        )
     return Response(
         content=result,
         media_type="application/octet-stream",
