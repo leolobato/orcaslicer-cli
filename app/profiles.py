@@ -1122,41 +1122,6 @@ def _flatten_user_filament_for_printers(
     return out
 
 
-# Backward-compatible alias kept so any external callers or tests that
-# reference the old singular name still work during the transition.
-def _flatten_user_filament_for_printer(
-    resolved: dict[str, Any],
-    *,
-    printer_name: str,
-) -> dict[str, Any]:
-    """Deprecated: use `_flatten_user_filament_for_printers` instead.
-
-    Thin wrapper that delegates to the new plural function with a
-    single-printer list and looks up variant info from the machine
-    profile index.
-    """
-    variant_count = _printer_variant_count(printer_name)
-    variant_labels = None
-    if variant_count > 1:
-        machine_key = _select_profile_key_by_name(printer_name, category="machine")
-        if machine_key is not None:
-            try:
-                machine_resolved = resolve_profile_by_name(machine_key)
-            except ProfileNotFoundError:
-                machine_resolved = None
-            if machine_resolved:
-                labels = machine_resolved.get("printer_extruder_variant")
-                if isinstance(labels, list):
-                    variant_labels = list(labels)
-    return _flatten_user_filament_for_printers(
-        resolved,
-        printers=[printer_name],
-        name_label=printer_name,
-        variant_count=variant_count,
-        variant_labels=variant_labels,
-    )
-
-
 def export_user_filament(
     setting_id: str,
     *,
@@ -1238,6 +1203,16 @@ def export_user_filament(
         # Look up variant labels via the FIRST printer in the group (all
         # printers in the group share variant_count by construction; we use
         # the first as representative for label lookup).
+        #
+        # Assumption: all printers in the same variant-count group also
+        # share the same `printer_extruder_variant` *labels*. True for the
+        # current Bambu Lab fleet (label conventions are vendor-wide). If
+        # we ever consolidate printers from different vendors that happen
+        # to share a count but not labels (e.g. ["Standard", "High Flow"]
+        # vs ["Direct Drive Standard", "Direct Drive High Flow"]), the
+        # consolidated file's `filament_extruder_variant` would only match
+        # the first printer. Sub-group by `tuple(variant_labels)` here if
+        # that case ever surfaces.
         variant_labels = None
         if variant_count > 1:
             machine_key = _select_profile_key_by_name(

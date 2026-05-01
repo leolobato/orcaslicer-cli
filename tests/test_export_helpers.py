@@ -223,11 +223,7 @@ class LongestWordPrefixTests(unittest.TestCase):
 
 
 class FlattenForPrinterTests(unittest.TestCase):
-    """Tests for `_flatten_user_filament_for_printers` (plural new function).
-
-    The old `_flatten_user_filament_for_printer` (singular) is kept as a
-    deprecated wrapper and exercised transitively through these tests.
-    """
+    """Tests for `_flatten_user_filament_for_printers` (plural)."""
 
     def setUp(self) -> None:
         reset_profiles_state()
