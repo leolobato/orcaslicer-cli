@@ -53,7 +53,7 @@
         <label class="mb-1 block text-[10px] uppercase tracking-wide text-slate-500">Machine Filter</label>
         <select class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-ink focus:border-accent focus:ring-1 focus:ring-accent-ring"
                 x-model="selectedMachineId"
-                @change="selectMachine(selectedMachineId)">
+                @change="$event.isTrusted && selectMachine(selectedMachineId)">
           <option value="">All Machines</option>
           <template x-for="m in machines" :key="m.setting_id">
             <option :value="m.setting_id" x-text="m.name"></option>

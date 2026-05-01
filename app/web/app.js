@@ -260,8 +260,14 @@ function app() {
     },
 
     init() {
-      // Restore persisted machine filter
-      this.selectedMachineId = localStorage.getItem("machineFilter") || "";
+      // NOTE: deliberately do NOT seed `selectedMachineId` from
+      // localStorage here. If we did, Alpine's `x-model` on the machine
+      // dropdown would render with a value that has no matching <option>
+      // yet (the machines list is still loading), prompting Alpine to
+      // sync the model back to "" — which then triggers the @change
+      // handler `selectMachine("")` and *clears* localStorage.
+      // `loadMachines()` restores the persisted value after the options
+      // exist, avoiding the race.
 
       // Load API version and machine list for global filter
       api("/health").then((data) => {
