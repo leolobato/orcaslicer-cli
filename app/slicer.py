@@ -1201,9 +1201,14 @@ def _prepare_slice(
         # from the output 3MF — only gcode + metadata + thumbnails get
         # written. The CLI's default keeps the full mesh, bloating the
         # output by the original file size (~13 MB on a typical multi-part
-        # project). ``--min-save 1`` flips the same bit (OrcaSlicer.cpp
+        # project). ``--min-save`` flips the same bit (OrcaSlicer.cpp
         # 7242 → ``store_params.strategy | SaveStrategy::SkipModel``).
-        "--min-save", "1",
+        # `min_save` is a `coBool` and the CLI parser at
+        # ``Config.cpp:1656`` deliberately does NOT consume the next token
+        # for bool options — passing ``"--min-save", "1"`` would leak the
+        # ``"1"`` into ``m_input_files`` and abort with CLI_FILE_NOTFOUND
+        # before the real input is even loaded.
+        "--min-save",
         "--outputdir", tmpdir,
         os.path.abspath(slice_filepath),
     ]

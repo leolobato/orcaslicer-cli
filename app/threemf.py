@@ -439,10 +439,13 @@ def _collect_mesh_data(
 
     Returns a list of per-build-item entries: each entry is a dict with
     ``src_object_id`` (the build/item's objectid, used for metadata lookup),
-    ``verts`` (world-space vertex list) and ``tris`` (triangle indices into
-    that entry's verts). Multiple entries are emitted when the plate hosts
-    multiple distinct objects or instance copies, so the caller can preserve
-    per-object identity in the output 3MF.
+    ``verts`` (world-space vertex list) and ``tris`` (tuples of three vertex
+    indices plus a pre-escaped XML attribute fragment carrying any non-vN
+    attributes from the source ``<triangle>`` — e.g. ``paint_color``,
+    ``paint_supports``, ``paint_seam`` — so multi-material/seam/support
+    painting survives the rebuild). Multiple entries are emitted when the
+    plate hosts multiple distinct objects or instance copies, so the caller
+    can preserve per-object identity in the output 3MF.
     """
     ns_p = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
     root = ET.fromstring(root_model)
@@ -457,7 +460,7 @@ def _collect_mesh_data(
         transform: list[float],
         local_objects: dict[str, ET.Element],
         item_verts: list[tuple[float, float, float]],
-        item_tris: list[tuple[int, int, int]],
+        item_tris: list[tuple[int, int, int, str]],
         printable_objectids: set[str] | None = None,
     ) -> None:
         mesh = elem.find("m:mesh", _NS)
@@ -469,10 +472,16 @@ def _collect_mesh_data(
                 z = float(v.get("z"))
                 item_verts.append(_apply_transform(x, y, z, transform))
             for t in mesh.findall("m:triangles/m:triangle", _NS):
+                extra = "".join(
+                    f' {k}="{_xml_escape(v)}"'
+                    for k, v in t.attrib.items()
+                    if k not in ("v1", "v2", "v3") and not k.startswith("{")
+                )
                 item_tris.append((
                     int(t.get("v1")) + offset,
                     int(t.get("v2")) + offset,
                     int(t.get("v3")) + offset,
+                    extra,
                 ))
 
         for comp in elem.findall("m:components/m:component", _NS):
@@ -528,7 +537,7 @@ def _collect_mesh_data(
             else None
         )
         item_verts: list[tuple[float, float, float]] = []
-        item_tris: list[tuple[int, int, int]] = []
+        item_tris: list[tuple[int, int, int, str]] = []
         collect_from_element(
             obj_elem, build_transform, objects,
             item_verts, item_tris, printable,
@@ -695,7 +704,7 @@ def extract_plate(
                 for v in shifted
             )
             t_xml = "".join(
-                f'    <triangle v1="{t[0]}" v2="{t[1]}" v3="{t[2]}"/>\n'
+                f'    <triangle v1="{t[0]}" v2="{t[1]}" v3="{t[2]}"{t[3]}/>\n'
                 for t in item["tris"]
             )
             object_blocks.append(

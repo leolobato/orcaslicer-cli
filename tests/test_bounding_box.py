@@ -447,6 +447,99 @@ class ExtractPlatePreservesObjectsTests(unittest.TestCase):
         self.assertEqual(objs[0]["name"], 'A & B "part"')
 
 
+class ExtractPlatePreservesPaintAttributesTests(unittest.TestCase):
+    """Per-triangle paint attributes (``paint_color``, ``paint_supports``,
+    ``paint_seam``) carry Bambu's MMU/seam/support painting. If they are
+    stripped during plate extraction, OrcaSlicer sees an unpainted mesh and
+    collapses a multi-color print to filament 1 only."""
+
+    @staticmethod
+    def _triangles_in(plate_3mf: bytes) -> list[dict[str, str]]:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(io.BytesIO(plate_3mf)) as zf:
+            root = ET.fromstring(zf.read("3D/3dmodel.model").decode())
+        ns = {
+            "m": "http://schemas.microsoft.com/3dmanufacturing/core/2015/02",
+        }
+        return [
+            dict(t.attrib)
+            for t in root.findall(
+                ".//m:object/m:mesh/m:triangles/m:triangle", ns,
+            )
+        ]
+
+    def test_paint_color_attribute_round_trips(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0), (5, 5, 0)]
+        vx = "".join(f'<vertex x="{x}" y="{y}" z="{z}"/>' for x, y, z in verts)
+        # Two triangles: one painted with filament 2 ("0C"), one with filament
+        # 3 ("08") — the encoding OrcaSlicer's MMU painter writes.
+        tx = (
+            '<triangle v1="0" v2="1" v3="2" paint_color="0C"/>'
+            '<triangle v1="1" v2="2" v3="3" paint_color="08" paint_seam="04"/>'
+        )
+        mesh = (
+            f"<mesh><vertices>{vx}</vertices>"
+            f"<triangles>{tx}</triangles></mesh>"
+        )
+        objects_xml = f'<object id="1" type="model">{mesh}</object>'
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        triangles = self._triangles_in(out)
+        self.assertEqual(len(triangles), 2)
+        self.assertEqual(triangles[0].get("paint_color"), "0C")
+        self.assertEqual(triangles[1].get("paint_color"), "08")
+        self.assertEqual(triangles[1].get("paint_seam"), "04")
+
+    def test_unpainted_triangles_round_trip_without_extra_attrs(self) -> None:
+        verts = [(0, 0, 0), (5, 0, 0), (0, 5, 0)]
+        vx = "".join(f'<vertex x="{x}" y="{y}" z="{z}"/>' for x, y, z in verts)
+        tx = '<triangle v1="0" v2="1" v3="2"/>'
+        mesh = (
+            f"<mesh><vertices>{vx}</vertices>"
+            f"<triangles>{tx}</triangles></mesh>"
+        )
+        objects_xml = f'<object id="1" type="model">{mesh}</object>'
+        build_xml = (
+            '<item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        )
+        ms = (
+            '<?xml version="1.0"?><config>'
+            '<object id="1"><part id="1" subtype="normal_part"/></object>'
+            '<plate><metadata key="plater_id" value="1"/>'
+            '<model_instance><metadata key="object_id" value="1"/>'
+            "</model_instance></plate>"
+            "</config>"
+        )
+
+        out = extract_plate(
+            ExtractPlateMeshDataTests()._build_3mf(
+                objects_xml, build_xml, ms,
+            ),
+            90, 90,
+        )
+        self.assertIsNotNone(out)
+        triangles = self._triangles_in(out)
+        self.assertEqual(len(triangles), 1)
+        self.assertEqual(set(triangles[0].keys()), {"v1", "v2", "v3"})
+
+
 class BoundingBoxRealBenchyTests(unittest.TestCase):
     """Regression test for the user-reported benchy 3MF — the file lives outside
     this repo, so the test is skipped when the fixture is unavailable.
