@@ -1195,6 +1195,15 @@ def _prepare_slice(
         "--slice", "1",
         "--export-3mf", "result.3mf",
         "--allow-newer-file",
+        # Match the GUI's slice-export strategy. The GUI sets
+        # ``SaveStrategy::SkipModel`` unconditionally on every slice export
+        # (Plater.cpp 14624 / 15828 / 15856), which omits the input mesh
+        # from the output 3MF — only gcode + metadata + thumbnails get
+        # written. The CLI's default keeps the full mesh, bloating the
+        # output by the original file size (~13 MB on a typical multi-part
+        # project). ``--min-save 1`` flips the same bit (OrcaSlicer.cpp
+        # 7242 → ``store_params.strategy | SaveStrategy::SkipModel``).
+        "--min-save", "1",
         "--outputdir", tmpdir,
         os.path.abspath(slice_filepath),
     ]
