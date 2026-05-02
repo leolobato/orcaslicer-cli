@@ -52,6 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1-dev \
     libfreetype6-dev \
     libxml2-dev \
+    libtiff-dev \
+    libxext-dev \
+    libxmu-dev \
+    libxi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -74,7 +78,7 @@ RUN sed -i \
         deps/CMakeLists.txt
 
 # Build the deps superbuild. This is the long phase — first time can be
-# 30–60 minutes depending on the host. The deps tree is self-contained;
+# 60–90 minutes depending on the host. The deps tree is self-contained;
 # we only need its destdir/ output.
 RUN cmake -S deps -B build/deps -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
