@@ -1362,8 +1362,16 @@ def _prepare_slice(
     filament_paths = []
     for i, fp in enumerate(filament_profiles):
         path = os.path.join(tmpdir, f"filament_{i}.json")
+        # OrcaSlicer's CLI loader rejects profiles whose `type` isn't one of
+        # `machine` / `process` / `filament` and whose `from` isn't `system` /
+        # `User` (`OrcaSlicer.cpp:1882-1908`). User-imported filament JSONs
+        # often omit one or both since the GUI infers them — fill them in so
+        # the loader accepts the rendered file.
+        fp_out = dict(fp)
+        fp_out.setdefault("type", "filament")
+        fp_out.setdefault("from", "system")
         with open(path, "w") as f:
-            json.dump(fp, f, indent=2)
+            json.dump(fp_out, f, indent=2)
         filament_paths.append(path)
 
     settings_arg = f"{machine_path};{process_path}"
