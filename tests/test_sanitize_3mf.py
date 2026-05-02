@@ -482,19 +482,21 @@ class TruncatePerFilamentListsTests(unittest.TestCase):
         self.assertEqual(_truncate_per_filament_lists(settings, target_n=-1), {})
         self.assertEqual(settings["filament_colour"], ["#000", "#FFF"])
 
-    def test_no_op_when_filament_settings_id_missing(self) -> None:
-        # Without an anchor we have no reliable way to tell which lists are
-        # per-filament — refuse to guess.
+    def test_truncates_even_without_filament_settings_id_anchor(self) -> None:
+        # Per-filament keys longer than target_n must be shrunk regardless of
+        # whether the 3MF has the conventional `filament_settings_id` anchor;
+        # otherwise OrcaSlicer's `filament_colour.size()² × heads ==
+        # matrix.size()` check trips at G-code export.
         settings = {
             "filament_colour": ["#000", "#FFF", "#F0F", "#0FF"],
             "nozzle_temperature": ["220", "220", "220", "220"],
         }
-        snapshot = {k: list(v) for k, v in settings.items()}
 
         touched = _truncate_per_filament_lists(settings, target_n=1)
 
-        self.assertEqual(touched, {})
-        self.assertEqual(settings, snapshot)
+        self.assertEqual(touched, {"filament_colour": 4, "nozzle_temperature": 4})
+        self.assertEqual(settings["filament_colour"], ["#000"])
+        self.assertEqual(settings["nozzle_temperature"], ["220"])
 
     def test_writes_through_sanitize_3mf(self) -> None:
         # Reproduces the percussion-frog 3MF shape: 4 authored filaments,

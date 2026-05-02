@@ -475,10 +475,9 @@ def _truncate_per_filament_lists(
     Orca then aborts at G-code export with the size-mismatch above.
 
     Truncates exactly the keys OrcaSlicer documents as per-filament (see
-    `_PER_FILAMENT_KEYS`). Anchors on `len(filament_settings_id)` for the
-    sanity check that we'd actually be shrinking and not extending. Only
-    touches keys whose value is a list of the same length as the anchor —
-    that way an upstream Orca change that flips a key from list to scalar
+    `_PER_FILAMENT_KEYS`). Any list-valued entry longer than `target_n` is
+    shrunk; entries that are already short enough or aren't lists are left
+    alone, so an upstream Orca change that flips a key from list to scalar
     won't fight us.
 
     Returns {key: original_length} for every key touched.
@@ -486,20 +485,15 @@ def _truncate_per_filament_lists(
     if target_n <= 0:
         return {}
 
-    anchor = settings.get("filament_settings_id")
-    if not isinstance(anchor, list) or not anchor:
-        return {}
-    original_n = len(anchor)
-    if original_n <= target_n:
-        return {}
-
     truncated: dict[str, int] = {}
     for key in _PER_FILAMENT_KEYS:
         value = settings.get(key)
-        if not isinstance(value, list) or len(value) != original_n:
+        if not isinstance(value, list):
             continue
+        if len(value) <= target_n:
+            continue
+        truncated[key] = len(value)
         settings[key] = value[:target_n]
-        truncated[key] = original_n
     return truncated
 
 
@@ -782,6 +776,23 @@ def _sanitize_3mf(
                     target_filament_count, ", ".join(sample), more,
                 )
                 settings_changed = True
+
+            # Log the final post-sanitize sizes for the keys OrcaSlicer
+            # cross-checks at G-code export. Lets us diagnose mismatches
+            # straight from the slicer log next time the size check trips.
+            def _len_or_none(key: str) -> str:
+                value = settings.get(key)
+                return str(len(value)) if isinstance(value, list) else "—"
+            logger.info(
+                "Post-sanitize sizes: filament_colour=%s, "
+                "filament_settings_id=%s, flush_volumes_matrix=%s, "
+                "flush_multiplier=%s (target_n=%d, nozzle_count=%d)",
+                _len_or_none("filament_colour"),
+                _len_or_none("filament_settings_id"),
+                _len_or_none("flush_volumes_matrix"),
+                _len_or_none("flush_multiplier"),
+                target_filament_count, target_nozzle_count,
+            )
 
         # Strip `plater_name` metadata to work around the CLI null-deref in
         # `PartPlate::generate_plate_name_texture()` (OrcaSlicer 2.3.2).
