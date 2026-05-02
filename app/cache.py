@@ -34,7 +34,7 @@ class TokenCache:
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
         self._sha_to_token: dict[str, str] = {}
 
-    def put(self, payload: bytes) -> tuple[str, str, int]:
+    def put(self, payload: bytes) -> tuple[str, str, int, list[str]]:
         sha = hashlib.sha256(payload).hexdigest()
         size = len(payload)
         with self._lock:
@@ -43,7 +43,7 @@ class TokenCache:
                 entry = self._entries[token]
                 entry.last_access = time.time()
                 self._entries.move_to_end(token)
-                return token, sha, size
+                return token, sha, size, []
             token = secrets.token_urlsafe(16)
             path = self._path_for_sha(sha)
             if not path.exists():
@@ -52,7 +52,26 @@ class TokenCache:
                 os.replace(tmp, path)
             self._entries[token] = _Entry(token, sha, size, time.time())
             self._sha_to_token[sha] = token
-            return token, sha, size
+            evicted = self._evict_if_needed()
+            return token, sha, size, evicted
+
+    def _evict_if_needed(self) -> list[str]:
+        evicted: list[str] = []
+        # File count cap
+        while len(self._entries) > self.max_files:
+            tok, entry = self._entries.popitem(last=False)
+            self._sha_to_token.pop(entry.sha, None)
+            self._path_for_sha(entry.sha).unlink(missing_ok=True)
+            evicted.append(tok)
+        # Byte cap
+        total = sum(e.size for e in self._entries.values())
+        while total > self.max_bytes and self._entries:
+            tok, entry = self._entries.popitem(last=False)
+            self._sha_to_token.pop(entry.sha, None)
+            self._path_for_sha(entry.sha).unlink(missing_ok=True)
+            total -= entry.size
+            evicted.append(tok)
+        return evicted
 
     def path(self, token: str) -> Path:
         with self._lock:
