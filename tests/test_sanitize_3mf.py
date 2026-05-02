@@ -327,6 +327,59 @@ class ResizeFlushVolumesTests(unittest.TestCase):
             ["0", "140", "140", "0"],
         )
 
+    def test_resizes_flush_multiplier_to_match_nozzle_count(self) -> None:
+        """flush_multiplier is per-nozzle; if the 3MF was authored on a
+        multi-nozzle printer and we're slicing for a single-nozzle one,
+        OrcaSlicer's gcode-export size check
+        (``filament_count^2 * flush_multiplier.size() == matrix.size()``)
+        fails unless flush_multiplier is also resized."""
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"] * 2,  # 2 heads
+            "flush_multiplier": ["0.7", "0.7"],
+        }
+
+        _resize_flush_volumes(settings, target_n=2, nozzle_count=1)
+
+        self.assertEqual(settings["flush_multiplier"], ["0.7"])
+        # Matrix should now be N*N*1 = 4 entries.
+        self.assertEqual(len(settings["flush_volumes_matrix"]), 4)
+
+    def test_grows_flush_multiplier_for_multi_nozzle_target(self) -> None:
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"],
+            "flush_multiplier": ["1"],
+        }
+
+        _resize_flush_volumes(settings, target_n=2, nozzle_count=2)
+
+        self.assertEqual(settings["flush_multiplier"], ["1", "1"])
+        self.assertEqual(len(settings["flush_volumes_matrix"]), 8)
+
+    def test_normalizes_string_flush_multiplier_to_list(self) -> None:
+        # Bambu sometimes serializes `flush_multiplier` as a pipe-separated
+        # string instead of a JSON list — Orca's gcode-export size check
+        # parses it as `ConfigOptionFloats`, but our resize logic only saw a
+        # list and silently skipped it, leaving the size mismatch in place.
+        settings = {
+            "flush_volumes_matrix": ["0"] * 49,
+            "flush_multiplier": "1|1",
+        }
+
+        _resize_flush_volumes(settings, target_n=7, nozzle_count=1)
+
+        self.assertEqual(settings["flush_multiplier"], ["1"])
+
+    def test_normalizes_scalar_flush_multiplier_to_list(self) -> None:
+        settings = {
+            "flush_volumes_matrix": ["0"] * 49,
+            "flush_multiplier": "1",
+        }
+
+        _resize_flush_volumes(settings, target_n=7, nozzle_count=1)
+
+        self.assertEqual(settings["flush_multiplier"], ["1"])
+
+
     def test_resize_writes_through_sanitize_3mf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "in.3mf"
@@ -454,19 +507,21 @@ class TruncatePerFilamentListsTests(unittest.TestCase):
         self.assertEqual(_truncate_per_filament_lists(settings, target_n=-1), {})
         self.assertEqual(settings["filament_colour"], ["#000", "#FFF"])
 
-    def test_no_op_when_filament_settings_id_missing(self) -> None:
-        # Without an anchor we have no reliable way to tell which lists are
-        # per-filament — refuse to guess.
+    def test_truncates_even_without_filament_settings_id_anchor(self) -> None:
+        # Per-filament keys longer than target_n must be shrunk regardless of
+        # whether the 3MF has the conventional `filament_settings_id` anchor;
+        # otherwise OrcaSlicer's `filament_colour.size()² × heads ==
+        # matrix.size()` check trips at G-code export.
         settings = {
             "filament_colour": ["#000", "#FFF", "#F0F", "#0FF"],
             "nozzle_temperature": ["220", "220", "220", "220"],
         }
-        snapshot = {k: list(v) for k, v in settings.items()}
 
         touched = _truncate_per_filament_lists(settings, target_n=1)
 
-        self.assertEqual(touched, {})
-        self.assertEqual(settings, snapshot)
+        self.assertEqual(touched, {"filament_colour": 4, "nozzle_temperature": 4})
+        self.assertEqual(settings["filament_colour"], ["#000"])
+        self.assertEqual(settings["nozzle_temperature"], ["220"])
 
     def test_writes_through_sanitize_3mf(self) -> None:
         # Reproduces the percussion-frog 3MF shape: 4 authored filaments,

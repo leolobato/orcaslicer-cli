@@ -23,10 +23,13 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access logs as: '%s - "%s %s HTTP/%s" %d'
+        # → args is (client_addr, method, path, http_version, status_code)
         args = record.args
         if not isinstance(args, tuple) or len(args) < 5:
             return True
-        method, _path, _http_version, status, *_ = args
+        method = args[1]
+        status = args[4]
         try:
             status_code = int(status)
         except (TypeError, ValueError):

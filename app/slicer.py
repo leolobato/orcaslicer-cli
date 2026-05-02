@@ -475,10 +475,9 @@ def _truncate_per_filament_lists(
     Orca then aborts at G-code export with the size-mismatch above.
 
     Truncates exactly the keys OrcaSlicer documents as per-filament (see
-    `_PER_FILAMENT_KEYS`). Anchors on `len(filament_settings_id)` for the
-    sanity check that we'd actually be shrinking and not extending. Only
-    touches keys whose value is a list of the same length as the anchor —
-    that way an upstream Orca change that flips a key from list to scalar
+    `_PER_FILAMENT_KEYS`). Any list-valued entry longer than `target_n` is
+    shrunk; entries that are already short enough or aren't lists are left
+    alone, so an upstream Orca change that flips a key from list to scalar
     won't fight us.
 
     Returns {key: original_length} for every key touched.
@@ -486,20 +485,15 @@ def _truncate_per_filament_lists(
     if target_n <= 0:
         return {}
 
-    anchor = settings.get("filament_settings_id")
-    if not isinstance(anchor, list) or not anchor:
-        return {}
-    original_n = len(anchor)
-    if original_n <= target_n:
-        return {}
-
     truncated: dict[str, int] = {}
     for key in _PER_FILAMENT_KEYS:
         value = settings.get(key)
-        if not isinstance(value, list) or len(value) != original_n:
+        if not isinstance(value, list):
             continue
+        if len(value) <= target_n:
+            continue
+        truncated[key] = len(value)
         settings[key] = value[:target_n]
-        truncated[key] = original_n
     return truncated
 
 
@@ -564,19 +558,24 @@ def _truncate_structural_arrays(
 
 
 def _resize_flush_volumes(
-    settings: dict[str, Any], target_n: int
+    settings: dict[str, Any], target_n: int, nozzle_count: int = 1,
 ) -> bool:
-    """Resize `flush_volumes_matrix` to N×N and `flush_volumes_vector` to 2N.
+    """Resize `flush_volumes_matrix` to N×N×H, `flush_volumes_vector` to 2N,
+    and normalize `flush_multiplier` to a list of H entries — where N is the
+    loaded filament count and H is the target machine's nozzle count.
 
     OrcaSlicer's G-code writer aborts with `Flush volumes matrix do not match
-    to the correct size!` when the embedded matrix length doesn't equal the
-    loaded filament count squared. The 3MF carries a matrix sized for the
-    filaments it was authored with; when the slice runs with a different
-    count, the matrix must be rewritten.
+    to the correct size!` when
+    `filament_colour.size()² × flush_multiplier.size() != flush_volumes_matrix.size()`
+    (`GCode.cpp:5394-5411`). The 3MF carries all three sized for the printer
+    it was authored with; if the source and target nozzle counts disagree —
+    or the value is stored as a pipe-separated string instead of a JSON
+    list — the size check trips even after the matrix is rewritten.
 
-    Preserves entries `[i][j]` where both indices remain valid; fills new
-    cells with 140 mm³ off-diagonal and 0 on-diagonal (OrcaSlicer's defaults).
-    Returns True if either field was modified.
+    Preserves matrix entries `[i][j]` where both indices remain valid; fills
+    new cells with 140 mm³ off-diagonal and 0 on-diagonal (OrcaSlicer's
+    defaults). Replicates the preserved N×N block across all H nozzles.
+    Returns True if any field was modified.
 
     NOTE: Resizing the matrix alone is not sufficient — `filament_colour` and
     other per-filament list keys must also be truncated. See
@@ -584,26 +583,49 @@ def _resize_flush_volumes(
     """
     if target_n <= 0:
         return False
+    if nozzle_count <= 0:
+        nozzle_count = 1
     changed = False
 
     matrix = settings.get("flush_volumes_matrix")
     if isinstance(matrix, list):
-        target_len = target_n * target_n
+        target_len = target_n * target_n * nozzle_count
         if len(matrix) != target_len:
             old_len = len(matrix)
-            old_n = int(old_len ** 0.5)
-            if old_n * old_n != old_len:
-                old_n = 0
+            # Detect old layout. The 3MF stores matrix as
+            # ``H × (N × N)`` flattened. Try the layout that matches
+            # ``flush_multiplier.size()`` first, then fall back to single-head.
+            old_multiplier = settings.get("flush_multiplier")
+            old_h = (
+                len(old_multiplier)
+                if isinstance(old_multiplier, list) and old_multiplier
+                else 1
+            )
+            old_n = 0
+            if old_h > 0 and old_len % old_h == 0:
+                per_head = old_len // old_h
+                candidate = int(per_head ** 0.5)
+                if candidate * candidate == per_head:
+                    old_n = candidate
+            if old_n == 0:
+                # Layout didn't match; treat as single-head square.
+                candidate = int(old_len ** 0.5)
+                if candidate * candidate == old_len:
+                    old_n = candidate
+                    old_h = 1
             new_matrix: list[Any] = []
-            for i in range(target_n):
-                for j in range(target_n):
-                    if i < old_n and j < old_n:
-                        new_matrix.append(matrix[i * old_n + j])
-                    else:
-                        new_matrix.append("0" if i == j else "140")
+            for h in range(nozzle_count):
+                for i in range(target_n):
+                    for j in range(target_n):
+                        if i < old_n and j < old_n and h < old_h:
+                            new_matrix.append(
+                                matrix[h * old_n * old_n + i * old_n + j]
+                            )
+                        else:
+                            new_matrix.append("0" if i == j else "140")
             logger.info(
-                "Resized flush_volumes_matrix: %d -> %d entries (N=%d)",
-                old_len, target_len, target_n,
+                "Resized flush_volumes_matrix: %d -> %d entries (N=%d, H=%d)",
+                old_len, target_len, target_n, nozzle_count,
             )
             settings["flush_volumes_matrix"] = new_matrix
             changed = True
@@ -621,6 +643,32 @@ def _resize_flush_volumes(
                 old_len, target_vec_len,
             )
             settings["flush_volumes_vector"] = new_vector
+            changed = True
+
+    # `flush_multiplier` may arrive as a list, a pipe-separated string
+    # (Bambu's printer-config form: e.g. ``"1|1"``), or a bare scalar.
+    # Normalize to a list of nozzle_count entries no matter what — OrcaSlicer
+    # reads it as `ConfigOptionFloats`, and the gcode-export check is
+    # `filament_count^2 * flush_multiplier.size() == matrix.size()`, so any
+    # mis-sized representation trips the same error.
+    if "flush_multiplier" in settings:
+        raw = settings["flush_multiplier"]
+        if isinstance(raw, list):
+            existing = [str(v) for v in raw]
+        elif isinstance(raw, str):
+            existing = [v for v in raw.split("|") if v]
+        else:
+            existing = [str(raw)] if raw is not None else []
+        if len(existing) != nozzle_count or not isinstance(raw, list):
+            fill = existing[0] if existing else "1"
+            new_multiplier = list(existing[:nozzle_count])
+            while len(new_multiplier) < nozzle_count:
+                new_multiplier.append(fill)
+            logger.info(
+                "Normalized flush_multiplier: %r -> %r (H=%d)",
+                raw, new_multiplier, nozzle_count,
+            )
+            settings["flush_multiplier"] = new_multiplier
             changed = True
 
     return changed
@@ -704,7 +752,14 @@ def _sanitize_3mf(
                     settings["printer_settings_id"] = target_settings_id
                     settings_changed = True
 
-            if _resize_flush_volumes(settings, target_filament_count):
+            target_nozzle_count = 1
+            if machine_profile:
+                nozzles = machine_profile.get("nozzle_diameter")
+                if isinstance(nozzles, list) and nozzles:
+                    target_nozzle_count = len(nozzles)
+            if _resize_flush_volumes(
+                settings, target_filament_count, target_nozzle_count,
+            ):
                 settings_changed = True
 
             # Order matters: structural arrays anchor on the *original*
@@ -731,6 +786,23 @@ def _sanitize_3mf(
                     target_filament_count, ", ".join(sample), more,
                 )
                 settings_changed = True
+
+            # Log the final post-sanitize sizes for the keys OrcaSlicer
+            # cross-checks at G-code export. Lets us diagnose mismatches
+            # straight from the slicer log next time the size check trips.
+            def _len_or_none(key: str) -> str:
+                value = settings.get(key)
+                return str(len(value)) if isinstance(value, list) else "—"
+            logger.info(
+                "Post-sanitize sizes: filament_colour=%s, "
+                "filament_settings_id=%s, flush_volumes_matrix=%s, "
+                "flush_multiplier=%s (target_n=%d, nozzle_count=%d)",
+                _len_or_none("filament_colour"),
+                _len_or_none("filament_settings_id"),
+                _len_or_none("flush_volumes_matrix"),
+                _len_or_none("flush_multiplier"),
+                target_filament_count, target_nozzle_count,
+            )
 
         # Strip `plater_name` metadata to work around the CLI null-deref in
         # `PartPlate::generate_plate_name_texture()` (OrcaSlicer 2.3.2).
@@ -759,6 +831,38 @@ def _sanitize_3mf(
                         zf_out.writestr(item.filename, model_settings_xml)
                     else:
                         zf_out.writestr(item, zf_in.read(item.filename))
+
+        # Verify the on-disk shape OrcaSlicer will actually see, including
+        # keys we don't sanitize (`nozzle_diameter`, `printer_extruder_variant`)
+        # — if those still carry source-printer sizing, OrcaSlicer's
+        # `current_extruder_count != new_extruder_count` branch fires and the
+        # gcode-export size check uses values we didn't normalize.
+        try:
+            with zipfile.ZipFile(sanitized, "r") as zfv:
+                if settings_file in zfv.namelist():
+                    on_disk = json.loads(zfv.read(settings_file).decode())
+                    def _shape(key: str) -> str:
+                        v = on_disk.get(key)
+                        if isinstance(v, list):
+                            return f"len={len(v)}"
+                        if isinstance(v, str):
+                            return f"str={v!r}"
+                        return f"{type(v).__name__}"
+                    logger.info(
+                        "Sanitized 3MF on-disk shapes: filament_colour=%s, "
+                        "filament_settings_id=%s, flush_volumes_matrix=%s, "
+                        "flush_multiplier=%s, nozzle_diameter=%s, "
+                        "printer_extruder_variant=%s",
+                        _shape("filament_colour"),
+                        _shape("filament_settings_id"),
+                        _shape("flush_volumes_matrix"),
+                        _shape("flush_multiplier"),
+                        _shape("nozzle_diameter"),
+                        _shape("printer_extruder_variant"),
+                    )
+        except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as exc:
+            logger.warning("Could not verify sanitized 3MF on-disk shapes: %s", exc)
+
         return sanitized
 
 
@@ -1162,6 +1266,25 @@ def _prepare_slice(
     )
     if slice_filepath != input_path:
         logger.debug("3MF was sanitized")
+
+    # `_overlay_3mf_settings` lifted the source's `flush_*` values onto
+    # `process_profile` at their authored sizes, and `process.json` is loaded
+    # AFTER `project_settings.config` so its values win in `m_print_config`.
+    # Normalize the same keys on `process_profile` to match the target shape
+    # so OrcaSlicer's gcode-export size check
+    # (`filament_count^2 * flush_multiplier.size() == matrix.size()`) lines up.
+    target_nozzles = machine_profile.get("nozzle_diameter") if machine_profile else None
+    target_nozzle_count = (
+        len(target_nozzles)
+        if isinstance(target_nozzles, list) and target_nozzles
+        else 1
+    )
+    if _resize_flush_volumes(
+        process_profile, len(filament_profiles), target_nozzle_count,
+    ):
+        logger.debug(
+            "Re-normalized process_profile flush_* keys to match target machine"
+        )
 
     # Per-filament customization transfer: apply the 3MF's declared per-slot
     # customizations onto the loaded filament profile when the selected filament
