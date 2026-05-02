@@ -82,7 +82,9 @@ RUN sed -i \
         -e 's/^    dep_OpenCSG$//' \
         -e 's/^    \${WXWIDGETS_PKG}$//' \
         -e 's/^ProcessorCount(NPROC)$/ProcessorCount(NPROC)\nset(NPROC 2)/' \
-        deps/CMakeLists.txt
+        deps/CMakeLists.txt && \
+    sed -i 's/BUILD_COMMAND     make -j$/BUILD_COMMAND     make -j2/' deps/GMP/GMP.cmake && \
+    sed -i 's/BUILD_COMMAND make -j$/BUILD_COMMAND make -j2/' deps/MPFR/MPFR.cmake
 
 # Build the deps superbuild. This is the long phase — first time can be
 # 60–90 minutes depending on the host. The deps tree is self-contained;
