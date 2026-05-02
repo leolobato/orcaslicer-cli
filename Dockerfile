@@ -87,9 +87,16 @@ RUN sed -i \
 # no log trace. Inner ExternalProject ninja inherits this cap via
 # CMAKE_BUILD_PARALLEL_LEVEL.
 ENV CMAKE_BUILD_PARALLEL_LEVEL=4
-RUN cmake -S deps -B build/deps -G Ninja \
+# Cache downloaded source tarballs across builds so a transient network
+# blip on one dep (we hit a partial-transfer on Draco's GitHub zip) doesn't
+# force re-downloading every other dep. The deps superbuild looks at
+# DEP_DOWNLOAD_DIR (defaults to deps/DL_CACHE under its CMAKE_CURRENT_SOURCE_DIR);
+# we point it at a stable location and mount that as a cache.
+RUN --mount=type=cache,target=/dep-downloads,sharing=locked \
+    cmake -S deps -B build/deps -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DDESTDIR=/src/build/destdir && \
+        -DDESTDIR=/src/build/destdir \
+        -DDEP_DOWNLOAD_DIR=/dep-downloads && \
     cmake --build build/deps -j4
 
 # =============================================================================
