@@ -7,6 +7,7 @@ Eviction is LRU, gated on configurable byte and file-count caps.
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 import threading
 import time
@@ -39,12 +40,16 @@ class TokenCache:
         with self._lock:
             if sha in self._sha_to_token:
                 token = self._sha_to_token[sha]
+                entry = self._entries[token]
+                entry.last_access = time.time()
                 self._entries.move_to_end(token)
                 return token, sha, size
             token = secrets.token_urlsafe(16)
             path = self._path_for_sha(sha)
             if not path.exists():
-                path.write_bytes(payload)
+                tmp = path.parent / (path.name + f".tmp-{os.getpid()}-{secrets.token_hex(4)}")
+                tmp.write_bytes(payload)
+                os.replace(tmp, path)
             self._entries[token] = _Entry(token, sha, size, time.time())
             self._sha_to_token[sha] = token
             return token, sha, size
