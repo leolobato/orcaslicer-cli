@@ -43,7 +43,7 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status as fastapi_status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
@@ -806,6 +806,21 @@ async def upload_3mf(request: Request, file: UploadFile = File(...)):
     return {"token": token, "sha256": sha, "size": size, "evicts": evicted}
 
 
+@app.delete("/3mf/cache", tags=["3MF"])
+async def clear_cache(request: Request):
+    """Evict all entries from the 3MF token cache."""
+    cache: TokenCache = request.app.state.token_cache
+    count, freed = cache.clear()
+    return {"evicted": count, "freed_bytes": freed}
+
+
+@app.get("/3mf/cache/stats", tags=["3MF"])
+async def cache_stats(request: Request):
+    """Return current 3MF token cache statistics."""
+    cache: TokenCache = request.app.state.token_cache
+    return cache.stats()
+
+
 @app.get("/3mf/{token}", tags=["3MF"])
 async def download_3mf(request: Request, token: str):
     """Download a previously uploaded .3mf file by token."""
@@ -821,6 +836,15 @@ async def download_3mf(request: Request, token: str):
         path,
         media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
     )
+
+
+@app.delete("/3mf/{token}", status_code=fastapi_status.HTTP_204_NO_CONTENT, tags=["3MF"])
+async def delete_token(request: Request, token: str):
+    """Delete a previously uploaded .3mf file by token."""
+    cache: TokenCache = request.app.state.token_cache
+    if not cache.delete(token):
+        return JSONResponse(status_code=404, content={"code": "token_unknown", "token": token})
+    return None
 
 
 def _collect_process_overrides(
