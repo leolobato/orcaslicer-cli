@@ -327,6 +327,34 @@ class ResizeFlushVolumesTests(unittest.TestCase):
             ["0", "140", "140", "0"],
         )
 
+    def test_resizes_flush_multiplier_to_match_nozzle_count(self) -> None:
+        """flush_multiplier is per-nozzle; if the 3MF was authored on a
+        multi-nozzle printer and we're slicing for a single-nozzle one,
+        OrcaSlicer's gcode-export size check
+        (``filament_count^2 * flush_multiplier.size() == matrix.size()``)
+        fails unless flush_multiplier is also resized."""
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"] * 2,  # 2 heads
+            "flush_multiplier": ["0.7", "0.7"],
+        }
+
+        _resize_flush_volumes(settings, target_n=2, nozzle_count=1)
+
+        self.assertEqual(settings["flush_multiplier"], ["0.7"])
+        # Matrix should now be N*N*1 = 4 entries.
+        self.assertEqual(len(settings["flush_volumes_matrix"]), 4)
+
+    def test_grows_flush_multiplier_for_multi_nozzle_target(self) -> None:
+        settings = {
+            "flush_volumes_matrix": ["0", "10", "30", "0"],
+            "flush_multiplier": ["1"],
+        }
+
+        _resize_flush_volumes(settings, target_n=2, nozzle_count=2)
+
+        self.assertEqual(settings["flush_multiplier"], ["1", "1"])
+        self.assertEqual(len(settings["flush_volumes_matrix"]), 8)
+
     def test_resize_writes_through_sanitize_3mf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "in.3mf"

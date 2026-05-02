@@ -564,19 +564,25 @@ def _truncate_structural_arrays(
 
 
 def _resize_flush_volumes(
-    settings: dict[str, Any], target_n: int
+    settings: dict[str, Any], target_n: int, nozzle_count: int = 1,
 ) -> bool:
-    """Resize `flush_volumes_matrix` to N×N and `flush_volumes_vector` to 2N.
+    """Resize `flush_volumes_matrix` to N×N×H, `flush_volumes_vector` to 2N,
+    and `flush_multiplier` to H — where N is the loaded filament count and
+    H is the target machine's nozzle count.
 
     OrcaSlicer's G-code writer aborts with `Flush volumes matrix do not match
-    to the correct size!` when the embedded matrix length doesn't equal the
-    loaded filament count squared. The 3MF carries a matrix sized for the
-    filaments it was authored with; when the slice runs with a different
-    count, the matrix must be rewritten.
+    to the correct size!` when
+    `filament_colour.size()² × flush_multiplier.size() != flush_volumes_matrix.size()`
+    (`GCode.cpp:5394-5411`). The 3MF carries all three sized for the printer
+    it was authored with; if it was authored on a multi-nozzle printer (e.g.
+    H2D) and we're slicing onto a single-nozzle one (or vice versa),
+    `flush_multiplier` stays at the source size and breaks the check even
+    after the matrix is rewritten.
 
-    Preserves entries `[i][j]` where both indices remain valid; fills new
-    cells with 140 mm³ off-diagonal and 0 on-diagonal (OrcaSlicer's defaults).
-    Returns True if either field was modified.
+    Preserves matrix entries `[i][j]` where both indices remain valid; fills
+    new cells with 140 mm³ off-diagonal and 0 on-diagonal (OrcaSlicer's
+    defaults). Replicates the preserved N×N block across all H nozzles.
+    Returns True if any field was modified.
 
     NOTE: Resizing the matrix alone is not sufficient — `filament_colour` and
     other per-filament list keys must also be truncated. See
@@ -584,26 +590,49 @@ def _resize_flush_volumes(
     """
     if target_n <= 0:
         return False
+    if nozzle_count <= 0:
+        nozzle_count = 1
     changed = False
 
     matrix = settings.get("flush_volumes_matrix")
     if isinstance(matrix, list):
-        target_len = target_n * target_n
+        target_len = target_n * target_n * nozzle_count
         if len(matrix) != target_len:
             old_len = len(matrix)
-            old_n = int(old_len ** 0.5)
-            if old_n * old_n != old_len:
-                old_n = 0
+            # Detect old layout. The 3MF stores matrix as
+            # ``H × (N × N)`` flattened. Try the layout that matches
+            # ``flush_multiplier.size()`` first, then fall back to single-head.
+            old_multiplier = settings.get("flush_multiplier")
+            old_h = (
+                len(old_multiplier)
+                if isinstance(old_multiplier, list) and old_multiplier
+                else 1
+            )
+            old_n = 0
+            if old_h > 0 and old_len % old_h == 0:
+                per_head = old_len // old_h
+                candidate = int(per_head ** 0.5)
+                if candidate * candidate == per_head:
+                    old_n = candidate
+            if old_n == 0:
+                # Layout didn't match; treat as single-head square.
+                candidate = int(old_len ** 0.5)
+                if candidate * candidate == old_len:
+                    old_n = candidate
+                    old_h = 1
             new_matrix: list[Any] = []
-            for i in range(target_n):
-                for j in range(target_n):
-                    if i < old_n and j < old_n:
-                        new_matrix.append(matrix[i * old_n + j])
-                    else:
-                        new_matrix.append("0" if i == j else "140")
+            for h in range(nozzle_count):
+                for i in range(target_n):
+                    for j in range(target_n):
+                        if i < old_n and j < old_n and h < old_h:
+                            new_matrix.append(
+                                matrix[h * old_n * old_n + i * old_n + j]
+                            )
+                        else:
+                            new_matrix.append("0" if i == j else "140")
             logger.info(
-                "Resized flush_volumes_matrix: %d -> %d entries (N=%d)",
-                old_len, target_len, target_n,
+                "Resized flush_volumes_matrix: %d -> %d entries (N=%d, H=%d)",
+                old_len, target_len, target_n, nozzle_count,
             )
             settings["flush_volumes_matrix"] = new_matrix
             changed = True
@@ -621,6 +650,21 @@ def _resize_flush_volumes(
                 old_len, target_vec_len,
             )
             settings["flush_volumes_vector"] = new_vector
+            changed = True
+
+    multiplier = settings.get("flush_multiplier")
+    if isinstance(multiplier, list):
+        if len(multiplier) != nozzle_count:
+            old_len = len(multiplier)
+            fill = multiplier[0] if multiplier else "1"
+            new_multiplier = list(multiplier[:nozzle_count])
+            while len(new_multiplier) < nozzle_count:
+                new_multiplier.append(fill)
+            logger.info(
+                "Resized flush_multiplier: %d -> %d entries (H=%d)",
+                old_len, nozzle_count, nozzle_count,
+            )
+            settings["flush_multiplier"] = new_multiplier
             changed = True
 
     return changed
@@ -704,7 +748,14 @@ def _sanitize_3mf(
                     settings["printer_settings_id"] = target_settings_id
                     settings_changed = True
 
-            if _resize_flush_volumes(settings, target_filament_count):
+            target_nozzle_count = 1
+            if machine_profile:
+                nozzles = machine_profile.get("nozzle_diameter")
+                if isinstance(nozzles, list) and nozzles:
+                    target_nozzle_count = len(nozzles)
+            if _resize_flush_volumes(
+                settings, target_filament_count, target_nozzle_count,
+            ):
                 settings_changed = True
 
             # Order matters: structural arrays anchor on the *original*
