@@ -56,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext-dev \
     libxmu-dev \
     libxi-dev \
+    texinfo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
