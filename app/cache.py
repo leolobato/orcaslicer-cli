@@ -57,15 +57,16 @@ class TokenCache:
 
     def _evict_if_needed(self) -> list[str]:
         evicted: list[str] = []
-        # File count cap
-        while len(self._entries) > self.max_files:
+        # File count cap — treat max_files=0 as floor of 1 so the newly-inserted
+        # entry is never self-evicted.
+        while len(self._entries) > max(self.max_files, 1) and len(self._entries) > 1:
             tok, entry = self._entries.popitem(last=False)
             self._sha_to_token.pop(entry.sha, None)
             self._path_for_sha(entry.sha).unlink(missing_ok=True)
             evicted.append(tok)
-        # Byte cap
+        # Byte cap — stop at 1 entry so an oversized payload doesn't self-evict.
         total = sum(e.size for e in self._entries.values())
-        while total > self.max_bytes and self._entries:
+        while total > self.max_bytes and len(self._entries) > 1:
             tok, entry = self._entries.popitem(last=False)
             self._sha_to_token.pop(entry.sha, None)
             self._path_for_sha(entry.sha).unlink(missing_ok=True)

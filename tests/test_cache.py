@@ -87,3 +87,31 @@ def test_get_marks_most_recently_used(cache_dir: Path) -> None:
         cache.path(t2)
     assert cache.path(t1).read_bytes() == b"a"
     assert cache.path(t3).read_bytes() == b"c"
+
+
+def test_max_files_eviction_returns_evicted_tokens(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=1_000_000, max_files=2)
+    t1, _, _, _ = cache.put(b"a")
+    t2, _, _, _ = cache.put(b"b")
+    t3, _, _, evicted = cache.put(b"c")
+    assert evicted == [t1]
+    assert t2 != t1 and t3 != t1
+
+
+def test_max_bytes_eviction(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=2, max_files=100)
+    t1, _, _, _ = cache.put(b"a")
+    t2, _, _, _ = cache.put(b"b")
+    t3, _, _, evicted = cache.put(b"c")
+    assert evicted == [t1]
+    with pytest.raises(KeyError):
+        cache.path(t1)
+    assert cache.path(t2).read_bytes() == b"b"
+    assert cache.path(t3).read_bytes() == b"c"
+
+
+def test_payload_exceeding_max_bytes_keeps_new_entry(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=10, max_files=100)
+    token, _, _, _ = cache.put(b"x" * 100)
+    # The new entry is over-cap, but must still be retrievable.
+    assert cache.path(token).read_bytes() == b"x" * 100
