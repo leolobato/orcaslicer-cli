@@ -30,11 +30,11 @@ RUN ELF_END=$( \
 # Produces /deps/destdir/usr/local/{lib,include} containing CGAL,
 # OpenCASCADE, OpenVDB, Boost, TBB, draco, OpenCV, JPEG, etc.
 #
-# Build is native (no platform pin) because the resulting binary doesn't
-# need to match the AppImage architecture — we link the resulting
-# orca-headless binary statically and copy it into the runtime stage.
+# Pinned to linux/amd64 to match the runtime stage (which must be amd64 to
+# run the legacy AppImage binary). Once Phase 4 retires the AppImage, this
+# pin can drop and builds become native-arch.
 # =============================================================================
-FROM ubuntu:24.04 AS deps-builder
+FROM --platform=linux/amd64 ubuntu:24.04 AS deps-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -68,7 +68,7 @@ RUN cmake -S deps -B build/deps -G Ninja \
 # Stage 3: Build the orca-headless binary against libslic3r + the deps
 # superbuild's destdir.
 # =============================================================================
-FROM ubuntu:24.04 AS cpp-builder
+FROM --platform=linux/amd64 ubuntu:24.04 AS cpp-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
