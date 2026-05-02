@@ -26,13 +26,16 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer
 
 add_executable(orca-headless
     src/orca_headless.cpp
+    src/json_io.cpp
+    src/progress.cpp
 )
 
 target_include_directories(orca-headless PRIVATE
     ${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer/src
+    ${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer/deps_src
     ${CMAKE_BINARY_DIR}/orcaslicer-build/src/libslic3r
 )
 
-target_link_libraries(orca-headless PRIVATE libslic3r)
+target_link_libraries(orca-headless PRIVATE libslic3r nlohmann_json)
 
 install(TARGETS orca-headless RUNTIME DESTINATION bin)
