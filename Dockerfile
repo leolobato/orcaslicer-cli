@@ -56,8 +56,22 @@ COPY vendor/OrcaSlicer/deps deps
 COPY vendor/OrcaSlicer/cmake cmake
 COPY vendor/OrcaSlicer/version.inc version.inc
 
+# Skip GUI-only deps that orca-headless doesn't link: GLEW, GLFW, OpenCSG,
+# wxWidgets. These would otherwise add ~30–60 min to the build and pull in
+# Wayland / X11 / GTK system requirements we don't have. They're leaf deps
+# (no other dep depends on them), so removing them is safe.
+RUN sed -i \
+        -e '/^include(GLEW\/GLEW\.cmake)$/d' \
+        -e '/^include(GLFW\/GLFW\.cmake)$/d' \
+        -e '/^include(OpenCSG\/OpenCSG\.cmake)$/d' \
+        -e '/^include(wxWidgets\/wxWidgets\.cmake)$/d' \
+        -e 's/^    dep_GLFW$//' \
+        -e 's/^    dep_OpenCSG$//' \
+        -e 's/^    \${WXWIDGETS_PKG}$//' \
+        deps/CMakeLists.txt
+
 # Build the deps superbuild. This is the long phase — first time can be
-# 30–90 minutes depending on the host. The deps tree is self-contained;
+# 30–60 minutes depending on the host. The deps tree is self-contained;
 # we only need its destdir/ output.
 RUN cmake -S deps -B build/deps -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
