@@ -12,6 +12,7 @@ import signal
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .config import ORCA_BINARY
@@ -1691,3 +1692,33 @@ async def slice_3mf_streaming(
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     return _generate()
+
+
+async def materialize_profiles_for_binary(
+    machine_id: str,
+    process_id: str,
+    filament_setting_ids: list[str],
+) -> dict[str, Any]:
+    """Resolve profile inheritance and write flattened JSONs the binary can load.
+
+    Returns absolute paths to:
+      - "machine":  the resolved machine profile JSON
+      - "process":  the resolved process profile JSON
+      - "filaments": a list of resolved filament profile JSONs (one per slot)
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="orca-headless-profiles-"))
+    machine = get_profile("machine", machine_id)
+    process = get_profile("process", process_id)
+    machine_path = tmp_dir / "machine.json"
+    process_path = tmp_dir / "process.json"
+    machine_path.write_text(json.dumps(machine))
+    process_path.write_text(json.dumps(process))
+
+    filament_paths: list[str] = []
+    for i, fid in enumerate(filament_setting_ids):
+        fcfg = get_profile_by_id_or_name("filament", fid)
+        fpath = tmp_dir / f"filament-{i}.json"
+        fpath.write_text(json.dumps(fcfg))
+        filament_paths.append(str(fpath))
+
+    return {"machine": str(machine_path), "process": str(process_path), "filaments": filament_paths}

@@ -46,6 +46,7 @@ logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status as fastapi_status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from .cache import TokenCache
@@ -84,6 +85,7 @@ from .profiles import (
 )
 from .slice_request import parse_filament_profile_ids
 from .stl_to_3mf import detect_file_type as _detect_file_type
+from .binary_client import BinaryClient, BinaryError
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
     SUPPORTED_PLATE_TYPES,
@@ -92,6 +94,7 @@ from .slicer import (
     VALID_SUPPORT_TYPES,
     ModelTooBigError,
     SlicingError,
+    materialize_profiles_for_binary,
     slice_3mf,
     slice_3mf_streaming,
 )
@@ -1126,6 +1129,80 @@ async def slice_file_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class SliceTokenRequest(BaseModel):
+    input_token: str
+    machine_id: str
+    process_id: str
+    filament_settings_ids: list[str]
+    filament_map: list[int] | None = None
+    plate_id: int = 1
+    recenter: bool = True
+
+
+@app.post("/slice/v2", tags=["Slice"])
+async def slice_v2(request: Request, body: SliceTokenRequest):
+    """Slice a previously-uploaded 3MF file using the headless binary.
+
+    Accepts a JSON body referencing an uploaded token and profile setting_ids.
+    Requires USE_HEADLESS_BINARY to be enabled.
+    """
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        input_path = cache.path(body.input_token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": body.input_token},
+        )
+
+    if not cfg.USE_HEADLESS_BINARY:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": "headless_disabled",
+                "message": "USE_HEADLESS_BINARY is off; use legacy POST /slice",
+            },
+        )
+
+    paths = await materialize_profiles_for_binary(
+        machine_id=body.machine_id,
+        process_id=body.process_id,
+        filament_setting_ids=body.filament_settings_ids,
+    )
+
+    output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    try:
+        result = await binary.slice(request={
+            "input_3mf": str(input_path),
+            "output_3mf": str(output_path),
+            "machine_profile": paths["machine"],
+            "process_profile": paths["process"],
+            "filament_profiles": paths["filaments"],
+            "plate_id": body.plate_id,
+            "options": {"recenter": body.recenter},
+            "filament_map": body.filament_map or [],
+            "filament_settings_id": body.filament_settings_ids,
+        })
+    except BinaryError as e:
+        return JSONResponse(
+            status_code=500,
+            content={"code": e.code, "message": e.message, "details": e.details},
+        )
+
+    out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
+
+    return {
+        "input_token": body.input_token,
+        "output_token": out_token,
+        "output_sha256": out_sha,
+        "estimate": result["estimate"],
+        "settings_transfer": result["settings_transfer"],
+        "thumbnail_urls": [],
+        "download_url": f"/3mf/{out_token}",
+    }
 
 
 # Mount web UI — must be last so API routes take priority
