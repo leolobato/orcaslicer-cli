@@ -115,3 +115,33 @@ def test_payload_exceeding_max_bytes_keeps_new_entry(cache_dir: Path) -> None:
     token, _, _, _ = cache.put(b"x" * 100)
     # The new entry is over-cap, but must still be retrievable.
     assert cache.path(token).read_bytes() == b"x" * 100
+
+
+def test_delete_token(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=1_000_000, max_files=10)
+    t, _, _, _ = cache.put(b"abc")
+    assert cache.delete(t) is True
+    with pytest.raises(KeyError):
+        cache.path(t)
+
+
+def test_delete_unknown_returns_false(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=1_000_000, max_files=10)
+    assert cache.delete("nope") is False
+
+
+def test_clear_removes_all(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=1_000_000, max_files=10)
+    cache.put(b"a")
+    cache.put(b"b")
+    evicted, freed = cache.clear()
+    assert evicted == 2
+    assert freed == 2
+    assert cache.stats()["count"] == 0
+
+
+def test_stats_shape(cache_dir: Path) -> None:
+    cache = TokenCache(cache_dir=cache_dir, max_bytes=100, max_files=5)
+    cache.put(b"hello")
+    s = cache.stats()
+    assert s == {"count": 1, "total_bytes": 5, "max_bytes": 100, "max_files": 5}

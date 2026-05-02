@@ -83,5 +83,33 @@ class TokenCache:
             entry.last_access = time.time()
             return self._path_for_sha(entry.sha)
 
+    def delete(self, token: str) -> bool:
+        with self._lock:
+            entry = self._entries.pop(token, None)
+            if entry is None:
+                return False
+            self._sha_to_token.pop(entry.sha, None)
+            self._path_for_sha(entry.sha).unlink(missing_ok=True)
+            return True
+
+    def clear(self) -> tuple[int, int]:
+        with self._lock:
+            count = len(self._entries)
+            freed = sum(e.size for e in self._entries.values())
+            for entry in self._entries.values():
+                self._path_for_sha(entry.sha).unlink(missing_ok=True)
+            self._entries.clear()
+            self._sha_to_token.clear()
+            return count, freed
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "count": len(self._entries),
+                "total_bytes": sum(e.size for e in self._entries.values()),
+                "max_bytes": self.max_bytes,
+                "max_files": self.max_files,
+            }
+
     def _path_for_sha(self, sha: str) -> Path:
         return self.cache_dir / f"{sha}.3mf"
