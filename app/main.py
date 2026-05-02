@@ -1205,5 +1205,59 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
     }
 
 
+@app.post("/slice-stream/v2", tags=["Slice"])
+async def slice_stream_v2(request: Request, body: SliceTokenRequest):
+    """Slice a previously-uploaded 3MF file and stream progress via SSE (headless binary).
+
+    Events: `progress` (phase/percent) and `result` (estimate, tokens, download_url).
+    Requires USE_HEADLESS_BINARY to be enabled.
+    """
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        input_path = cache.path(body.input_token)
+    except KeyError:
+        return JSONResponse(404, content={"code": "token_unknown", "token": body.input_token})
+
+    if not cfg.USE_HEADLESS_BINARY:
+        return JSONResponse(503, content={
+            "code": "headless_disabled",
+            "message": "USE_HEADLESS_BINARY is off; use legacy POST /slice-stream",
+        })
+
+    paths = await materialize_profiles_for_binary(
+        machine_id=body.machine_id,
+        process_id=body.process_id,
+        filament_setting_ids=body.filament_settings_ids,
+    )
+    output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+
+    async def event_gen():
+        async for ev in binary.slice_stream(request={
+            "input_3mf": str(input_path),
+            "output_3mf": str(output_path),
+            "machine_profile": paths["machine"],
+            "process_profile": paths["process"],
+            "filament_profiles": paths["filaments"],
+            "plate_id": body.plate_id,
+            "options": {"recenter": body.recenter},
+            "filament_map": body.filament_map or [],
+            "filament_settings_id": body.filament_settings_ids,
+        }):
+            if ev["type"] == "result":
+                out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
+                ev["payload"] = {
+                    "input_token": body.input_token,
+                    "output_token": out_token,
+                    "output_sha256": out_sha,
+                    "estimate": ev["payload"]["estimate"],
+                    "settings_transfer": ev["payload"]["settings_transfer"],
+                    "download_url": f"/3mf/{out_token}",
+                }
+            yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
 # Mount web UI — must be last so API routes take priority
 app.mount("/web", StaticFiles(directory="app/web", html=True), name="web")
