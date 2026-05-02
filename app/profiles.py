@@ -1349,6 +1349,35 @@ def get_profile(category: str, slug: str) -> dict[str, Any]:
     return _clean_profile(resolved)
 
 
+def get_profile_by_id_or_name(category: str, slug_or_name: str) -> dict[str, Any]:
+    """Resolve a profile by setting_id, falling back to display name.
+
+    Bambu 3MFs persist `filament_settings_id` as display names (e.g.
+    `"Bambu PLA Basic @BBL A1M"`) rather than slug-style setting_ids
+    (`"GFA00"`). When the slice payload carries those names through for
+    slots a plate doesn't override, slug lookup misses them. Falling back
+    to the name index lets each slot keep its authored identity instead
+    of being padded to a single fill profile, which OrcaSlicer would
+    collapse via `load_filaments_set` and break `flush_volumes_matrix`
+    sizing at G-code export.
+    """
+    try:
+        return get_profile(category, slug_or_name)
+    except ProfileNotFoundError:
+        pass
+    profile_key = _select_profile_key_by_name(slug_or_name, category=category)
+    if profile_key is None:
+        raise ProfileNotFoundError(
+            f"{category} profile with id or name '{slug_or_name}' not found"
+        )
+    resolved = resolve_profile_by_name(profile_key)
+    if resolved is None:
+        raise ProfileNotFoundError(
+            f"Failed to resolve {category} profile '{slug_or_name}'"
+        )
+    return _clean_profile(resolved)
+
+
 def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
     """Return a profile with its resolved data and full inheritance chain.
 

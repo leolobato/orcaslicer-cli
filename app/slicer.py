@@ -16,7 +16,7 @@ from typing import Any
 
 from .config import ORCA_BINARY
 from .normalize import normalize_process_profile
-from .profiles import ProfileNotFoundError, get_profile
+from .profiles import ProfileNotFoundError, get_profile, get_profile_by_id_or_name
 from .threemf import (
     extract_plate,
     get_build_volume,
@@ -1460,7 +1460,7 @@ async def slice_3mf(
     machine_profile = get_profile("machine", machine_profile_id)
     process_profile = get_profile("process", process_profile_id)
     filament_profiles = [
-        get_profile("filament", fid) for fid in filament_profile_ids
+        get_profile_by_id_or_name("filament", fid) for fid in filament_profile_ids
     ]
     logger.info(
         "Resolved profiles: machine=%s process=%s filaments=%s",
@@ -1539,7 +1539,7 @@ async def slice_3mf_streaming(
     machine_profile = get_profile("machine", machine_profile_id)
     process_profile = get_profile("process", process_profile_id)
     filament_profiles = [
-        get_profile("filament", fid) for fid in filament_profile_ids
+        get_profile_by_id_or_name("filament", fid) for fid in filament_profile_ids
     ]
 
     async def _generate():
