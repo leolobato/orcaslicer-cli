@@ -17,6 +17,12 @@ services:
       - ./conftest.py:/app/conftest.py
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
+      - ORCA_HEADLESS_BINARY=/opt/orca-headless/bin/orca-headless
       - PROFILES_DIR=/opt/orcaslicer/profiles
       - USER_PROFILES_DIR=/data
+      - CACHE_DIR=/data/cache
+      # Set USE_HEADLESS_BINARY=1 to route /slice/v2 and /slice-stream/v2
+      # through the new orca-headless binary. Default off — legacy /slice
+      # multipart path keeps using the AppImage CLI.
+      - USE_HEADLESS_BINARY=${USE_HEADLESS_BINARY:-0}
       - LOG_LEVEL=DEBUG
