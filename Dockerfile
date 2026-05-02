@@ -49,6 +49,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglu1-mesa-dev \
     libdbus-1-dev \
     libglib2.0-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
