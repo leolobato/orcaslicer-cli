@@ -13,6 +13,33 @@ from typing import Any
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
 
+
+class _DropSuccessfulGetAccessLog(logging.Filter):
+    """Drop uvicorn access-log lines for successful GET requests.
+
+    The dashboard polls a handful of read endpoints every few seconds and
+    drowns the slicer logs in noise; we keep POST/PUT/DELETE and any
+    non-2xx response so real activity stays visible.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        method, _path, _http_version, status, *_ = args
+        try:
+            status_code = int(status)
+        except (TypeError, ValueError):
+            return True
+        return not (
+            isinstance(method, str)
+            and method.upper() == "GET"
+            and 200 <= status_code < 300
+        )
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
+
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
