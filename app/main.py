@@ -797,6 +797,15 @@ async def export_filaments_batch(request: Request):
     )
 
 
+@app.post("/3mf", tags=["3MF"])
+async def upload_3mf(request: Request, file: UploadFile = File(...)):
+    """Upload a .3mf file and receive a stable token for use with /slice/v2."""
+    payload = await file.read()
+    cache: TokenCache = request.app.state.token_cache
+    token, sha, size, evicted = cache.put(payload)
+    return {"token": token, "sha256": sha, "size": size, "evicts": evicted}
+
+
 def _collect_process_overrides(
     layer_height: float | None,
     sparse_infill_density: float | None,
