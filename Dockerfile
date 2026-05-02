@@ -115,9 +115,9 @@ RUN --mount=type=cache,target=/dep-downloads,sharing=locked \
     rc=${PIPESTATUS[0]}; \
     if [ $rc -ne 0 ]; then \
         echo "==================== FAILED: BLOCKS ===================="; \
-        grep -B 2 -A 30 "^FAILED:" /tmp/deps-build.log | tail -300 || true; \
-        echo "==================== LAST 100 LINES ===================="; \
-        tail -100 /tmp/deps-build.log; \
+        grep -B 2 -A 200 "^FAILED:" /tmp/deps-build.log | tail -800 || true; \
+        echo "==================== LAST ERROR-ish LINES ===================="; \
+        grep -iE "(\\bError\\b|\\bfatal\\b|Stop\\.)" /tmp/deps-build.log | tail -50 || true; \
         exit $rc; \
     fi
 
