@@ -67,6 +67,12 @@ COPY vendor/OrcaSlicer/version.inc version.inc
 # wxWidgets. These would otherwise add ~30–60 min to the build and pull in
 # Wayland / X11 / GTK system requirements we don't have. They're leaf deps
 # (no other dep depends on them), so removing them is safe.
+#
+# Also clamp NPROC to 2: each ExternalProject_Add uses `-j${NPROC}` for its
+# inner build, ignoring our outer cmake --build -jN. With 4 outer × 12 inner
+# (host nproc) = 48 parallel compile jobs, OCCT's libTKRWMesh.a linking
+# OOM-killed silently on 8 GB OrbStack. Inner -j2 × outer -j4 = 8 peak,
+# fits comfortably.
 RUN sed -i \
         -e '/^include(GLEW\/GLEW\.cmake)$/d' \
         -e '/^include(GLFW\/GLFW\.cmake)$/d' \
@@ -75,6 +81,7 @@ RUN sed -i \
         -e 's/^    dep_GLFW$//' \
         -e 's/^    dep_OpenCSG$//' \
         -e 's/^    \${WXWIDGETS_PKG}$//' \
+        -e 's/^ProcessorCount(NPROC)$/ProcessorCount(NPROC)\nset(NPROC 2)/' \
         deps/CMakeLists.txt
 
 # Build the deps superbuild. This is the long phase — first time can be
