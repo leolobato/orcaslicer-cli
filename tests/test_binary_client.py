@@ -54,3 +54,40 @@ async def test_slice_raises_on_crash_no_json(client: BinaryClient) -> None:
         with pytest.raises(BinaryError) as excinfo:
             await client.slice(request={"input_3mf": "/x"})
     assert excinfo.value.code == "binary_crashed"
+
+
+async def test_slice_stream_yields_progress_then_result(client: BinaryClient) -> None:
+    progress_lines = [
+        b'{"phase":"loading_3mf","percent":0}\n',
+        b'{"phase":"slicing","percent":50}\n',
+        b'{"phase":"done","percent":100}\n',
+    ]
+    final_response = {
+        "status": "ok",
+        "output_3mf": "/tmp/out.3mf",
+        "estimate": {"time_seconds": 1, "weight_g": 0.1, "filament_used_m": []},
+        "settings_transfer": {},
+    }
+
+    class FakeStream:
+        def __init__(self, lines: list[bytes]):
+            self._lines = list(lines)
+        async def readline(self) -> bytes:
+            return self._lines.pop(0) if self._lines else b""
+
+    mock_proc = AsyncMock()
+    mock_proc.stderr = FakeStream(progress_lines)
+    mock_proc.stdout = AsyncMock()
+    mock_proc.stdout.read = AsyncMock(return_value=json.dumps(final_response).encode())
+    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.returncode = 0
+    mock_proc.stdin = AsyncMock()
+
+    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)):
+        events = []
+        async for ev in client.slice_stream(request={"input_3mf": "/x"}):
+            events.append(ev)
+
+    types = [e["type"] for e in events]
+    assert types == ["progress", "progress", "progress", "result"]
+    assert events[-1]["payload"]["status"] == "ok"

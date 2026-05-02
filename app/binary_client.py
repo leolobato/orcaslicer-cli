@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -73,3 +73,47 @@ class BinaryClient:
             )
 
         return response
+
+    async def slice_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        proc = await asyncio.create_subprocess_exec(
+            self.binary_path, "slice",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        proc.stdin.write(json.dumps(request).encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+
+        async def pump_stderr() -> AsyncIterator[dict[str, Any]]:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    return
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    yield {"type": "progress", "payload": e}
+                except json.JSONDecodeError:
+                    logger.debug("non-JSON stderr line from binary: %r", line)
+
+        async for ev in pump_stderr():
+            yield ev
+
+        stdout = await proc.stdout.read()
+        rc = await proc.wait()
+
+        if rc != 0 and not stdout.strip():
+            yield {"type": "error", "payload": {"code": "binary_crashed", "message": f"exit {rc}"}}
+            return
+        try:
+            response = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            yield {"type": "error", "payload": {"code": "binary_bad_response", "message": str(e)}}
+            return
+        if response.get("status") != "ok":
+            yield {"type": "error", "payload": response}
+            return
+        yield {"type": "result", "payload": response}
