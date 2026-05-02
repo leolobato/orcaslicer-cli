@@ -1,5 +1,8 @@
-# Stage 1: Extract pre-built OrcaSlicer from AppImage
-FROM --platform=linux/amd64 ubuntu:24.04 AS builder
+# =============================================================================
+# Stage 1: Extract pre-built OrcaSlicer from AppImage (legacy path; kept for
+# back-compat during Phase 1 — switched off via USE_HEADLESS_BINARY).
+# =============================================================================
+FROM --platform=linux/amd64 ubuntu:24.04 AS appimage-extractor
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget squashfs-tools && \
@@ -7,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Download AppImage
 RUN wget --max-redirect=10 -q "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.3.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.3.2.AppImage" \
     -O orcaslicer.AppImage
 
@@ -23,7 +25,81 @@ RUN ELF_END=$( \
     unsquashfs -d squashfs-root squashfs.img && \
     rm orcaslicer.AppImage squashfs.img
 
-# Stage 2: Runtime
+# =============================================================================
+# Stage 2: Build OrcaSlicer's deps superbuild from the vendored source.
+# Produces /deps/destdir/usr/local/{lib,include} containing CGAL,
+# OpenCASCADE, OpenVDB, Boost, TBB, draco, OpenCV, JPEG, etc.
+#
+# Build is native (no platform pin) because the resulting binary doesn't
+# need to match the AppImage architecture — we link the resulting
+# orca-headless binary statically and copy it into the runtime stage.
+# =============================================================================
+FROM ubuntu:24.04 AS deps-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ninja-build \
+    pkg-config \
+    autoconf automake libtool \
+    file \
+    libssl-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libdbus-1-dev \
+    libglib2.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY vendor/OrcaSlicer/deps deps
+COPY vendor/OrcaSlicer/cmake cmake
+COPY vendor/OrcaSlicer/version.inc version.inc
+
+# Build the deps superbuild. This is the long phase — first time can be
+# 30–90 minutes depending on the host. The deps tree is self-contained;
+# we only need its destdir/ output.
+RUN cmake -S deps -B build/deps -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDESTDIR=/src/build/destdir && \
+    cmake --build build/deps -j"$(nproc)"
+
+# =============================================================================
+# Stage 3: Build the orca-headless binary against libslic3r + the deps
+# superbuild's destdir.
+# =============================================================================
+FROM ubuntu:24.04 AS cpp-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ninja-build \
+    pkg-config \
+    libssl-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libdbus-1-dev \
+    libglib2.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY --from=deps-builder /src/build/destdir /opt/orca-deps
+COPY vendor/OrcaSlicer vendor/OrcaSlicer
+COPY cpp cpp
+
+# Configure orca-headless using the deps destdir as CMAKE_PREFIX_PATH and
+# building libslic3r in-tree via cpp/CMakeLists.txt's add_subdirectory.
+RUN cmake -S cpp -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/orca-deps/usr/local \
+        -DCMAKE_INSTALL_PREFIX=/opt/orca-headless && \
+    cmake --build build -j"$(nproc)" && \
+    cmake --install build
+
+# =============================================================================
+# Stage 4: Runtime
+# =============================================================================
 FROM --platform=linux/amd64 ubuntu:24.04
 
 RUN apt-get update && \
@@ -55,17 +131,17 @@ ENV LC_ALL=en_US.utf8
 RUN locale-gen $LC_ALL
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Copy OrcaSlicer binary and resources from extracted AppImage.
-# `/opt/resources/` is where the binary resolves its `resources_dir()` —
-# multi-filament slicing reads `/opt/resources/info/filament_info.json`
-# via `get_filament_temp_type()` and fails if it's missing.
-COPY --from=builder /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
-COPY --from=builder /build/squashfs-root/resources/ /opt/resources/
-COPY --from=builder /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
-
-# Make binary executable and add to PATH
+# Legacy AppImage binary (kept for back-compat in Phase 1)
+COPY --from=appimage-extractor /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
+COPY --from=appimage-extractor /build/squashfs-root/resources/ /opt/resources/
+COPY --from=appimage-extractor /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
 RUN chmod +x /opt/orcaslicer/bin/orca-slicer
-ENV PATH="/opt/orcaslicer/bin:${PATH}"
+
+# New orca-headless binary (built from vendored source in cpp-builder stage)
+COPY --from=cpp-builder /opt/orca-headless/bin/orca-headless /opt/orca-headless/bin/orca-headless
+RUN chmod +x /opt/orca-headless/bin/orca-headless
+
+ENV PATH="/opt/orcaslicer/bin:/opt/orca-headless/bin:${PATH}"
 
 # Install Python dependencies
 WORKDIR /app

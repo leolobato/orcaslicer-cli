@@ -1,0 +1,19 @@
+.venv
+.git
+.github
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+data
+docs
+.DS_Store
+node_modules
+build
+cmake-build-*
+
+# Submodule git data — the source tree itself is included via COPY in the
+# Dockerfile; we don't need git history inside the build context.
+vendor/OrcaSlicer/.git
+vendor/OrcaSlicer/build
+vendor/OrcaSlicer/build-*
