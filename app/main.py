@@ -44,7 +44,7 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
@@ -804,6 +804,23 @@ async def upload_3mf(request: Request, file: UploadFile = File(...)):
     cache: TokenCache = request.app.state.token_cache
     token, sha, size, evicted = cache.put(payload)
     return {"token": token, "sha256": sha, "size": size, "evicts": evicted}
+
+
+@app.get("/3mf/{token}", tags=["3MF"])
+async def download_3mf(request: Request, token: str):
+    """Download a previously uploaded .3mf file by token."""
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        path = cache.path(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    return FileResponse(
+        path,
+        media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+    )
 
 
 def _collect_process_overrides(

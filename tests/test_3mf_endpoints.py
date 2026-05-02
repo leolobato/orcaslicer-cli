@@ -59,3 +59,18 @@ def test_upload_same_file_returns_same_token(client: TestClient) -> None:
     r1 = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
     r2 = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
     assert r1.json()["token"] == r2.json()["token"]
+
+
+def test_download_returns_bytes(client: TestClient) -> None:
+    payload = b"some content"
+    up = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
+    token = up.json()["token"]
+    resp = client.get(f"/3mf/{token}")
+    assert resp.status_code == 200
+    assert resp.content == payload
+
+
+def test_download_unknown_404(client: TestClient) -> None:
+    resp = client.get("/3mf/nonexistent-token")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "token_unknown"
