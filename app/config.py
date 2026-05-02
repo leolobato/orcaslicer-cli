@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 ORCA_VERSION = "2.3.2"
 API_REVISION = "19"
@@ -21,3 +22,7 @@ USER_PROFILES_DIR = os.environ.get("USER_PROFILES_DIR", "/data")
 # ``BBL/machine_full/`` ``model_id`` lookup that stamps ``printer_model_id``
 # onto ``slice_info.config`` — must live under this prefix, not ``PROFILES_DIR``.
 ORCA_RESOURCES_DIR = os.environ.get("ORCA_RESOURCES_DIR", "/opt/resources")
+
+CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/data/cache"))
+CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))  # 10 GB
+CACHE_MAX_FILES = int(os.environ.get("CACHE_MAX_FILES", "200"))

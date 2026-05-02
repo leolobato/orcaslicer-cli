@@ -48,6 +48,8 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
+from .cache import TokenCache
+from . import config as cfg
 from .config import GIT_COMMIT, USER_PROFILES_DIR, VERSION
 from .models import (
     FilamentProfile,
@@ -113,6 +115,11 @@ def _ensure_user_profile_dirs() -> None:
 async def lifespan(app: FastAPI):
     logger.info("orcaslicer-cli %s (commit %s)", VERSION, GIT_COMMIT)
     _ensure_user_profile_dirs()
+    app.state.token_cache = TokenCache(
+        cache_dir=cfg.CACHE_DIR,
+        max_bytes=cfg.CACHE_MAX_BYTES,
+        max_files=cfg.CACHE_MAX_FILES,
+    )
     load_all_profiles()
     yield
 
