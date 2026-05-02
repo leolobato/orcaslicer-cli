@@ -101,12 +101,25 @@ ENV CMAKE_BUILD_PARALLEL_LEVEL=4
 # force re-downloading every other dep. The deps superbuild looks at
 # DEP_DOWNLOAD_DIR (defaults to deps/DL_CACHE under its CMAKE_CURRENT_SOURCE_DIR);
 # we point it at a stable location and mount that as a cache.
+#
+# On failure: BuildKit truncates progress output past ~2MB, which has been
+# eating OCCT's actual `FAILED:` lines. Bash trap below grep-extracts
+# "FAILED:" blocks from the full inner log so the real error survives.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN --mount=type=cache,target=/dep-downloads,sharing=locked \
     cmake -S deps -B build/deps -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DDESTDIR=/src/build/destdir \
         -DDEP_DOWNLOAD_DIR=/dep-downloads && \
-    cmake --build build/deps -j4
+    ( cmake --build build/deps -j4 2>&1 | tee /tmp/deps-build.log ); \
+    rc=${PIPESTATUS[0]}; \
+    if [ $rc -ne 0 ]; then \
+        echo "==================== FAILED: BLOCKS ===================="; \
+        grep -B 2 -A 30 "^FAILED:" /tmp/deps-build.log | tail -300 || true; \
+        echo "==================== LAST 100 LINES ===================="; \
+        tail -100 /tmp/deps-build.log; \
+        exit $rc; \
+    fi
 
 # =============================================================================
 # Stage 3: Build the orca-headless binary against libslic3r + the deps
