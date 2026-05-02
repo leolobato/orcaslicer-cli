@@ -80,10 +80,17 @@ RUN sed -i \
 # Build the deps superbuild. This is the long phase — first time can be
 # 60–90 minutes depending on the host. The deps tree is self-contained;
 # we only need its destdir/ output.
+#
+# Parallelism intentionally capped at -j4 (not nproc): linking OCCT's
+# libTKRWMesh.a + Boost + OpenCV concurrently can spike past 8 GB peak
+# memory, which OOM-kills under typical OrbStack defaults (8 GB) with
+# no log trace. Inner ExternalProject ninja inherits this cap via
+# CMAKE_BUILD_PARALLEL_LEVEL.
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
 RUN cmake -S deps -B build/deps -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DDESTDIR=/src/build/destdir && \
-    cmake --build build/deps -j"$(nproc)"
+    cmake --build build/deps -j4
 
 # =============================================================================
 # Stage 3: Build the orca-headless binary against libslic3r + the deps
