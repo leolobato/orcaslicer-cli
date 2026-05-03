@@ -1,0 +1,3 @@
+orca-headless is built from OrcaSlicer's libslic3r library, which is licensed under
+AGPL-3.0. Our wrapper code in cpp/ inherits the same license. See
+vendor/OrcaSlicer/LICENSE for the full upstream text.
