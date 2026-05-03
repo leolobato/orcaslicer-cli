@@ -3,7 +3,6 @@
 import io
 import json
 import zipfile
-from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
 import os
@@ -43,7 +42,7 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status as fastapi_status
+from fastapi import FastAPI, File, Query, Request, UploadFile, status as fastapi_status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -87,8 +86,6 @@ from .inspect import (
     INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
 )
 from .threemf import list_plate_thumbnails, read_plate_thumbnail
-from .slice_request import parse_filament_profile_ids
-from .stl_to_3mf import detect_file_type as _detect_file_type
 from .binary_client import BinaryClient, BinaryError
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
@@ -99,8 +96,6 @@ from .slicer import (
     ModelTooBigError,
     SlicingError,
     materialize_profiles_for_binary,
-    slice_3mf,
-    slice_3mf_streaming,
 )
 
 
@@ -957,287 +952,6 @@ async def delete_token(request: Request, token: str):
     if sha256:
         request.app.state.inspect_cache.invalidate(sha256)
     return None
-
-
-def _collect_process_overrides(
-    layer_height: float | None,
-    sparse_infill_density: float | None,
-    sparse_infill_pattern: str | None,
-    wall_loops: int | None,
-    top_shell_layers: int | None,
-    bottom_shell_layers: int | None,
-    support_type: str | None,
-    brim_type: str | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Collect non-None overrides into a dict. Returns (overrides, error_message)."""
-    errors: list[str] = []
-    overrides: dict[str, Any] = {}
-
-    if layer_height is not None:
-        if layer_height <= 0 or layer_height > 1.0:
-            errors.append("layer_height must be between 0 and 1.0 mm")
-        else:
-            overrides["layer_height"] = layer_height
-
-    if sparse_infill_density is not None:
-        if sparse_infill_density < 0 or sparse_infill_density > 100:
-            errors.append("sparse_infill_density must be between 0 and 100")
-        else:
-            overrides["sparse_infill_density"] = sparse_infill_density
-
-    if sparse_infill_pattern is not None:
-        if sparse_infill_pattern not in VALID_INFILL_PATTERNS:
-            errors.append(
-                f"sparse_infill_pattern must be one of: {', '.join(sorted(VALID_INFILL_PATTERNS))}"
-            )
-        else:
-            overrides["sparse_infill_pattern"] = sparse_infill_pattern
-
-    if wall_loops is not None:
-        if wall_loops < 0:
-            errors.append("wall_loops must be >= 0")
-        else:
-            overrides["wall_loops"] = wall_loops
-
-    if top_shell_layers is not None:
-        if top_shell_layers < 0:
-            errors.append("top_shell_layers must be >= 0")
-        else:
-            overrides["top_shell_layers"] = top_shell_layers
-
-    if bottom_shell_layers is not None:
-        if bottom_shell_layers < 0:
-            errors.append("bottom_shell_layers must be >= 0")
-        else:
-            overrides["bottom_shell_layers"] = bottom_shell_layers
-
-    if support_type is not None:
-        if support_type not in VALID_SUPPORT_TYPES:
-            errors.append(f"support_type must be one of: {', '.join(sorted(VALID_SUPPORT_TYPES))}")
-        else:
-            overrides["support_type"] = support_type
-
-    if brim_type is not None:
-        if brim_type not in VALID_BRIM_TYPES:
-            errors.append(f"brim_type must be one of: {', '.join(sorted(VALID_BRIM_TYPES))}")
-        else:
-            overrides["brim_type"] = brim_type
-
-    if errors:
-        return None, "; ".join(errors)
-    return (overrides or None), None
-
-
-@app.post(
-    "/slice",
-    tags=["Slicing"],
-    summary="Slice a 3MF or STL file",
-    responses={
-        200: {
-            "description": "Sliced G-code inside a `.3mf` archive.",
-            "content": {"application/octet-stream": {}},
-        },
-        400: {"description": "Invalid input (bad profiles or file).", "model": SliceError},
-        500: {"description": "OrcaSlicer failed.", "model": SliceError},
-    },
-)
-async def slice_file(
-    file: UploadFile = File(description="A `.3mf` or `.stl` file to slice."),
-    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
-    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
-    filament_profiles: str = Form(
-        description=(
-            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
-            "or a JSON object mapping project filament indexes to setting_ids or "
-            "to `{profile_setting_id, tray_slot}` selections."
-        ),
-        examples=['["GFL99"]'],
-    ),
-    plate_type: str | None = Form(
-        default=None,
-        description=(
-            "Optional bed surface type. "
-            "One of: cool_plate, engineering_plate, high_temp_plate, "
-            "textured_pei_plate, textured_cool_plate, supertack_plate."
-        ),
-        examples=["textured_pei_plate"],
-    ),
-    layer_height: float | None = Form(default=None, description="Override layer height (mm)."),
-    sparse_infill_density: float | None = Form(default=None, description="Override infill density (0-100)."),
-    sparse_infill_pattern: str | None = Form(default=None, description="Override infill pattern."),
-    wall_loops: int | None = Form(default=None, description="Override wall loop count."),
-    top_shell_layers: int | None = Form(default=None, description="Override top solid layers."),
-    bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
-    support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
-    brim_type: str | None = Form(default=None, description="Override brim type."),
-    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
-):
-    """Slice a `.3mf` or `.stl` file using the specified machine, process, and filament profiles.
-
-    Returns the sliced `.3mf` archive containing G-code.
-    Optional parameter overrides are applied on top of the selected process profile.
-    """
-    file_bytes = await file.read()
-    if not file_bytes:
-        return JSONResponse(status_code=400, content={"error": "Empty file"})
-
-    # Detect file type
-    file_type = _detect_file_type(file.filename, file_bytes)
-    if file_type not in ("3mf", "stl"):
-        return JSONResponse(status_code=400, content={"error": "File must be a .3mf or .stl file"})
-
-    # For STL files, only the JSON array format for filament_profiles is supported
-    filament_source = file_bytes if file_type == "3mf" else b""
-    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, filament_source)
-    if error_message is not None or filament_ids is None:
-        if file_type == "stl" and "object format" in (error_message or ""):
-            error_message = "STL files only support filament_profiles as a JSON array of setting_ids"
-        return JSONResponse(status_code=400, content={"error": error_message})
-
-    if plate_type is not None:
-        plate_type = plate_type.strip().lower()
-        if not plate_type:
-            plate_type = None
-    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": (
-                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
-                ),
-            },
-        )
-    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
-
-    process_overrides, override_error = _collect_process_overrides(
-        layer_height, sparse_infill_density, sparse_infill_pattern,
-        wall_loops, top_shell_layers, bottom_shell_layers, support_type, brim_type,
-    )
-    if override_error:
-        return JSONResponse(status_code=400, content={"error": override_error})
-
-    result, settings_transfer = await slice_3mf(
-        file_bytes, machine_profile, process_profile, filament_ids,
-        plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type, plate=plate,
-    )
-    headers = {
-        "Content-Disposition": "attachment; filename=sliced.3mf",
-        "X-Settings-Transfer-Status": settings_transfer.status,
-    }
-    if settings_transfer.status == "applied" and settings_transfer.transferred:
-        headers["X-Settings-Transferred"] = json.dumps(settings_transfer.transferred)
-    if settings_transfer.filaments:
-        headers["X-Filament-Settings-Transferred"] = json.dumps(
-            [asdict(f) for f in settings_transfer.filaments]
-        )
-    if settings_transfer.machine_transferred:
-        headers["X-Machine-Settings-Transferred"] = json.dumps(
-            settings_transfer.machine_transferred,
-        )
-    return Response(
-        content=result,
-        media_type="application/octet-stream",
-        headers=headers,
-    )
-
-
-@app.post(
-    "/slice-stream",
-    tags=["Slicing"],
-    summary="Slice a 3MF file with streaming progress",
-    responses={
-        200: {
-            "description": "SSE stream with progress events, result (base64), and done.",
-            "content": {"text/event-stream": {}},
-        },
-        400: {"description": "Invalid input (bad profiles or file).", "model": SliceError},
-    },
-)
-async def slice_file_stream(
-    file: UploadFile = File(description="A `.3mf` or `.stl` file to slice."),
-    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
-    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
-    filament_profiles: str = Form(
-        description=(
-            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
-            "or a JSON object mapping project filament indexes to setting_ids or "
-            "to `{profile_setting_id, tray_slot}` selections."
-        ),
-        examples=['["GFL99"]'],
-    ),
-    plate_type: str | None = Form(
-        default=None,
-        description=(
-            "Optional bed surface type. "
-            "One of: cool_plate, engineering_plate, high_temp_plate, "
-            "textured_pei_plate, textured_cool_plate, supertack_plate."
-        ),
-        examples=["textured_pei_plate"],
-    ),
-    layer_height: float | None = Form(default=None, description="Override layer height (mm)."),
-    sparse_infill_density: float | None = Form(default=None, description="Override infill density (0-100)."),
-    sparse_infill_pattern: str | None = Form(default=None, description="Override infill pattern."),
-    wall_loops: int | None = Form(default=None, description="Override wall loop count."),
-    top_shell_layers: int | None = Form(default=None, description="Override top solid layers."),
-    bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
-    support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
-    brim_type: str | None = Form(default=None, description="Override brim type."),
-    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
-):
-    """Slice a `.3mf` or `.stl` file and stream progress via Server-Sent Events.
-
-    Returns an SSE stream with event types: `status`, `progress`, `result`, `error`, `done`.
-    The `result` event contains the sliced file as base64.
-    Optional parameter overrides are applied on top of the selected process profile.
-    """
-    file_bytes = await file.read()
-    if not file_bytes:
-        return JSONResponse(status_code=400, content={"error": "Empty file"})
-
-    file_type = _detect_file_type(file.filename, file_bytes)
-    if file_type not in ("3mf", "stl"):
-        return JSONResponse(status_code=400, content={"error": "File must be a .3mf or .stl file"})
-
-    filament_source = file_bytes if file_type == "3mf" else b""
-    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, filament_source)
-    if error_message is not None or filament_ids is None:
-        if file_type == "stl" and "object format" in (error_message or ""):
-            error_message = "STL files only support filament_profiles as a JSON array of setting_ids"
-        return JSONResponse(status_code=400, content={"error": error_message})
-
-    if plate_type is not None:
-        plate_type = plate_type.strip().lower()
-        if not plate_type:
-            plate_type = None
-    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": (
-                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
-                ),
-            },
-        )
-    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
-
-    process_overrides, override_error = _collect_process_overrides(
-        layer_height, sparse_infill_density, sparse_infill_pattern,
-        wall_loops, top_shell_layers, bottom_shell_layers, support_type, brim_type,
-    )
-    if override_error:
-        return JSONResponse(status_code=400, content={"error": override_error})
-
-    generator = await slice_3mf_streaming(
-        file_bytes, machine_profile, process_profile, filament_ids,
-        plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type, plate=plate,
-    )
-    return StreamingResponse(
-        generator,
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 class SliceTokenRequest(BaseModel):
