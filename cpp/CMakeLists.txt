@@ -37,6 +37,7 @@ add_executable(orca-headless
     src/orca_headless.cpp
     src/json_io.cpp
     src/progress.cpp
+    src/slice_mode.cpp
 )
 
 target_include_directories(orca-headless PRIVATE
