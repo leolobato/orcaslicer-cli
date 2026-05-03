@@ -44,6 +44,28 @@ SUPPORTED_PLATE_TYPES = tuple(PLATE_TYPE_API_TO_ORCA.keys())
 # Keys that are profile metadata, not slicer settings
 _PROFILE_META_KEYS = {"name", "from", "inherits", "version", "type", "setting_id"}
 
+# Filament keys that OrcaSlicer's `PrintConfig.cpp` declares as `coStrings`
+# (string vectors) but the GUI sometimes exports as a bare scalar string.
+# When the CLI deserializes a scalar `""` into one of these, it produces an
+# empty values vector; the per-filament merge in `OrcaSlicer.cpp::run` then
+# calls `set_at` on that empty source and throws
+# `ConfigOptionVector::set_at(): Assigning from an empty vector` (SIGABRT).
+# Wrapping the scalar as `[scalar]` at slice time matches the array shape
+# OrcaSlicer expects without rewriting the user's on-disk profile.
+_FILAMENT_VECTOR_STRING_KEYS = frozenset({
+    "filament_notes",
+})
+
+
+def _normalize_filament_vector_shapes(profile: dict[str, Any]) -> dict[str, Any]:
+    """Wrap scalar values into single-element lists for known vector keys."""
+    out = dict(profile)
+    for key in _FILAMENT_VECTOR_STRING_KEYS:
+        val = out.get(key)
+        if isinstance(val, str):
+            out[key] = [val]
+    return out
+
 # Valid values for parameter overrides
 VALID_INFILL_PATTERNS = frozenset({
     "grid", "line", "cubic", "cubicsubdiv", "gyroid", "lightning",
@@ -1367,7 +1389,7 @@ def _prepare_slice(
         # `User` (`OrcaSlicer.cpp:1882-1908`). User-imported filament JSONs
         # often omit one or both since the GUI infers them — fill them in so
         # the loader accepts the rendered file.
-        fp_out = dict(fp)
+        fp_out = _normalize_filament_vector_shapes(fp)
         fp_out.setdefault("type", "filament")
         fp_out.setdefault("from", "system")
         with open(path, "w") as f:
