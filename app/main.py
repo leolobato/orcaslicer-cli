@@ -882,7 +882,7 @@ async def inspect_3mf(token: str, request: Request) -> JSONResponse:
     needs_binary = any(
         p["used_filament_indices"] is None for p in data["plates"]
     )
-    if needs_binary and cfg.USE_HEADLESS_BINARY:
+    if needs_binary:
         binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
         try:
             us_response = await binary.use_set(input_3mf=str(path))
@@ -969,7 +969,6 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
     """Slice a previously-uploaded 3MF file using the headless binary.
 
     Accepts a JSON body referencing an uploaded token and profile setting_ids.
-    Requires USE_HEADLESS_BINARY to be enabled.
     """
     cache: TokenCache = request.app.state.token_cache
     try:
@@ -978,15 +977,6 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
         return JSONResponse(
             status_code=404,
             content={"code": "token_unknown", "token": body.input_token},
-        )
-
-    if not cfg.USE_HEADLESS_BINARY:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "code": "headless_disabled",
-                "message": "USE_HEADLESS_BINARY is off; use legacy POST /slice",
-            },
         )
 
     paths = await materialize_profiles_for_binary(
@@ -1039,19 +1029,12 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
     """Slice a previously-uploaded 3MF file and stream progress via SSE (headless binary).
 
     Events: `progress` (phase/percent) and `result` (estimate, tokens, download_url).
-    Requires USE_HEADLESS_BINARY to be enabled.
     """
     cache: TokenCache = request.app.state.token_cache
     try:
         input_path = cache.path(body.input_token)
     except KeyError:
         return JSONResponse(404, content={"code": "token_unknown", "token": body.input_token})
-
-    if not cfg.USE_HEADLESS_BINARY:
-        return JSONResponse(503, content={
-            "code": "headless_disabled",
-            "message": "USE_HEADLESS_BINARY is off; use legacy POST /slice-stream",
-        })
 
     paths = await materialize_profiles_for_binary(
         machine_id=body.machine_id,

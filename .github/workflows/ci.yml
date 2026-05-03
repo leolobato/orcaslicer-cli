@@ -35,11 +35,11 @@ jobs:
         run: |
           docker run -d --name orcaslicer-cli \
             -p 8000:8000 \
-            -e USE_HEADLESS_BINARY=1 \
             -v ${{ github.workspace }}/data:/data \
             -v ${{ github.workspace }}/app:/app/app \
             -v ${{ github.workspace }}/tests:/app/tests \
             -v ${{ github.workspace }}/conftest.py:/app/conftest.py \
+            -v ${{ github.workspace }}/pytest.ini:/app/pytest.ini \
             orcaslicer-cli:ci
           # Wait for /health
           for i in $(seq 1 30); do
@@ -50,8 +50,7 @@ jobs:
       - name: Run unit tests
         run: |
           docker exec orcaslicer-cli pytest tests/ -q \
-            --ignore=tests/integration \
-            --ignore=tests/test_binary_client.py
+            --ignore=tests/integration
 
       - name: Smoke health + profiles
         run: |

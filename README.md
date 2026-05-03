@@ -57,9 +57,6 @@ GUI uses.
 - **Token cache** — every uploaded `.3mf` is stored once by sha256;
   subsequent calls (inspect, slice, thumbnail) reference the token.
 
-Set `USE_HEADLESS_BINARY=1` to enable the binary path (default in
-production deployments).
-
 ## API Endpoints
 
 | Method | Endpoint | Description |
@@ -153,7 +150,6 @@ Environment variables (set in `docker-compose.yml`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `USE_HEADLESS_BINARY` | `0` | Set to `1` to route slicing through the in-process `orca-headless` C++ binary |
 | `ORCA_HEADLESS_BINARY` | `/opt/orca-headless/bin/orca-headless` | Path to the compiled `orca-headless` binary |
 | `PROFILES_DIR` | `/opt/orcaslicer/profiles` | Path to vendor profile directory |
 | `USER_PROFILES_DIR` | `/data` | Path for imported/custom profiles |

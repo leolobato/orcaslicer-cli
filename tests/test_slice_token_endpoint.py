@@ -20,7 +20,6 @@ def client(tmp_path: Path):
     old_cache_dir = cfg.CACHE_DIR
     old_cache_max_bytes = cfg.CACHE_MAX_BYTES
     old_cache_max_files = cfg.CACHE_MAX_FILES
-    old_use_flag = cfg.USE_HEADLESS_BINARY
     old_main_upd = main.USER_PROFILES_DIR
     old_profiles_dir = profiles.PROFILES_DIR
     old_profiles_upd = profiles.USER_PROFILES_DIR
@@ -28,7 +27,6 @@ def client(tmp_path: Path):
     cfg.CACHE_DIR = cache_dir
     cfg.CACHE_MAX_BYTES = 1_000_000
     cfg.CACHE_MAX_FILES = 10
-    cfg.USE_HEADLESS_BINARY = True
     main.USER_PROFILES_DIR = str(user_dir)
     profiles.PROFILES_DIR = str(profiles_dir)
     profiles.USER_PROFILES_DIR = str(user_dir)
@@ -39,7 +37,6 @@ def client(tmp_path: Path):
     cfg.CACHE_DIR = old_cache_dir
     cfg.CACHE_MAX_BYTES = old_cache_max_bytes
     cfg.CACHE_MAX_FILES = old_cache_max_files
-    cfg.USE_HEADLESS_BINARY = old_use_flag
     main.USER_PROFILES_DIR = old_main_upd
     profiles.PROFILES_DIR = old_profiles_dir
     profiles.USER_PROFILES_DIR = old_profiles_upd
