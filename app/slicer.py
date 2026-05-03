@@ -1724,15 +1724,22 @@ async def materialize_profiles_for_binary(
     process_path.write_text(json.dumps(process))
 
     filament_paths: list[str] = []
+    filament_names: list[str] = []
     for i, fid in enumerate(filament_setting_ids):
         fcfg = get_profile_by_id_or_name("filament", fid)
         fpath = tmp_dir / f"filament-{i}.json"
         fpath.write_text(json.dumps(fcfg))
         filament_paths.append(str(fpath))
+        # The 3MF stores per-slot filament selections as display names
+        # (e.g. "Bambu PLA Basic @BBL A1M"), not setting_ids. The binary's
+        # per-filament-slot name guard for project overrides compares
+        # against those, so forward the display name rather than the slug.
+        filament_names.append(fcfg.get("name", fid))
 
     return {
         "machine": str(machine_path),
         "process": str(process_path),
         "filaments": filament_paths,
+        "filament_names": filament_names,
         "printer_model_id": get_machine_model_id(machine_id),
     }

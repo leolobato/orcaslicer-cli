@@ -10,6 +10,7 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Utils.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -211,8 +212,30 @@ int run_slice_mode(const SliceRequest& req) {
     final_cfg.apply(Slic3r::FullPrintConfig::defaults());
     final_cfg.apply(machine_cfg);
     final_cfg.apply(process_cfg);
-    if (!filament_cfgs.empty()) {
+    // Replicate PresetBundle::construct_full_config (PresetBundle.cpp:115-180)
+    // for num_filaments > 1: scalar keys come from filament[0]; vector keys
+    // are assembled across all N filaments by taking each one's value at
+    // index 0 (each leaf preset is authored as a 1-element vector) and
+    // composing into a length-N vector that Print::apply expects. Without
+    // this, the second-and-later filament slots inherit filament[0]'s
+    // values silently and the gcode prints all extruders with slot 0's
+    // settings.
+    if (filament_cfgs.size() == 1) {
         final_cfg.apply(filament_cfgs[0]);
+    } else if (filament_cfgs.size() > 1) {
+        final_cfg.apply(filament_cfgs[0]);
+        for (const std::string& key : filament_cfgs[0].keys()) {
+            if (key == "compatible_prints" || key == "compatible_printers") continue;
+            Slic3r::ConfigOption* dst = final_cfg.option(key, /*create=*/false);
+            if (dst == nullptr || dst->is_scalar()) continue;
+            auto* dst_vec = static_cast<Slic3r::ConfigOptionVectorBase*>(dst);
+            std::vector<const Slic3r::ConfigOption*> per_slot(
+                filament_cfgs.size(), nullptr);
+            for (size_t i = 0; i < filament_cfgs.size(); ++i) {
+                per_slot[i] = filament_cfgs[i].option(key);
+            }
+            dst_vec->set(per_slot);
+        }
     }
 
     // Pad per-filament vector keys to `num_filaments` (taken from
@@ -230,9 +253,19 @@ int run_slice_mode(const SliceRequest& req) {
     // bare system defaults and the output diverges meaningfully from the
     // GUI even on simple projects.
     //
-    // For Phase 1 we apply the process slot and the trailing printer
-    // slot. Per-filament slots are applied in the multi-filament work
-    // (which also needs the per-slot vector merge libslic3r expects).
+    // Per-filament slots (indexes 1..N) are applied with a name guard:
+    // only when the request's `filament_settings_id[i]` (a display name)
+    // matches the 3MF's `filament_settings_id[i]`. When the user swapped
+    // filaments, the customizations referenced the OLD filament's
+    // defaults and become meaningless on the new one — discard and report
+    // back so the client can surface what was dropped.
+    std::vector<std::string> threemf_filament_names;
+    if (const auto* opt = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "filament_settings_id", false);
+        opt != nullptr) {
+        threemf_filament_names = opt->values;
+    }
+
     nlohmann::json transfer_status = nlohmann::json::object();
     transfer_status["status"] = "no_3mf_settings";
     if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
@@ -242,6 +275,48 @@ int run_slice_mode(const SliceRequest& req) {
         auto process_keys = apply_overrides_for_slot(
             final_cfg, threemf_config, fp->values[0],
             /*exclude_filament_keys=*/true);
+
+        // Per-filament slots: indexes 1..N. Layout is
+        // [process, filament_0, …, filament_{N-1}, printer].
+        nlohmann::json filament_slot_status = nlohmann::json::array();
+        const size_t num_filament_slots =
+            fp->values.size() >= 2 ? fp->values.size() - 2 : 0;
+        for (size_t i = 0; i < num_filament_slots; ++i) {
+            const std::string& key_list = fp->values[i + 1];
+            const std::string original =
+                i < threemf_filament_names.size()
+                    ? threemf_filament_names[i] : "";
+            const std::string selected =
+                i < req.filament_settings_id.size()
+                    ? req.filament_settings_id[i] : "";
+            nlohmann::json entry;
+            entry["slot"] = i;
+            entry["original_filament"] = original;
+            entry["selected_filament"] = selected;
+            if (key_list.empty()) {
+                entry["status"] = "no_customizations";
+                entry["transferred"] = nlohmann::json::array();
+                entry["discarded"] = nlohmann::json::array();
+            } else if (!original.empty() && original == selected) {
+                // Phase 1 limitation: overlays the keys flat onto
+                // final_cfg rather than into the per-slot vector index.
+                // For the single-customized-slot case this matches what
+                // PresetBundle does for filament_cfgs[0]; multi-slot
+                // per-key overlay is a Phase 4 follow-up.
+                const auto transferred = apply_overrides_for_slot(
+                    final_cfg, threemf_config, key_list,
+                    /*exclude_filament_keys=*/false);
+                entry["status"] = "applied";
+                entry["transferred"] = transferred;
+                entry["discarded"] = nlohmann::json::array();
+            } else {
+                entry["status"] = "filament_changed";
+                entry["transferred"] = nlohmann::json::array();
+                entry["discarded"] = split_semicolons(key_list);
+            }
+            filament_slot_status.push_back(entry);
+        }
+
         // Printer slot (last): no name guard — machine is fixed by the
         // request, any declared printer key overlays straight onto the
         // resolved machine config.
@@ -251,11 +326,15 @@ int run_slice_mode(const SliceRequest& req) {
                 final_cfg, threemf_config, fp->values.back(),
                 /*exclude_filament_keys=*/false);
         }
+        const bool any_filament_applied = std::any_of(
+            filament_slot_status.begin(), filament_slot_status.end(),
+            [](const nlohmann::json& e) { return e["status"] == "applied"; });
         const bool any =
-            !process_keys.empty() || !printer_keys.empty();
+            !process_keys.empty() || !printer_keys.empty() || any_filament_applied;
         transfer_status["status"] = any ? "applied" : "no_customizations";
         transfer_status["process_keys"] = process_keys;
         transfer_status["printer_keys"] = printer_keys;
+        transfer_status["filament_slots"] = filament_slot_status;
     }
 
     // curr_bed_type is a project-level field stored in the 3MF's

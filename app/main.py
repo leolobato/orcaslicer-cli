@@ -1184,7 +1184,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "plate_id": body.plate_id,
             "options": {"recenter": body.recenter},
             "filament_map": body.filament_map or [],
-            "filament_settings_id": body.filament_settings_ids,
+            "filament_settings_id": paths["filament_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
         })
     except BinaryError as e:
@@ -1248,7 +1248,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "plate_id": body.plate_id,
             "options": {"recenter": body.recenter},
             "filament_map": body.filament_map or [],
-            "filament_settings_id": body.filament_settings_ids,
+            "filament_settings_id": paths["filament_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
         }):
             if ev["type"] == "result":
