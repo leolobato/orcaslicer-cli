@@ -76,11 +76,18 @@ def test_inspect_unsliced_fixture_01() -> None:
     assert data["bbox"] is not None
     # `use-set` now backfills used_filament_indices for un-sliced 3MFs.
     assert data["plates"][0]["used_filament_indices"] == [0]
+    # New top-level fields from project_settings.
+    assert data["printer_settings_id"] == "Bambu Lab A1 mini 0.4 nozzle"
+    assert data["print_settings_id"] == "0.20mm Standard @BBL A1M"
+    assert data["layer_height"] == "0.25"
+
     # Per-plate shape for un-sliced 3MFs.
     p0 = data["plates"][0]
     assert p0["name"] == ""
     assert p0["estimate"] is None
     assert p0["warnings"] == []
+    # Per-plate objects from model_settings.config
+    assert p0["objects"] == [{"id": "156", "name": "3DBenchy.stl"}]
 
 
 def test_inspect_token_unknown_returns_404() -> None:

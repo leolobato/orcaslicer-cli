@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the response shape changes in a way that should invalidate
 # any in-memory cache the endpoint layer keeps.
-INSPECT_SCHEMA_VERSION = 2
+INSPECT_SCHEMA_VERSION = 3
 
 
 def _read_project_settings(zf: zipfile.ZipFile) -> dict[str, Any]:
@@ -143,6 +143,14 @@ def _parse_per_plate_slice_info(slice_info_xml: str) -> dict[int, dict]:
                 level = 0
             warnings.append({"msg": msg, "level": level, "error_code": error_code})
 
+        # Parse objects from slice_info <object> children
+        objects: list[dict[str, str]] = []
+        for obj_el in plate_el.findall("object"):
+            identify_id = obj_el.get("identify_id", "")
+            name = obj_el.get("name", "")
+            if identify_id:
+                objects.append({"id": identify_id, "name": name})
+
         result[plate_id] = {
             "estimate": estimate,
             "support_used": support_used,
@@ -152,6 +160,7 @@ def _parse_per_plate_slice_info(slice_info_xml: str) -> dict[int, dict]:
             "limit_filament_maps": limit_filament_maps,
             "outside": outside,
             "warnings": warnings,
+            "objects": objects,
         }
 
     return result
@@ -194,11 +203,87 @@ def _parse_plate_names(zf: zipfile.ZipFile) -> dict[int, str]:
     return names
 
 
+def _parse_object_names(zf: zipfile.ZipFile) -> dict[str, str]:
+    """Return {object_id: display_name} from model_settings.config <object> elements."""
+    if "Metadata/model_settings.config" not in zf.namelist():
+        return {}
+    try:
+        xml_bytes = zf.read("Metadata/model_settings.config")
+    except KeyError:
+        return {}
+    try:
+        root = ET.fromstring(xml_bytes.decode())
+    except ET.ParseError:
+        logger.warning("inspect: failed to parse model_settings.config for object names")
+        return {}
+
+    result: dict[str, str] = {}
+    for obj_el in root.findall("object"):
+        obj_id = obj_el.get("id", "")
+        if not obj_id:
+            continue
+        for m in obj_el.findall("metadata"):
+            if m.get("key") == "name":
+                result[obj_id] = m.get("value", "")
+                break
+    return result
+
+
+def _parse_plate_objects_unsliced(
+    zf: zipfile.ZipFile,
+    object_id_to_name: dict[str, str],
+) -> dict[int, list[dict[str, str]]]:
+    """Return {plate_id: [{id, name}, ...]} from model_settings.config <model_instance> elements."""
+    if "Metadata/model_settings.config" not in zf.namelist():
+        return {}
+    try:
+        xml_bytes = zf.read("Metadata/model_settings.config")
+    except KeyError:
+        return {}
+    try:
+        root = ET.fromstring(xml_bytes.decode())
+    except ET.ParseError:
+        return {}
+
+    result: dict[int, list[dict[str, str]]] = {}
+    for plate_el in root.findall("plate"):
+        plate_id: int | None = None
+        for m in plate_el.findall("metadata"):
+            if m.get("key") == "plater_id":
+                try:
+                    plate_id = int(m.get("value", ""))
+                except ValueError:
+                    pass
+                break
+        if plate_id is None:
+            continue
+
+        objects: list[dict[str, str]] = []
+        for inst_el in plate_el.findall("model_instance"):
+            inst_meta: dict[str, str] = {}
+            for m in inst_el.findall("metadata"):
+                k = m.get("key", "")
+                v = m.get("value", "")
+                if k:
+                    inst_meta[k] = v
+            object_id = inst_meta.get("object_id", "")
+            identify_id = inst_meta.get("identify_id", "")
+            obj_id_field = identify_id or object_id
+            if not obj_id_field:
+                continue
+            name = object_id_to_name.get(object_id, "")
+            objects.append({"id": obj_id_field, "name": name})
+
+        result[plate_id] = objects
+    return result
+
+
 def _parse_plates(
     zf: zipfile.ZipFile,
     file_bytes: bytes,
     per_plate_slice_info: dict[int, dict],
     plate_names: dict[int, str],
+    plate_objects: dict[int, list[dict[str, str]]],
 ) -> list[dict[str, Any]]:
     plate_count = get_plate_count(file_bytes)
     plates: list[dict[str, Any]] = []
@@ -220,6 +305,7 @@ def _parse_plates(
             "limit_filament_maps": slice_data.get("limit_filament_maps"),
             "outside": slice_data.get("outside"),
             "warnings": slice_data.get("warnings", []),
+            "objects": slice_data.get("objects", plate_objects.get(i, [])),
         }
         plates.append(plate)
     return plates
@@ -306,6 +392,9 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         "printer_model": "",
         "printer_variant": "",
         "curr_bed_type": "",
+        "printer_settings_id": "",
+        "print_settings_id": "",
+        "layer_height": "",
     }
 
     try:
@@ -328,11 +417,22 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         # Parse plate names from model_settings.config (always)
         plate_names = _parse_plate_names(zf)
 
-        out["plates"] = _parse_plates(zf, file_bytes, per_plate_slice_info, plate_names)
+        # Parse per-plate objects from model_settings.config (un-sliced fallback)
+        plate_objects: dict[int, list[dict[str, str]]] = {}
+        if slice_info_xml is None:
+            object_id_to_name = _parse_object_names(zf)
+            plate_objects = _parse_plate_objects_unsliced(zf, object_id_to_name)
+
+        out["plates"] = _parse_plates(
+            zf, file_bytes, per_plate_slice_info, plate_names, plate_objects
+        )
         out["filaments"] = _parse_filaments(project_settings, slice_info_xml)
         out["printer_model"] = project_settings.get("printer_model", "")
         out["printer_variant"] = project_settings.get("printer_variant", "")
         out["curr_bed_type"] = project_settings.get("curr_bed_type", "")
+        out["printer_settings_id"] = project_settings.get("printer_settings_id", "")
+        out["print_settings_id"] = project_settings.get("print_settings_id", "")
+        out["layer_height"] = project_settings.get("layer_height", "")
 
         # Back-compat: global estimate = plate 1's estimate (without first_layer_time)
         plate_1_data = per_plate_slice_info.get(1, {})

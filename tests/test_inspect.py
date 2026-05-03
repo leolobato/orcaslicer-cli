@@ -50,6 +50,11 @@ def test_parse_unsliced_input(fixture_01_input_bytes):
     assert result["printer_variant"] == "0.4"
     assert result["curr_bed_type"] == "Textured PEI Plate"
 
+    # New top-level fields from project_settings.
+    assert result["printer_settings_id"] == "Bambu Lab A1 mini 0.4 nozzle"
+    assert result["print_settings_id"] == "0.20mm Standard @BBL A1M"
+    assert result["layer_height"] == "0.25"
+
     # Per-plate shape for un-sliced 3MFs.
     assert len(result["plates"]) >= 1
     p0 = result["plates"][0]
@@ -62,6 +67,8 @@ def test_parse_unsliced_input(fixture_01_input_bytes):
     assert p0["limit_filament_maps"] is None
     assert p0["outside"] is None
     assert p0["warnings"] == []
+    # Per-plate objects from model_settings.config
+    assert p0["objects"] == [{"id": "156", "name": "3DBenchy.stl"}]
 
 
 def test_parse_sliced_output(fixture_01_sliced_bytes):
@@ -85,6 +92,8 @@ def test_parse_sliced_output(fixture_01_sliced_bytes):
     assert p0["label_object_enabled"] is True
     assert p0["nozzle_diameters"] == "0.4"
     assert len(p0["warnings"]) >= 1
+    # Per-plate objects from slice_info.config <object> children
+    assert p0["objects"] == [{"id": "156", "name": "3DBenchy.stl"}]
 
 
 def test_inspect_cache_hit_and_miss() -> None:
