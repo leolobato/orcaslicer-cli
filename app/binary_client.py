@@ -74,6 +74,60 @@ class BinaryClient:
 
         return response
 
+    async def use_set(self, *, input_3mf: str, timeout_s: float = 30.0) -> dict[str, Any]:
+        """Invoke `orca-headless use-set` and return the parsed response."""
+        request = {"input_3mf": input_3mf}
+        proc = await asyncio.create_subprocess_exec(
+            self.binary_path, "use-set",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(json.dumps(request).encode()),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise BinaryError(
+                code="binary_timeout",
+                message=f"orca-headless use-set timed out after {timeout_s}s",
+                details={},
+                stderr_tail="",
+            )
+
+        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+
+        if proc.returncode != 0 and not stdout.strip():
+            raise BinaryError(
+                code="binary_crashed",
+                message=f"orca-headless use-set exited {proc.returncode} with no stdout",
+                details={},
+                stderr_tail=stderr_text[-2000:],
+            )
+
+        try:
+            response = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            raise BinaryError(
+                code="binary_bad_response",
+                message=f"could not parse stdout as JSON: {e}",
+                details={"stdout_head": stdout[:500].decode("utf-8", errors="replace")},
+                stderr_tail=stderr_text[-2000:],
+            )
+
+        if response.get("status") != "ok":
+            raise BinaryError(
+                code=response.get("code", "unknown"),
+                message=response.get("message", ""),
+                details=response.get("details", {}),
+                stderr_tail=stderr_text[-2000:],
+            )
+
+        return response
+
     async def slice_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         proc = await asyncio.create_subprocess_exec(
             self.binary_path, "slice",
