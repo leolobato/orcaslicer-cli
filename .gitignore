@@ -19,3 +19,6 @@ build/
 .env
 *.log
 .venv
+
+# Runtime data (slice token cache)
+data/cache/
