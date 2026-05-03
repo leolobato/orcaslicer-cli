@@ -83,7 +83,9 @@ from .profiles import (
     materialize_filament_import,
     materialize_process_import,
 )
-from .inspect import parse_inspect_data, INSPECT_SCHEMA_VERSION
+from .inspect import (
+    INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
+)
 from .threemf import list_plate_thumbnails, read_plate_thumbnail
 from .slice_request import parse_filament_profile_ids
 from .stl_to_3mf import detect_file_type as _detect_file_type
@@ -125,6 +127,7 @@ async def lifespan(app: FastAPI):
         max_bytes=cfg.CACHE_MAX_BYTES,
         max_files=cfg.CACHE_MAX_FILES,
     )
+    app.state.inspect_cache = InspectCache()
     load_all_profiles()
     yield
 
@@ -852,13 +855,18 @@ async def inspect_3mf(token: str, request: Request) -> JSONResponse:
     populate it.
     """
     cache: TokenCache = request.app.state.token_cache
+    inspect_cache: InspectCache = request.app.state.inspect_cache
     try:
         path = cache.path(token)
+        sha256 = cache.sha256_for(token)
     except KeyError:
         return JSONResponse(
             status_code=404,
             content={"code": "token_unknown", "token": token},
         )
+    cached = inspect_cache.get(sha256)
+    if cached is not None:
+        return JSONResponse(content=cached)
     file_bytes = path.read_bytes()
     data = parse_inspect_data(file_bytes)
     thumbs = list_plate_thumbnails(file_bytes)
@@ -902,6 +910,7 @@ async def inspect_3mf(token: str, request: Request) -> JSONResponse:
         if plate["used_filament_indices"] is not None:
             use_set_per_plate.setdefault(plate["id"], plate["used_filament_indices"])
     data["use_set_per_plate"] = use_set_per_plate
+    inspect_cache.put(sha256, data)
     return JSONResponse(content=data)
 
 
@@ -938,8 +947,15 @@ async def get_plate_thumbnail(
 async def delete_token(request: Request, token: str):
     """Delete a previously uploaded .3mf file by token."""
     cache: TokenCache = request.app.state.token_cache
-    if not cache.delete(token):
+    try:
+        sha256 = cache.sha256_for(token)
+    except KeyError:
+        sha256 = None
+    deleted = cache.delete(token)
+    if not deleted:
         return JSONResponse(status_code=404, content={"code": "token_unknown", "token": token})
+    if sha256:
+        request.app.state.inspect_cache.invalidate(sha256)
     return None
 
 

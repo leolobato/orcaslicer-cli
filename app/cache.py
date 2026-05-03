@@ -83,6 +83,19 @@ class TokenCache:
             entry.last_access = time.time()
             return self._path_for_sha(entry.sha)
 
+    def sha256_for(self, token: str) -> str:
+        """Return the sha256 of the cached payload for ``token``.
+
+        Raises KeyError if the token is unknown. Used by the inspect-cache
+        layer to key cached inspect responses by content hash so cache hits
+        survive token re-use across uploads of the same bytes.
+        """
+        with self._lock:
+            entry = self._entries.get(token)
+            if entry is None:
+                raise KeyError(token)
+            return entry.sha
+
     def delete(self, token: str) -> bool:
         with self._lock:
             entry = self._entries.pop(token, None)

@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import zipfile
+from collections import OrderedDict
 from typing import Any
 
 from .threemf import get_bounding_box, get_plate_count, get_used_filament_slots
@@ -193,3 +194,37 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         }
 
     return out
+
+
+class InspectCache:
+    """In-memory cache of assembled inspect responses.
+
+    Keyed by ``(sha256, INSPECT_SCHEMA_VERSION)``. Bumping the schema
+    version invalidates every cached entry without touching the token
+    cache that stores the actual 3MF bytes.
+
+    Capped at 256 entries (LRU eviction). Inspect responses are small
+    (low single-digit KB each) so this is generous.
+    """
+    MAX_ENTRIES = 256
+
+    def __init__(self) -> None:
+        self._entries: "OrderedDict[tuple[str, int], dict[str, Any]]" = OrderedDict()
+
+    def get(self, sha256: str) -> dict[str, Any] | None:
+        key = (sha256, INSPECT_SCHEMA_VERSION)
+        if key not in self._entries:
+            return None
+        self._entries.move_to_end(key)
+        return self._entries[key]
+
+    def put(self, sha256: str, value: dict[str, Any]) -> None:
+        key = (sha256, INSPECT_SCHEMA_VERSION)
+        self._entries[key] = value
+        self._entries.move_to_end(key)
+        while len(self._entries) > self.MAX_ENTRIES:
+            self._entries.popitem(last=False)
+
+    def invalidate(self, sha256: str) -> None:
+        for ver in list({k[1] for k in self._entries if k[0] == sha256}):
+            self._entries.pop((sha256, ver), None)
