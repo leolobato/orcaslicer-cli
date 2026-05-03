@@ -50,6 +50,6 @@ target_include_directories(orca-headless PRIVATE
     ${CMAKE_BINARY_DIR}/orcaslicer-build/src
 )
 
-target_link_libraries(orca-headless PRIVATE libslic3r nlohmann_json)
+target_link_libraries(orca-headless PRIVATE libslic3r nlohmann_json nanosvg)
 
 install(TARGETS orca-headless RUNTIME DESTINATION bin)
