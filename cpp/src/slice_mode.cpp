@@ -97,9 +97,14 @@ Slic3r::DynamicPrintConfig load_preset_json(const std::string& path) {
     return cfg;
 }
 
-// Center every object on the build plate, then flush it to Z=0. Mirrors
-// what the GUI does after import (Plater::priv::on_load_geometry → fit).
-void recenter_on_plate(Slic3r::Model& model, const Slic3r::DynamicPrintConfig& cfg) {
+// Center the combined instance bounding box on the build plate. Mirrors
+// `Model::center_instances_around_point`, which is how the GUI's "fit to
+// plate" path reseats objects (it shifts each instance's offset, NOT the
+// object's intrinsic mesh — the latter is what the previous implementation
+// did, and it produced positions hundreds of mm off-center because the
+// 3MF's stored instance offsets stayed in place on top of our translate).
+void recenter_on_plate(Slic3r::Model& model,
+                       const Slic3r::DynamicPrintConfig& cfg) {
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
     if (!area || area->values.size() < 3) return;
     double min_x = area->values[0].x(), max_x = min_x;
@@ -108,12 +113,10 @@ void recenter_on_plate(Slic3r::Model& model, const Slic3r::DynamicPrintConfig& c
         min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
         min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
     }
-    const double cx = (min_x + max_x) / 2.0;
-    const double cy = (min_y + max_y) / 2.0;
+    Slic3r::Vec2d center((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+    model.center_instances_around_point(center);
     for (auto* obj : model.objects) {
         if (!obj) continue;
-        obj->center_around_origin();
-        obj->translate(cx, cy, 0.0);
         obj->ensure_on_bed(/*allow_negative_z=*/false);
     }
 }
