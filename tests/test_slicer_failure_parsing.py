@@ -1,7 +1,12 @@
 import tempfile
 import unittest
 
-from app.slicer import _build_failure, _extract_critical_warnings, _format_exit_reason
+from app.slicer import (
+    _build_failure,
+    _extract_critical_warnings,
+    _extract_validation_errors,
+    _format_exit_reason,
+)
 
 
 class ExtractCriticalWarningsTests(unittest.TestCase):
@@ -117,6 +122,74 @@ class BuildFailureTests(unittest.TestCase):
             err = _build_failure(-11, tmpdir, orca_output=output)
         self.assertIn("Floating regions", str(err))
         self.assertNotIn("SIGSEGV", str(err))
+
+
+class ExtractValidationErrorsTests(unittest.TestCase):
+    def test_extracts_organic_supports_validator_message(self) -> None:
+        output = (
+            "[2026-05-03 12:10:42.949462] [0x00007ffb6e375300] [error]   "
+            "got error when validate: Variable layer height is not "
+            "supported with Organic supports.\n"
+            "Variable layer height is not supported with Organic supports.\n"
+            "run found error, return -51, exit...\n"
+        )
+
+        errors = _extract_validation_errors(output)
+
+        self.assertEqual(
+            errors,
+            ["Variable layer height is not supported with Organic supports."],
+        )
+
+    def test_returns_empty_when_no_validator_error(self) -> None:
+        output = (
+            "[2026-04-20 11:40:12.480579] [0x7f6e498a6300] [debug]   "
+            "default_status_callback: percent=50, warning_step=-1, "
+            "message=Slicing mesh, message_type=0\n"
+        )
+
+        self.assertEqual(_extract_validation_errors(output), [])
+
+    def test_deduplicates_repeated_validator_errors(self) -> None:
+        line = (
+            "[error]   got error when validate: "
+            "Variable layer height is not supported with Organic supports.\n"
+        )
+        self.assertEqual(
+            _extract_validation_errors(line + line),
+            ["Variable layer height is not supported with Organic supports."],
+        )
+
+
+class BuildFailureValidationTests(unittest.TestCase):
+    def test_validation_error_preempts_critical_warning(self) -> None:
+        output = (
+            "default_status_callback: percent=-1, warning_step=6, "
+            "message=Floating regions detected., message_type=2\n"
+            "[error]   got error when validate: Variable layer height is "
+            "not supported with Organic supports.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            err = _build_failure(51, tmpdir, orca_output=output)
+
+        self.assertIn("Variable layer height", str(err))
+        self.assertNotIn("Floating regions", str(err))
+        self.assertIn(
+            "Variable layer height is not supported with Organic supports.",
+            err.critical_warnings,
+        )
+        self.assertIn("Floating regions detected.", err.critical_warnings)
+
+    def test_validation_error_preempts_signal_message(self) -> None:
+        output = (
+            "[error]   got error when validate: Variable layer height is "
+            "not supported with Organic supports.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            err = _build_failure(51, tmpdir, orca_output=output)
+
+        self.assertIn("Variable layer height", str(err))
+        self.assertNotIn("exited with code", str(err))
 
 
 if __name__ == "__main__":

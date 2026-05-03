@@ -1,7 +1,7 @@
 import os
 
 ORCA_VERSION = "2.3.2"
-API_REVISION = "21"
+API_REVISION = "22"
 VERSION = f"{ORCA_VERSION}-{API_REVISION}"
 
 # Git commit baked in at image build time. The Dockerfile takes a

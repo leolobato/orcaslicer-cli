@@ -142,12 +142,40 @@ _CRITICAL_WARNING_RE = re.compile(
     r"default_status_callback:[^\n]*?message=(.+?), message_type=2\b"
 )
 
+# OrcaSlicer's `Print::validate()` emits a fatal message via boost log when a
+# settings combination is rejected (e.g. "Variable layer height is not
+# supported with Organic supports."). The line shape is:
+#   [TIMESTAMP] [TID] [error]   got error when validate: <message>
+# followed by `run found error, return -51, exit...`. These don't go through
+# `default_status_callback`, so the critical-warning regex misses them and the
+# caller would otherwise see only a generic "exited with code 51".
+_VALIDATION_ERROR_RE = re.compile(
+    r"\[error\]\s+got error when validate:\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+
 
 def _extract_critical_warnings(orca_output: str) -> list[str]:
     """Return the deduplicated list of critical (message_type=2) warnings."""
     seen: set[str] = set()
     result: list[str] = []
     for match in _CRITICAL_WARNING_RE.finditer(orca_output):
+        msg = match.group(1).strip()
+        if msg and msg not in seen:
+            seen.add(msg)
+            result.append(msg)
+    return result
+
+
+def _extract_validation_errors(orca_output: str) -> list[str]:
+    """Return validator errors from OrcaSlicer's `Print::validate()`.
+
+    These are hard slice rejections — the user has to edit the 3MF (or the
+    selected process / filament profile) before the slice can succeed.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in _VALIDATION_ERROR_RE.finditer(orca_output):
         msg = match.group(1).strip()
         if msg and msg not in seen:
             seen.add(msg)
@@ -197,16 +225,28 @@ def _build_failure(
     orca_output: str,
 ) -> SlicingError:
     """Assemble a SlicingError with the most informative message we can extract."""
+    validation = _extract_validation_errors(orca_output)
     critical = _extract_critical_warnings(orca_output)
     exit_reason = _read_result_json(tmpdir)
     full_output = orca_output
     if exit_reason:
         full_output = f"{orca_output}\n\n=== result.json ===\n{exit_reason}"
-    if critical:
+    # Validator errors are hard rejections from `Print::validate()` — they
+    # always preempt critical warnings and the generic exit-code message.
+    if validation:
+        message = "; ".join(validation)
+    elif critical:
         message = "; ".join(critical)
     else:
         message = _format_exit_reason(returncode)
-    return SlicingError(message, orca_output=full_output, critical_warnings=critical)
+    # Both validator errors and message_type=2 warnings are surfaced as
+    # `critical_warnings` to the caller — they're functionally equivalent
+    # (fatal, user-actionable) and clients already render this list.
+    return SlicingError(
+        message,
+        orca_output=full_output,
+        critical_warnings=validation + critical,
+    )
 
 
 def _is_transferable_process_key(key: str) -> bool:
