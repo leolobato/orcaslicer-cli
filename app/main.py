@@ -84,6 +84,7 @@ from .profiles import (
     materialize_process_import,
 )
 from .inspect import parse_inspect_data, INSPECT_SCHEMA_VERSION
+from .threemf import list_plate_thumbnails, read_plate_thumbnail
 from .slice_request import parse_filament_profile_ids
 from .stl_to_3mf import detect_file_type as _detect_file_type
 from .binary_client import BinaryClient, BinaryError
@@ -858,15 +859,52 @@ async def inspect_3mf(token: str, request: Request) -> JSONResponse:
             status_code=404,
             content={"code": "token_unknown", "token": token},
         )
-    data = parse_inspect_data(path.read_bytes())
-    # Thumbnails plumbed in Task 5; use-set plumbed in Task 8.
-    data["thumbnail_urls"] = []
+    file_bytes = path.read_bytes()
+    data = parse_inspect_data(file_bytes)
+    thumbs = list_plate_thumbnails(file_bytes)
+    data["thumbnail_urls"] = [
+        {
+            "plate": t["plate"],
+            "kind": t["kind"],
+            "url": f"/3mf/{token}/plates/{t['plate']}/thumbnail?kind={t['kind']}",
+        }
+        for t in thumbs
+    ]
     data["use_set_per_plate"] = {
         p["id"]: p["used_filament_indices"]
         for p in data["plates"]
         if p["used_filament_indices"] is not None
     }
     return JSONResponse(content=data)
+
+
+@app.get("/3mf/{token}/plates/{plate}/thumbnail", tags=["3MF"])
+async def get_plate_thumbnail(
+    token: str, plate: int, request: Request, kind: str = "main",
+) -> Response:
+    """Return the PNG thumbnail for a specific plate of a cached 3MF."""
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        path = cache.path(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    png = read_plate_thumbnail(path.read_bytes(), plate=plate, kind=kind)
+    if png is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": "thumbnail_not_found",
+                "token": token, "plate": plate, "kind": kind,
+            },
+        )
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.delete("/3mf/{token}", status_code=fastapi_status.HTTP_204_NO_CONTENT, tags=["3MF"])

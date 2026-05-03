@@ -89,3 +89,23 @@ def test_inspect_token_unknown_returns_404() -> None:
         assert body["code"] == "token_unknown"
         return
     raise AssertionError("expected 404")
+
+
+def test_inspect_thumbnail_url_serves_png() -> None:
+    fp = FIXTURE_DIR / "01" / "reference-benchy-orca-no-filament-custom-settings.3mf"
+    upload = _post_multipart_file(f"{API}/3mf", fp)
+    token = upload["token"]
+
+    data = _get_json(f"{API}/3mf/{token}/inspect")
+    assert data["thumbnail_urls"], "inspect should list at least one thumbnail"
+    main = next(
+        (t for t in data["thumbnail_urls"] if t["kind"] == "main"), None,
+    )
+    assert main is not None
+
+    with urllib.request.urlopen(f"{API}{main['url']}", timeout=10.0) as r:
+        assert r.status == 200
+        assert r.headers["content-type"] == "image/png"
+        png = r.read()
+    # PNG signature.
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
