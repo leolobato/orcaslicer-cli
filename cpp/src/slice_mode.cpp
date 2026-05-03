@@ -257,6 +257,20 @@ int run_slice_mode(const SliceRequest& req) {
         transfer_status["process_keys"] = process_keys;
         transfer_status["printer_keys"] = printer_keys;
     }
+
+    // curr_bed_type is a project-level field stored in the 3MF's
+    // project_settings.config but NOT listed in different_settings_to_system.
+    // libslic3r reads it to pick which <plate>_temp keys drive bed
+    // temperature gcode (GCode.cpp:2116/2580/2937). Carry it over so our
+    // output uses the same bed type the user authored.
+    if (const auto* opt = threemf_config.option("curr_bed_type"); opt != nullptr) {
+        if (auto* dst = final_cfg.option("curr_bed_type", /*create=*/false);
+            dst != nullptr) {
+            dst->set(opt);
+            transfer_status["curr_bed_type"] = opt->serialize();
+        }
+    }
+
     response.settings_transfer = transfer_status;
 
     // 4. Wire AMS / filament selection metadata onto the final config so
@@ -375,6 +389,15 @@ int run_slice_mode(const SliceRequest& req) {
         const float normal_time =
             gcode_result.print_statistics.modes[normal_idx].time;
         plate->gcode_prediction = std::to_string(static_cast<int>(normal_time));
+        // first_layer_time lives at the top of GCodeProcessorResult (see
+        // GCodeProcessor.hpp:155; GCodeProcessor.cpp:2614 populates it from
+        // get_first_layer_time(Normal)). The GUI reads the same field at
+        // Plater.cpp:10308.
+        if (gcode_result.initial_layer_time > 0.0f) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%f", gcode_result.initial_layer_time);
+            plate->first_layer_time = buf;
+        }
         plate->is_support_used = print.is_support_used();
 
         for (size_t obj_id = 0; obj_id < model.objects.size(); ++obj_id) {
@@ -387,6 +410,38 @@ int run_slice_mode(const SliceRequest& req) {
         }
 
         plate->parse_filament_info(&gcode_result);
+
+        // parse_filament_info only sets id/used_m/used_g (bbs_3mf.cpp:593).
+        // Fill the remaining fields the GUI emits:
+        //   - type comes from the resolved system filament profile
+        //   - color and filament_id (the BBL tray catalog ID, e.g. "GFA00")
+        //     are user-authored per-slot picks that live in the input 3MF's
+        //     project_settings.config — read them from threemf_config
+        //
+        // tray_info_idx stays empty until Phase 3 plumbs AMS slot info
+        // from the gateway.
+        const auto* threemf_colors =
+            threemf_config.option<Slic3r::ConfigOptionStrings>(
+                "filament_colour", false);
+        const auto* threemf_ids =
+            threemf_config.option<Slic3r::ConfigOptionStrings>(
+                "filament_ids", false);
+        for (size_t i = 0; i < plate->slice_filaments_info.size(); ++i) {
+            auto& info = plate->slice_filaments_info[i];
+            if (i < filament_cfgs.size()) {
+                if (const auto* t = filament_cfgs[i]
+                        .opt<Slic3r::ConfigOptionStrings>("filament_type");
+                    t && !t->values.empty()) {
+                    info.type = t->values.front();
+                }
+            }
+            if (threemf_colors && i < threemf_colors->values.size()) {
+                info.color = threemf_colors->values[i];
+            }
+            if (threemf_ids && i < threemf_ids->values.size()) {
+                info.filament_id = threemf_ids->values[i];
+            }
+        }
     }
 
     // 9. Write the .3mf with embedded gcode + slice_info.
