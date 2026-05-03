@@ -83,6 +83,7 @@ from .profiles import (
     materialize_filament_import,
     materialize_process_import,
 )
+from .inspect import parse_inspect_data, INSPECT_SCHEMA_VERSION
 from .slice_request import parse_filament_profile_ids
 from .stl_to_3mf import detect_file_type as _detect_file_type
 from .binary_client import BinaryClient, BinaryError
@@ -839,6 +840,33 @@ async def download_3mf(request: Request, token: str):
         path,
         media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
     )
+
+
+@app.get("/3mf/{token}/inspect", tags=["3MF"])
+async def inspect_3mf(token: str, request: Request) -> JSONResponse:
+    """Return a cheap structured summary of a cached 3MF.
+
+    Pure read — does not slice. For un-sliced 3MFs `used_filament_indices`
+    on each plate is `None`; a later task wires `orca-headless use-set` to
+    populate it.
+    """
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        path = cache.path(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    data = parse_inspect_data(path.read_bytes())
+    # Thumbnails plumbed in Task 5; use-set plumbed in Task 8.
+    data["thumbnail_urls"] = []
+    data["use_set_per_plate"] = {
+        p["id"]: p["used_filament_indices"]
+        for p in data["plates"]
+        if p["used_filament_indices"] is not None
+    }
+    return JSONResponse(content=data)
 
 
 @app.delete("/3mf/{token}", status_code=fastapi_status.HTTP_204_NO_CONTENT, tags=["3MF"])
