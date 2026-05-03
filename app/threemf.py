@@ -676,6 +676,38 @@ def _read_plate_metadata(
     return []
 
 
+def _read_object_extruders(zf: zipfile.ZipFile) -> dict[str, str]:
+    """Map each ``<object id>`` to its 1-indexed ``extruder`` slot.
+
+    The GUI binds every model object to a filament slot via an ``extruder``
+    metadata entry on the top-level ``<object>`` in
+    ``Metadata/model_settings.config``. Our rebuilt single-plate 3MF must
+    re-emit that mapping; otherwise OrcaSlicer falls back to the process
+    profile's ``wall_filament`` and silently slices with the wrong material.
+    Returns ``{}`` when the file is missing or unparseable.
+    """
+    try:
+        if "Metadata/model_settings.config" not in zf.namelist():
+            return {}
+        raw = zf.read("Metadata/model_settings.config").decode()
+        root = ET.fromstring(raw)
+    except (KeyError, ET.ParseError, UnicodeDecodeError):
+        return {}
+
+    result: dict[str, str] = {}
+    for obj in root.findall("object"):
+        obj_id = obj.get("id") or ""
+        if not obj_id:
+            continue
+        for meta in obj.findall("metadata"):
+            if meta.get("key") == "extruder":
+                value = meta.get("value")
+                if value:
+                    result[obj_id] = value
+                break
+    return result
+
+
 def _read_plate_instances(
     zf: zipfile.ZipFile, plate_id: str,
 ) -> list[dict[str, str]]:
@@ -767,6 +799,7 @@ def extract_plate(
             root_model = zf.read(root_model_path).decode()
             printable_per_object = _read_printable_objectids(zf)
             object_names = _read_object_names(zf)
+            object_extruders = _read_object_extruders(zf)
             plate_instances = _read_plate_instances(zf, plate_id)
             plate_metadata = _read_plate_metadata(zf, plate_id)
             # Carry the source's ``project_settings.config`` through. The
@@ -883,10 +916,11 @@ def extract_plate(
             zs = [v[2] for v in item["verts"]]
             height = max(zs) - min(zs)
             xml_name = _xml_escape(name)
+            extruder = object_extruders.get(src_obj_id, "1")
             ms_objects.append(
                 f'  <object id="{obj_id}">\n'
                 f'    <metadata key="name" value="{xml_name}"/>\n'
-                '    <metadata key="extruder" value="1"/>\n'
+                f'    <metadata key="extruder" value="{extruder}"/>\n'
                 f'    <part id="{obj_id}" subtype="normal_part">\n'
                 f'      <metadata key="name" value="{xml_name}"/>\n'
                 '      <metadata key="matrix"'
