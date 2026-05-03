@@ -151,6 +151,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     libexpat1-dev \
     libcurl4-openssl-dev \
+    libtiff-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
