@@ -38,6 +38,7 @@ add_executable(orca-headless
     src/json_io.cpp
     src/progress.cpp
     src/slice_mode.cpp
+    src/nanosvg_impl.cpp
 )
 
 target_include_directories(orca-headless PRIVATE
