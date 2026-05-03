@@ -195,6 +195,29 @@ def _read_result_json(tmpdir: str) -> str:
         return ""
 
 
+def _extract_result_json_error(tmpdir: str) -> str:
+    """Return the `error_string` field from OrcaSlicer's `result.json`.
+
+    OrcaSlicer's CLI writes this on every exit via `record_exit_reson`
+    (`OrcaSlicer.cpp:409`). The field carries the authoritative user-facing
+    failure message — covers the entire `cli_errors` table (file-not-found,
+    out-of-memory, filament-bed mismatch, object collision in seq print, …)
+    plus dynamic `Print::validate()` rejections that don't go through that
+    table. Returns "" when the file is missing or malformed.
+    """
+    raw = _read_result_json(tmpdir)
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    msg = data.get("error_string", "")
+    if not isinstance(msg, str):
+        return ""
+    return msg.strip()
+
+
 def _format_exit_reason(returncode: int) -> str:
     """Render a non-zero subprocess returncode as a human-readable message.
 
@@ -225,23 +248,32 @@ def _build_failure(
     orca_output: str,
 ) -> SlicingError:
     """Assemble a SlicingError with the most informative message we can extract."""
+    json_error = _extract_result_json_error(tmpdir)
     validation = _extract_validation_errors(orca_output)
     critical = _extract_critical_warnings(orca_output)
     exit_reason = _read_result_json(tmpdir)
     full_output = orca_output
     if exit_reason:
         full_output = f"{orca_output}\n\n=== result.json ===\n{exit_reason}"
-    # Validator errors are hard rejections from `Print::validate()` — they
-    # always preempt critical warnings and the generic exit-code message.
-    if validation:
+    # Priority order, most-specific to least:
+    #   1. result.json `error_string` — the authoritative CLI exit reason,
+    #      covers all `cli_errors` codes plus dynamic validate() messages.
+    #   2. boost-log validator regex — fallback when result.json is missing
+    #      (non-Linux build, write failure, etc.).
+    #   3. message_type=2 critical warnings — non-fatal-looking warnings the
+    #      slicer chose to treat as fatal.
+    #   4. Generic exit code / signal message.
+    if json_error:
+        message = json_error
+    elif validation:
         message = "; ".join(validation)
     elif critical:
         message = "; ".join(critical)
     else:
         message = _format_exit_reason(returncode)
-    # Both validator errors and message_type=2 warnings are surfaced as
-    # `critical_warnings` to the caller — they're functionally equivalent
-    # (fatal, user-actionable) and clients already render this list.
+    # Surface validator + message_type=2 warnings as `critical_warnings` so
+    # clients that render the list see the same actionable text. The
+    # result.json message is already in `message` and `orca_output`.
     return SlicingError(
         message,
         orca_output=full_output,

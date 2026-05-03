@@ -1,12 +1,20 @@
+import json
+import os
 import tempfile
 import unittest
 
 from app.slicer import (
     _build_failure,
     _extract_critical_warnings,
+    _extract_result_json_error,
     _extract_validation_errors,
     _format_exit_reason,
 )
+
+
+def _write_result_json(tmpdir: str, payload: dict) -> None:
+    with open(os.path.join(tmpdir, "result.json"), "w") as f:
+        json.dump(payload, f)
 
 
 class ExtractCriticalWarningsTests(unittest.TestCase):
@@ -190,6 +198,75 @@ class BuildFailureValidationTests(unittest.TestCase):
 
         self.assertIn("Variable layer height", str(err))
         self.assertNotIn("exited with code", str(err))
+
+
+class ExtractResultJsonErrorTests(unittest.TestCase):
+    def test_returns_error_string_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_result_json(tmpdir, {
+                "return_code": 51,
+                "error_string": "Variable layer height is not supported with Organic supports.",
+            })
+            self.assertEqual(
+                _extract_result_json_error(tmpdir),
+                "Variable layer height is not supported with Organic supports.",
+            )
+
+    def test_returns_empty_when_file_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(_extract_result_json_error(tmpdir), "")
+
+    def test_returns_empty_when_json_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "result.json"), "w") as f:
+                f.write("{not valid json")
+            self.assertEqual(_extract_result_json_error(tmpdir), "")
+
+    def test_returns_empty_when_field_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_result_json(tmpdir, {"return_code": 0})
+            self.assertEqual(_extract_result_json_error(tmpdir), "")
+
+
+class BuildFailureResultJsonPriorityTests(unittest.TestCase):
+    def test_result_json_takes_priority_over_log_validator(self) -> None:
+        # A different validate message in the log vs result.json — result.json wins.
+        output = (
+            "[error]   got error when validate: Stale log message we should "
+            "ignore.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_result_json(tmpdir, {
+                "return_code": 38,
+                "error_string": "Filaments are not compatible with the plate type.",
+            })
+            err = _build_failure(38, tmpdir, orca_output=output)
+
+        self.assertIn("Filaments are not compatible", str(err))
+        self.assertNotIn("Stale log message", str(err))
+
+    def test_result_json_surfaces_non_validate_cli_errors(self) -> None:
+        # A canonical `cli_errors` entry — proves the path covers generic
+        # CLI failures (out-of-memory, file-not-found, etc.), not just
+        # `Print::validate()` rejections.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_result_json(tmpdir, {
+                "return_code": 37,
+                "error_string": "Object conflicts were detected when using print-by-object mode. Please verify the slicing of all plates in Orca Slicer before uploading.",
+            })
+            err = _build_failure(37, tmpdir, orca_output="")
+
+        self.assertIn("Object conflicts were detected", str(err))
+
+    def test_falls_back_to_validation_regex_when_result_json_missing(self) -> None:
+        output = (
+            "[error]   got error when validate: Variable layer height is "
+            "not supported with Organic supports.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            err = _build_failure(51, tmpdir, orca_output=output)
+
+        self.assertIn("Variable layer height", str(err))
 
 
 if __name__ == "__main__":
