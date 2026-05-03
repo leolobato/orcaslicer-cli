@@ -15,6 +15,7 @@ services:
       - ./app:/app/app
       - ./tests:/app/tests
       - ./conftest.py:/app/conftest.py
+      - ../_fixture:/_fixture:ro
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
       - ORCA_HEADLESS_BINARY=/opt/orca-headless/bin/orca-headless
