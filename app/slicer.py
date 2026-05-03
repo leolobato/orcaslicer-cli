@@ -25,6 +25,30 @@ PLATE_TYPE_API_TO_ORCA = {
 }
 SUPPORTED_PLATE_TYPES = tuple(PLATE_TYPE_API_TO_ORCA.keys())
 
+# Filament keys OrcaSlicer declares as `coStrings` (string vectors) but the GUI
+# sometimes exports as a bare scalar — wrapping at write time avoids the
+# `set_at(): Assigning from an empty vector` SIGABRT when the loader sees a
+# scalar `""`.
+_FILAMENT_VECTOR_STRING_KEYS = frozenset({"filament_notes"})
+
+
+def _normalize_filament_for_write(profile: dict[str, Any]) -> dict[str, Any]:
+    """Defensive shape/metadata fixes for a filament profile about to be written.
+
+    Wraps scalar values into single-element lists for known coStrings keys,
+    and defaults `type`/`from` (user-imported profiles often omit them, which
+    causes the loader to reject the JSON with `unknown config type`).
+    """
+    out = dict(profile)
+    for key in _FILAMENT_VECTOR_STRING_KEYS:
+        val = out.get(key)
+        if isinstance(val, str):
+            out[key] = [val]
+    out.setdefault("type", "filament")
+    out.setdefault("from", "system")
+    return out
+
+
 # Valid values for parameter overrides
 VALID_INFILL_PATTERNS = frozenset({
     "grid", "line", "cubic", "cubicsubdiv", "gyroid", "lightning",
@@ -83,7 +107,7 @@ async def materialize_profiles_for_binary(
     for i, fid in enumerate(filament_setting_ids):
         fcfg = get_profile_by_id_or_name("filament", fid)
         fpath = tmp_dir / f"filament-{i}.json"
-        fpath.write_text(json.dumps(fcfg))
+        fpath.write_text(json.dumps(_normalize_filament_for_write(fcfg)))
         filament_paths.append(str(fpath))
         # The 3MF stores per-slot filament selections as display names
         # (e.g. "Bambu PLA Basic @BBL A1M"), not setting_ids. The binary's
