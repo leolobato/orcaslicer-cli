@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.inspect import parse_inspect_data
+from app.inspect import INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1].parent / "_fixture"
 
@@ -61,3 +61,41 @@ def test_parse_sliced_output(fixture_01_sliced_bytes):
     assert e["weight_g"] > 0
     # `slice_info.config` lists the filament slots that the plate actually uses.
     assert result["plates"][0]["used_filament_indices"] == [0]
+
+
+def test_inspect_cache_hit_and_miss() -> None:
+    c = InspectCache()
+    assert c.get("sha-a") is None
+    c.put("sha-a", {"is_sliced": False})
+    assert c.get("sha-a") == {"is_sliced": False}
+    assert c.get("sha-b") is None
+
+
+def test_inspect_cache_invalidate() -> None:
+    c = InspectCache()
+    c.put("sha-a", {"is_sliced": False})
+    c.invalidate("sha-a")
+    assert c.get("sha-a") is None
+
+
+def test_inspect_cache_evicts_oldest_when_full() -> None:
+    c = InspectCache()
+    # Fill past MAX_ENTRIES.
+    for i in range(InspectCache.MAX_ENTRIES + 5):
+        c.put(f"sha-{i}", {"i": i})
+    # The first 5 should have been evicted.
+    for i in range(5):
+        assert c.get(f"sha-{i}") is None
+    for i in range(5, InspectCache.MAX_ENTRIES + 5):
+        assert c.get(f"sha-{i}") == {"i": i}
+
+
+def test_inspect_cache_schema_version_invalidates_logically() -> None:
+    """Bumping INSPECT_SCHEMA_VERSION must drop cached entries.
+
+    We simulate the bump by stuffing an entry with a stale version
+    directly into the internal dict, then verifying ``get`` misses.
+    """
+    c = InspectCache()
+    c._entries[("sha-x", INSPECT_SCHEMA_VERSION - 1)] = {"stale": True}
+    assert c.get("sha-x") is None
