@@ -1004,3 +1004,62 @@ def extract_plate(
     except (zipfile.BadZipFile, ET.ParseError, KeyError) as exc:
         logger.warning("Failed to extract first plate from 3MF: %s", exc)
         return None
+
+
+# Maps a 3MF entry name like "Metadata/plate_1_small.png" to (plate_id, kind).
+_PLATE_THUMB_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^Metadata/plate_(\d+)\.png$"), "main"),
+    (re.compile(r"^Metadata/plate_(\d+)_small\.png$"), "small"),
+    (re.compile(r"^Metadata/plate_no_light_(\d+)\.png$"), "no_light"),
+    (re.compile(r"^Metadata/top_(\d+)\.png$"), "top"),
+    (re.compile(r"^Metadata/pick_(\d+)\.png$"), "pick"),
+]
+
+
+def list_plate_thumbnails(file_bytes: bytes) -> list[dict[str, object]]:
+    """Return every plate thumbnail in a 3MF as ``{plate, kind, name}`` dicts.
+
+    Empty list when the bytes aren't a valid ZIP. The "kind" enumerates
+    the variants the GUI emits ("main" is the canonical preview;
+    "small"/"top"/"pick"/"no_light" are alternate renderings).
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except zipfile.BadZipFile:
+        return []
+    out: list[dict[str, object]] = []
+    with zf:
+        for name in zf.namelist():
+            for pattern, kind in _PLATE_THUMB_PATTERNS:
+                m = pattern.match(name)
+                if m:
+                    out.append({
+                        "plate": int(m.group(1)),
+                        "kind": kind,
+                        "name": name,
+                    })
+                    break
+    return out
+
+
+def read_plate_thumbnail(
+    file_bytes: bytes, plate: int, kind: str = "main",
+) -> bytes | None:
+    """Return the PNG bytes for a specific plate thumbnail, or None."""
+    name_for_kind: dict[str, str] = {
+        "main": f"Metadata/plate_{plate}.png",
+        "small": f"Metadata/plate_{plate}_small.png",
+        "no_light": f"Metadata/plate_no_light_{plate}.png",
+        "top": f"Metadata/top_{plate}.png",
+        "pick": f"Metadata/pick_{plate}.png",
+    }
+    target = name_for_kind.get(kind)
+    if target is None:
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            if target not in zf.namelist():
+                return None
+            return zf.read(target)
+    except (zipfile.BadZipFile, KeyError):
+        return None
