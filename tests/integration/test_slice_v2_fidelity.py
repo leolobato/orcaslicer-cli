@@ -108,17 +108,23 @@ def _first_xy(threemf_bytes: bytes) -> tuple[float, float]:
     raise AssertionError("no G1 X/Y after first M624")
 
 
-def test_fixture_01_matches_gui_within_tolerance() -> None:
-    input_path = (
-        FIXTURE_DIR
-        / "01"
-        / "reference-benchy-orca-no-filament-custom-settings.3mf"
-    )
-    gui_path = (
-        FIXTURE_DIR
-        / "01"
-        / "gui-benchy-orca-no-filament-custom-settings_sliced_gui.gcode.3mf.3mf"
-    )
+def _slice_and_compare(
+    input_path: Path,
+    gui_path: Path,
+    *,
+    machine_id: str,
+    process_id: str,
+    filament_settings_ids: list[str],
+    time_tol: float = 0.02,
+    weight_tol: float = 0.015,
+    first_layer_time_tol: float = 0.01,
+    xy_tol_mm: float = 0.01,
+) -> None:
+    """Slice ``input_path`` through ``/slice/v2`` and compare to GUI ground truth.
+
+    Asserts the metadata stamped into ``Metadata/slice_info.config`` and the
+    first toolpath XY land within tolerance of the GUI's sliced output.
+    """
     assert input_path.exists(), f"missing fixture: {input_path}"
     assert gui_path.exists(), f"missing fixture: {gui_path}"
 
@@ -129,54 +135,84 @@ def test_fixture_01_matches_gui_within_tolerance() -> None:
         f"{API}/slice/v2",
         {
             "input_token": token,
-            "machine_id": "GM020",
-            "process_id": "GP000",
-            "filament_settings_ids": ["GFSA00_02"],
+            "machine_id": machine_id,
+            "process_id": process_id,
+            "filament_settings_ids": filament_settings_ids,
             "recenter": False,
         },
     )
     out_token = slice_resp["output_token"]
     ours = _get_bytes(f"{API}/3mf/{out_token}")
-
     gui = gui_path.read_bytes()
     ours_info = _read_slice_info(ours)
     gui_info = _read_slice_info(gui)
 
-    # Time within 2% (we observe ~0.27%).
     ours_time = float(ours_info["prediction"])
     gui_time = float(gui_info["prediction"])
-    assert abs(ours_time - gui_time) / gui_time < 0.02, (
+    assert abs(ours_time - gui_time) / gui_time < time_tol, (
         f"time drift {ours_time} vs {gui_time}"
     )
 
-    # Weight within 1.5% (we observe ~0.6%).
     ours_w = float(ours_info["weight"])
     gui_w = float(gui_info["weight"])
-    assert abs(ours_w - gui_w) / gui_w < 0.015, (
+    assert abs(ours_w - gui_w) / gui_w < weight_tol, (
         f"weight drift {ours_w} vs {gui_w}"
     )
 
-    # Stamps that must match exactly.
     assert ours_info.get("printer_model_id") == gui_info.get("printer_model_id")
     assert ours_info.get("label_object_enabled") == gui_info.get(
         "label_object_enabled"
     )
     assert ours_info.get("nozzle_diameters") == gui_info.get("nozzle_diameters")
 
-    # first_layer_time should be populated and within ~1% of GUI.
     ours_flt = float(ours_info["first_layer_time"])
     gui_flt = float(gui_info["first_layer_time"])
     assert ours_flt > 0.0, "first_layer_time should be populated"
-    assert abs(ours_flt - gui_flt) / gui_flt < 0.01, (
+    assert abs(ours_flt - gui_flt) / gui_flt < first_layer_time_tol, (
         f"first_layer_time drift {ours_flt} vs {gui_flt}"
     )
 
-    # Start XY identical to 0.01 mm (we observe bit-for-bit match).
     ours_xy = _first_xy(ours)
     gui_xy = _first_xy(gui)
-    assert abs(ours_xy[0] - gui_xy[0]) < 0.01, (
+    assert abs(ours_xy[0] - gui_xy[0]) < xy_tol_mm, (
         f"start X {ours_xy[0]} vs {gui_xy[0]}"
     )
-    assert abs(ours_xy[1] - gui_xy[1]) < 0.01, (
+    assert abs(ours_xy[1] - gui_xy[1]) < xy_tol_mm, (
         f"start Y {ours_xy[1]} vs {gui_xy[1]}"
+    )
+
+
+def test_fixture_01_matches_gui_within_tolerance() -> None:
+    """Single-filament A1 mini benchy with process+printer customizations."""
+    _slice_and_compare(
+        FIXTURE_DIR / "01" / "reference-benchy-orca-no-filament-custom-settings.3mf",
+        FIXTURE_DIR / "01" / "gui-benchy-orca-no-filament-custom-settings_sliced_gui.gcode.3mf.3mf",
+        machine_id="GM020",
+        process_id="GP000",
+        filament_settings_ids=["GFSA00_02"],
+    )
+
+
+def test_fixture_03_matches_gui_within_tolerance() -> None:
+    """Single-filament with FILAMENT-side customizations (filament_max_volumetric_speed,
+    filament_flow_ratio in `different_settings_to_system[1]`). Exercises the
+    `applied` branch of the per-filament name guard."""
+    _slice_and_compare(
+        FIXTURE_DIR / "03" / "reference-benchy-with-filament-customizations.3mf",
+        FIXTURE_DIR / "03" / "gui-reference-benchy-with-filament-customizations_sliced.3mf",
+        machine_id="GM020",
+        process_id="GP000",
+        filament_settings_ids=["GFSA00_02"],
+    )
+
+
+def test_fixture_05_matches_gui_within_tolerance() -> None:
+    """Same as fixture 01 but with curr_bed_type = Cool Plate (vs Textured PEI).
+    Verifies bed-type carry-through and bed-temperature lookups."""
+    _slice_and_compare(
+        FIXTURE_DIR / "05" / "reference-benchy-cool-plate.3mf",
+        FIXTURE_DIR / "05" / "gui-reference-benchy-cool-plate_sliced.3mf",
+        machine_id="GM020",
+        process_id="GP000",
+        filament_settings_ids=["GFSA00_02"],
     )
