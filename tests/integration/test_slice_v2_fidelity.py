@@ -216,3 +216,30 @@ def test_fixture_05_matches_gui_within_tolerance() -> None:
         process_id="GP000",
         filament_settings_ids=["GFSA00_02"],
     )
+
+
+@pytest.mark.xfail(
+    reason="Multi-filament slicing crashes Print::process after a color-painted "
+    "XY-compensation warning. The headless binary's per-key vector merge "
+    "(slice_mode.cpp:227-262) now survives nullptr options, but the resulting "
+    "config still trips libslic3r's color-painting check during Slicing mesh. "
+    "Pending fix in the multi-filament composition path."
+)
+def test_fixture_04_matches_gui_within_tolerance() -> None:
+    """5 filament slots spanning 3 vendors (Bambu, SUNLU, Overture). Geometry
+    is bound to a single slot via `extruder` metadata, but the project
+    declares all 5 — exercises multi-slot materialisation, cross-vendor
+    profile resolution, and 5×5 flush-volume matrix sizing."""
+    _slice_and_compare(
+        FIXTURE_DIR / "04" / "reference-bird-orca.3mf",
+        FIXTURE_DIR / "04" / "gui-bird-orca_sliced_gui.3mf",
+        machine_id="GM020",
+        process_id="GP000",
+        filament_settings_ids=[
+            "GFSA00_02",   # Bambu PLA Basic @BBL A1M
+            "GFSNLS03_07", # SUNLU PLA+ @BBL A1M
+            "GFSL05_05",   # Overture Matte PLA @BBL A1M
+            "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 3)
+            "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 4)
+        ],
+    )

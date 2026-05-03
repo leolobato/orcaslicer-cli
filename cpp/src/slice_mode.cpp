@@ -229,12 +229,35 @@ int run_slice_mode(const SliceRequest& req) {
             Slic3r::ConfigOption* dst = final_cfg.option(key, /*create=*/false);
             if (dst == nullptr || dst->is_scalar()) continue;
             auto* dst_vec = static_cast<Slic3r::ConfigOptionVectorBase*>(dst);
+            // Some filament JSONs are missing keys that filament[0] declares
+            // (especially user-imported profiles that omit defaults). The
+            // GUI doesn't hit this because its filament_temp_configs are
+            // copies of fully-populated Preset configs; ours come straight
+            // from the resolved JSON which can be sparser. Fall back to
+            // filament[0]'s value for missing slots — semantically the
+            // closest match and what the GUI's default-preset chain would
+            // have provided. ConfigOptionVector::set() dereferences each
+            // entry without a nullptr check (Config.hpp:409), so passing a
+            // null for any slot SIGSEGVs.
             std::vector<const Slic3r::ConfigOption*> per_slot(
                 filament_cfgs.size(), nullptr);
+            const Slic3r::ConfigOption* slot0_opt =
+                filament_cfgs[0].option(key);
             for (size_t i = 0; i < filament_cfgs.size(); ++i) {
-                per_slot[i] = filament_cfgs[i].option(key);
+                const Slic3r::ConfigOption* opt = filament_cfgs[i].option(key);
+                if (opt == nullptr) opt = slot0_opt;
+                per_slot[i] = opt;
             }
-            dst_vec->set(per_slot);
+            // set() throws on type mismatch / empty source vectors; we'd
+            // rather skip the key and keep slicing than abort the whole
+            // request, so swallow and log to stderr.
+            try {
+                dst_vec->set(per_slot);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                    "[multi-filament] skip key %s: %s\n",
+                    key.c_str(), e.what());
+            }
         }
     }
 
