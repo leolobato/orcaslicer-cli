@@ -1185,11 +1185,17 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "options": {"recenter": body.recenter},
             "filament_map": body.filament_map or [],
             "filament_settings_id": body.filament_settings_ids,
+            "printer_model_id": paths.get("printer_model_id", ""),
         })
     except BinaryError as e:
         return JSONResponse(
             status_code=500,
-            content={"code": e.code, "message": e.message, "details": e.details},
+            content={
+                "code": e.code,
+                "message": e.message,
+                "details": e.details,
+                "stderr_tail": e.stderr_tail,
+            },
         )
 
     out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
@@ -1243,6 +1249,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "options": {"recenter": body.recenter},
             "filament_map": body.filament_map or [],
             "filament_settings_id": body.filament_settings_ids,
+            "printer_model_id": paths.get("printer_model_id", ""),
         }):
             if ev["type"] == "result":
                 out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())

@@ -17,7 +17,12 @@ from typing import Any
 
 from .config import ORCA_BINARY
 from .normalize import normalize_process_profile
-from .profiles import ProfileNotFoundError, get_profile, get_profile_by_id_or_name
+from .profiles import (
+    ProfileNotFoundError,
+    get_machine_model_id,
+    get_profile,
+    get_profile_by_id_or_name,
+)
 from .threemf import (
     extract_plate,
     get_build_volume,
@@ -1701,10 +1706,14 @@ async def materialize_profiles_for_binary(
 ) -> dict[str, Any]:
     """Resolve profile inheritance and write flattened JSONs the binary can load.
 
-    Returns absolute paths to:
-      - "machine":  the resolved machine profile JSON
-      - "process":  the resolved process profile JSON
-      - "filaments": a list of resolved filament profile JSONs (one per slot)
+    Returns:
+      - "machine":  absolute path to the resolved machine profile JSON
+      - "process":  absolute path to the resolved process profile JSON
+      - "filaments": list of absolute paths to resolved filament profile JSONs
+      - "printer_model_id": BBL ``model_id`` for the machine (e.g. ``"N1"``),
+        or ``""`` for vendors that don't declare one. Stamped onto
+        ``slice_info.config[printer_model_id]`` by the binary so consumers
+        can identify the target physical printer.
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="orca-headless-profiles-"))
     machine = get_profile("machine", machine_id)
@@ -1721,4 +1730,9 @@ async def materialize_profiles_for_binary(
         fpath.write_text(json.dumps(fcfg))
         filament_paths.append(str(fpath))
 
-    return {"machine": str(machine_path), "process": str(process_path), "filaments": filament_paths}
+    return {
+        "machine": str(machine_path),
+        "process": str(process_path),
+        "filaments": filament_paths,
+        "printer_model_id": get_machine_model_id(machine_id),
+    }

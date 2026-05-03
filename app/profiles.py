@@ -1349,6 +1349,37 @@ def get_profile(category: str, slug: str) -> dict[str, Any]:
     return _clean_profile(resolved)
 
 
+def get_machine_model_id(slug: str) -> str:
+    """Return the BBL ``model_id`` (e.g. ``"N1"``) for a machine setting_id.
+
+    The leaf "0.4 nozzle" preset is NOT linked to its model_id-bearing
+    vendor profile via ``inherits`` — that chain goes to the abstract
+    ``fdm_bbl_3dp_001_common`` instead. The actual link is the leaf's
+    ``printer_model`` field (e.g. ``"Bambu Lab A1 mini"``), which matches
+    the ``name`` of a top-level BBL machine profile that declares
+    ``model_id``. Same lookup pattern that ``_write_bbl_machine_full_shims``
+    uses to materialize the GUI shim files. Returns "" for vendors that
+    don't declare model_id (most non-BBL).
+    """
+    profile_key, resolved = _resolve_by_slug("machine", slug)
+    printer_model = resolved.get("printer_model") or _raw_profiles.get(
+        profile_key, {}
+    ).get("printer_model")
+    if not printer_model:
+        return ""
+    for other_key, raw in _raw_profiles.items():
+        if _type_map.get(other_key) != "machine":
+            continue
+        if raw.get("inherits"):
+            continue
+        if raw.get("name") != printer_model:
+            continue
+        mid = raw.get("model_id")
+        if mid:
+            return str(mid)
+    return ""
+
+
 def get_profile_by_id_or_name(category: str, slug_or_name: str) -> dict[str, Any]:
     """Resolve a profile by setting_id, falling back to display name.
 

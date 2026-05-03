@@ -22,6 +22,11 @@ struct SliceRequest {
     // project-overrides pass to decide whether per-filament customizations
     // from the 3MF apply (name match) or get discarded (filament swapped).
     std::vector<std::string> filament_settings_id;
+
+    // Optional: BBL printer model_id (e.g. "N1" for A1 mini). Stamped onto
+    // PlateData::printer_model_id so it surfaces in slice_info.config.
+    // Empty for non-BBL vendors.
+    std::string printer_model_id;
 };
 
 struct SliceResponseEstimate {

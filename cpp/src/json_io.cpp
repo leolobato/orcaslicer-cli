@@ -28,6 +28,7 @@ SliceRequest parse_slice_request_from_stdin() {
     if (j.contains("filament_settings_id") && j["filament_settings_id"].is_array()) {
         req.filament_settings_id = j["filament_settings_id"].get<std::vector<std::string>>();
     }
+    req.printer_model_id = j.value("printer_model_id", std::string());
     return req;
 }
 

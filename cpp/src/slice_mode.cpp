@@ -2,6 +2,7 @@
 #include "progress.h"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -138,17 +139,29 @@ int run_slice_mode(const SliceRequest& req) {
 
     emit_progress("composing_config", 20);
 
-    // 3. Compose the final DynamicPrintConfig: machine ← process ← filament.
-    //    For multi-filament we apply the first filament cfg as the base; the
-    //    full per-slot vector merge is libslic3r's `PresetBundle::full_config`
-    //    job and lives in a follow-up task. For Phase 1 single-filament use
-    //    this is sufficient.
+    // 3. Compose the final DynamicPrintConfig in the same order the GUI's
+    //    `PresetBundle::construct_full_config` uses (PresetBundle.cpp:71-79):
+    //    full defaults → machine → process → filament. The defaults pass is
+    //    critical: it pre-populates every per-filament/per-extruder vector
+    //    key with its default value, so that `Preset::normalize` below can
+    //    `resize(n, default)` without the vector being absent.
+    //
+    //    For Phase 1 single-filament use the first filament cfg is applied
+    //    flat; multi-filament needs the per-key vector merge from
+    //    `construct_full_config` and is a follow-up task.
     Slic3r::DynamicPrintConfig final_cfg;
+    final_cfg.apply(Slic3r::FullPrintConfig::defaults());
     final_cfg.apply(machine_cfg);
     final_cfg.apply(process_cfg);
     if (!filament_cfgs.empty()) {
         final_cfg.apply(filament_cfgs[0]);
     }
+
+    // Pad per-filament vector keys to `num_filaments` (taken from
+    // `filament_diameter` length when single_extruder_multi_material=1, else
+    // from `nozzle_diameter`). Without this, `Print::apply` derefs vector
+    // index 0 on options that the JSON didn't carry — null deref → SIGSEGV.
+    Slic3r::Preset::normalize(final_cfg);
 
     // TODO: apply_project_overrides — overlay keys declared in
     // threemf_config["different_settings_to_system"] onto final_cfg
@@ -169,18 +182,32 @@ int run_slice_mode(const SliceRequest& req) {
 
     // 5. Recenter the model on the plate (GUI does this on import).
     if (req.recenter) {
-        recenter_on_plate(model, final_cfg);
+        emit_progress("recentering", 25);
+        try {
+            recenter_on_plate(model, final_cfg);
+        } catch (const std::exception& e) {
+            return fail("recenter_failed", std::string("recenter: ") + e.what(),
+                        response);
+        }
     }
 
-    emit_progress("slicing", 30);
+    emit_progress("slicing_construct_print", 28);
 
     // 6. Configure the Print and run process(). BBL-printer flag controls
     //    output formatting (CONFIG_BLOCK markers, label_object tagging).
     Slic3r::Print print;
     print.restart();
     print.is_BBL_printer() = true;
-    print.apply(model, final_cfg);
 
+    emit_progress("slicing_apply", 30);
+    try {
+        print.apply(model, final_cfg);
+    } catch (const std::exception& e) {
+        return fail("apply_failed",
+                    std::string("Print::apply: ") + e.what(), response);
+    }
+
+    emit_progress("slicing_callback", 32);
     print.set_status_callback(
         [](const Slic3r::PrintBase::SlicingStatus& status) {
             // Map libslic3r's 0..100 percent into our 30..90 band so the
@@ -189,6 +216,7 @@ int run_slice_mode(const SliceRequest& req) {
             emit_progress(status.text, pct);
         });
 
+    emit_progress("slicing_process", 35);
     try {
         print.process();
     } catch (const std::exception& e) {
@@ -226,6 +254,23 @@ int run_slice_mode(const SliceRequest& req) {
     plate->is_label_object_enabled = gcode_result.label_object_enabled;
     plate->limit_filament_maps = gcode_result.limit_filament_maps;
     plate->layer_filaments = gcode_result.layer_filaments;
+    // Identifies the target physical printer in slice_info.config — e.g.
+    // "N1" for an A1 mini. Resolved by the Python service from the parent
+    // BBL machine profile; empty for vendors that don't declare model_id.
+    plate->printer_model_id = req.printer_model_id;
+    // Stamp nozzle_diameters as a space-delimited string mirroring the GUI
+    // (PartPlate.cpp:7240). Without this, slice_info.config carries an
+    // empty string even though the value sits in final_cfg.
+    if (const auto* nd = final_cfg.opt<Slic3r::ConfigOptionFloats>("nozzle_diameter")) {
+        std::string joined;
+        for (size_t i = 0; i < nd->values.size(); ++i) {
+            if (i) joined += ' ';
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%g", nd->values[i]);
+            joined += buf;
+        }
+        plate->nozzle_diameters = joined;
+    }
 
     {
         const auto& ps = print.print_statistics();
@@ -259,10 +304,16 @@ int run_slice_mode(const SliceRequest& req) {
     store_params.path = output_path_str.c_str();
     store_params.model = &model;
     store_params.config = &final_cfg;
+    // SkipModel mirrors the GUI's "min-save" mode (Plater.cpp:14624 etc.)
+    // and the legacy CLI's `--min-save 1` flag (commit 317b3d0): omit the
+    // input geometry from the output 3MF since it's not needed downstream
+    // — gcode + settings + thumbnails carry everything consumers use.
+    // Saves ~3MB on a typical benchy-sized project.
     store_params.strategy =
         Slic3r::SaveStrategy::Zip64
         | Slic3r::SaveStrategy::WithGcode
-        | Slic3r::SaveStrategy::WithSliceInfo;
+        | Slic3r::SaveStrategy::WithSliceInfo
+        | Slic3r::SaveStrategy::SkipModel;
     store_params.plate_data_list.push_back(plate);
 
     bool stored = false;
