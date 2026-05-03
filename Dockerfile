@@ -165,7 +165,7 @@ RUN cmake -S cpp -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/opt/orca-deps/usr/local \
         -DCMAKE_INSTALL_PREFIX=/opt/orca-headless && \
-    cmake --build build -j"$(nproc)" && \
+    cmake --build build --target orca-headless -j"$(nproc)" && \
     cmake --install build
 
 # =============================================================================

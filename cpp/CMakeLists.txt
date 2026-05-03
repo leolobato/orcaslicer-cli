@@ -24,6 +24,15 @@ set(BBL_RELEASE_TO_PUBLIC OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer
                  ${CMAKE_BINARY_DIR}/orcaslicer-build)
 
+# OrcaSlicer's src/CMakeLists.txt unconditionally creates an `OrcaSlicer`
+# executable target (the GUI app entry point) — it's outside the
+# `if(ORCA_TOOLS)` block. SLIC3R_GUI=OFF prevents wx linking but the target
+# still gets compiled by `cmake --build`, which fails on missing wx headers.
+# Excluding it from `all` lets us build only orca-headless.
+if (TARGET OrcaSlicer)
+    set_target_properties(OrcaSlicer PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+
 add_executable(orca-headless
     src/orca_headless.cpp
     src/json_io.cpp
@@ -33,7 +42,10 @@ add_executable(orca-headless
 target_include_directories(orca-headless PRIVATE
     ${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer/src
     ${CMAKE_SOURCE_DIR}/../vendor/OrcaSlicer/deps_src
-    ${CMAKE_BINARY_DIR}/orcaslicer-build/src/libslic3r
+    # Generated headers (libslic3r_version.h) — configure_file output lives
+    # in the libslic3r build dir; we add its parent so `<libslic3r/x.h>`
+    # resolves the same way it does inside libslic3r itself.
+    ${CMAKE_BINARY_DIR}/orcaslicer-build/src
 )
 
 target_link_libraries(orca-headless PRIVATE libslic3r nlohmann_json)
