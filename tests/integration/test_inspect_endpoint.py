@@ -74,8 +74,8 @@ def test_inspect_unsliced_fixture_01() -> None:
     assert f0["type"] == "PLA"
     assert f0["filament_id"] == "GFA00"
     assert data["bbox"] is not None
-    # Un-sliced 3MF: per-plate slots aren't known yet.
-    assert data["plates"][0]["used_filament_indices"] is None
+    # `use-set` now backfills used_filament_indices for un-sliced 3MFs.
+    assert data["plates"][0]["used_filament_indices"] == [0]
 
 
 def test_inspect_token_unknown_returns_404() -> None:
@@ -109,3 +109,16 @@ def test_inspect_thumbnail_url_serves_png() -> None:
         png = r.read()
     # PNG signature.
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_inspect_unsliced_use_set_via_binary() -> None:
+    fp = FIXTURE_DIR / "01" / "reference-benchy-orca-no-filament-custom-settings.3mf"
+    upload = _post_multipart_file(f"{API}/3mf", fp)
+    token = upload["token"]
+
+    data = _get_json(f"{API}/3mf/{token}/inspect")
+    assert data["is_sliced"] is False
+    # `use-set` should fill in plate 1.
+    assert data["use_set_per_plate"], "binary should have populated use_set_per_plate"
+    assert data["use_set_per_plate"]["1"] == [0]
+    assert data["plates"][0]["used_filament_indices"] == [0]

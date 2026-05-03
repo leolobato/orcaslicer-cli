@@ -870,11 +870,38 @@ async def inspect_3mf(token: str, request: Request) -> JSONResponse:
         }
         for t in thumbs
     ]
-    data["use_set_per_plate"] = {
-        p["id"]: p["used_filament_indices"]
-        for p in data["plates"]
-        if p["used_filament_indices"] is not None
-    }
+
+    # Populate use_set_per_plate. Sliced 3MFs already carry per-plate
+    # used-slot data via `slice_info.config` (parse_inspect_data fills
+    # `plates[i].used_filament_indices` from there). For un-sliced 3MFs
+    # we shell out to `orca-headless use-set`.
+    use_set_per_plate: dict[int, list[int]] = {}
+    needs_binary = any(
+        p["used_filament_indices"] is None for p in data["plates"]
+    )
+    if needs_binary and cfg.USE_HEADLESS_BINARY:
+        binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+        try:
+            us_response = await binary.use_set(input_3mf=str(path))
+        except BinaryError as e:
+            logger.warning(
+                "use-set failed; returning inspect without per-plate slots: %s",
+                e.message,
+            )
+        else:
+            for p in us_response.get("plates", []):
+                use_set_per_plate[p["id"]] = p["used_filament_indices"]
+            # Backfill into data["plates"].
+            for plate in data["plates"]:
+                if plate["used_filament_indices"] is None and \
+                        plate["id"] in use_set_per_plate:
+                    plate["used_filament_indices"] = use_set_per_plate[plate["id"]]
+    # Sliced-side data already in data["plates"][i] — also surface as
+    # the dict-keyed shape for gateway convenience.
+    for plate in data["plates"]:
+        if plate["used_filament_indices"] is not None:
+            use_set_per_plate.setdefault(plate["id"], plate["used_filament_indices"])
+    data["use_set_per_plate"] = use_set_per_plate
     return JSONResponse(content=data)
 
 
