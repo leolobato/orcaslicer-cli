@@ -61,6 +61,8 @@ def test_slice_v2_uses_binary(client: TestClient, tmp_path: Path) -> None:
         "machine": str(tmp_path / "m.json"),
         "process": str(tmp_path / "p.json"),
         "filaments": [str(tmp_path / "f0.json")],
+        "filament_names": ["Mock Filament 0"],
+        "printer_model_id": "",
     }
     # Touch the files so any read-checks pass
     for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
@@ -105,6 +107,8 @@ def test_slice_stream_v2_emits_progress_and_result(client: TestClient, tmp_path:
         "machine": str(tmp_path / "m.json"),
         "process": str(tmp_path / "p.json"),
         "filaments": [str(tmp_path / "f0.json")],
+        "filament_names": ["Mock Filament 0"],
+        "printer_model_id": "",
     }
     for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
         Path(fp).write_text("{}")
