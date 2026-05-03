@@ -144,6 +144,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzstd-dev \
     libfontconfig1-dev \
     libfreetype6-dev \
+    libglew-dev \
+    libglfw3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
