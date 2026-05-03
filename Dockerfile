@@ -146,6 +146,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfreetype6-dev \
     libglew-dev \
     libglfw3-dev \
+    libjpeg-dev \
+    libpng-dev \
+    zlib1g-dev \
+    libexpat1-dev \
+    libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
