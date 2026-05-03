@@ -29,7 +29,15 @@ Slic3r::DynamicPrintConfig load_preset_json(const std::string& path) {
     Slic3r::DynamicPrintConfig cfg;
     Slic3r::ConfigSubstitutionContext ctx(
         Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
-    cfg.load_from_json(path, ctx, /*load_inherits=*/false, /*ignore_nonexistent=*/false);
+    // libslic3r returns extra key/value pairs (e.g. "name", "from", "type"
+    // metadata that aren't config options) via key_values, plus any error
+    // text via reason. We don't propagate either for Phase 1; failures
+    // surface as exit-non-zero from the int return and are caught by the
+    // caller's try/catch.
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    cfg.load_from_json(path, ctx, /*load_inherits_in_config=*/false,
+                       key_values, reason);
     return cfg;
 }
 
