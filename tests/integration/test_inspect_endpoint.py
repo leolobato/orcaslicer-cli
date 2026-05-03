@@ -76,6 +76,11 @@ def test_inspect_unsliced_fixture_01() -> None:
     assert data["bbox"] is not None
     # `use-set` now backfills used_filament_indices for un-sliced 3MFs.
     assert data["plates"][0]["used_filament_indices"] == [0]
+    # Per-plate shape for un-sliced 3MFs.
+    p0 = data["plates"][0]
+    assert p0["name"] == ""
+    assert p0["estimate"] is None
+    assert p0["warnings"] == []
 
 
 def test_inspect_token_unknown_returns_404() -> None:

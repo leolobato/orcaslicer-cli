@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import json
 import logging
-import re
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import OrderedDict
 from typing import Any
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the response shape changes in a way that should invalidate
 # any in-memory cache the endpoint layer keeps.
-INSPECT_SCHEMA_VERSION = 1
+INSPECT_SCHEMA_VERSION = 2
 
 
 def _read_project_settings(zf: zipfile.ZipFile) -> dict[str, Any]:
@@ -51,50 +51,178 @@ def _read_slice_info(zf: zipfile.ZipFile) -> str | None:
     return xml
 
 
-def _parse_plates(zf: zipfile.ZipFile, file_bytes: bytes) -> list[dict[str, Any]]:
+def _parse_per_plate_slice_info(slice_info_xml: str) -> dict[int, dict]:
+    """Parse per-plate metadata from slice_info.config XML.
+
+    Returns a dict keyed by plate id (1-based) with each plate's
+    estimate, support_used, label_object_enabled, nozzle_diameters,
+    filament_maps, limit_filament_maps, outside, and warnings.
+    """
+    result: dict[int, dict] = {}
+    try:
+        root = ET.fromstring(slice_info_xml)
+    except ET.ParseError:
+        logger.warning("inspect: failed to parse slice_info.config as XML")
+        return result
+
+    for plate_el in root.findall("plate"):
+        meta: dict[str, str] = {}
+        for m in plate_el.findall("metadata"):
+            k = m.get("key", "")
+            v = m.get("value", "")
+            if k:
+                meta[k] = v
+
+        try:
+            plate_id = int(meta.get("index", "0"))
+        except ValueError:
+            plate_id = 0
+        if plate_id <= 0:
+            continue
+
+        # Parse filament used_m sorted by id
+        filament_entries: list[tuple[int, float]] = []
+        for fil_el in plate_el.findall("filament"):
+            try:
+                fid = int(fil_el.get("id", "0"))
+                used_m = float(fil_el.get("used_m", "0"))
+                filament_entries.append((fid, used_m))
+            except ValueError:
+                pass
+        filament_entries.sort(key=lambda x: x[0])
+        filament_used_m = [v for _, v in filament_entries]
+
+        # Parse estimate fields (defensive on empty strings)
+        def _float_or_none(s: str) -> float | None:
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        time_seconds = _float_or_none(meta.get("prediction", ""))
+        weight_g = _float_or_none(meta.get("weight", ""))
+        first_layer_time = _float_or_none(meta.get("first_layer_time", ""))
+
+        estimate: dict[str, Any] | None = None
+        if time_seconds is not None and weight_g is not None:
+            estimate = {
+                "time_seconds": time_seconds,
+                "weight_g": weight_g,
+                "first_layer_time": first_layer_time,
+                "filament_used_m": filament_used_m,
+            }
+
+        # Parse boolean fields
+        def _bool_or_none(s: str) -> bool | None:
+            if s == "true":
+                return True
+            if s == "false":
+                return False
+            return None
+
+        support_used = _bool_or_none(meta.get("support_used", ""))
+        label_object_enabled = _bool_or_none(meta.get("label_object_enabled", ""))
+        outside = _bool_or_none(meta.get("outside", ""))
+
+        # Raw string fields
+        nozzle_diameters = meta.get("nozzle_diameters") or None
+        filament_maps = meta.get("filament_maps") or None
+        limit_filament_maps = meta.get("limit_filament_maps") or None
+
+        # Parse warnings
+        warnings: list[dict[str, Any]] = []
+        for w_el in plate_el.findall("warning"):
+            msg = w_el.get("msg", "")
+            level_str = w_el.get("level", "")
+            error_code = w_el.get("error_code", "")
+            try:
+                level = int(level_str)
+            except ValueError:
+                level = 0
+            warnings.append({"msg": msg, "level": level, "error_code": error_code})
+
+        result[plate_id] = {
+            "estimate": estimate,
+            "support_used": support_used,
+            "label_object_enabled": label_object_enabled,
+            "nozzle_diameters": nozzle_diameters,
+            "filament_maps": filament_maps,
+            "limit_filament_maps": limit_filament_maps,
+            "outside": outside,
+            "warnings": warnings,
+        }
+
+    return result
+
+
+def _parse_plate_names(zf: zipfile.ZipFile) -> dict[int, str]:
+    """Parse plate names from model_settings.config.
+
+    Returns a dict mapping plate id (1-based) to plater_name string.
+    """
+    if "Metadata/model_settings.config" not in zf.namelist():
+        return {}
+    try:
+        xml_bytes = zf.read("Metadata/model_settings.config")
+    except KeyError:
+        return {}
+    try:
+        root = ET.fromstring(xml_bytes.decode())
+    except ET.ParseError:
+        logger.warning("inspect: failed to parse model_settings.config as XML")
+        return {}
+
+    names: dict[int, str] = {}
+    for plate_el in root.findall("plate"):
+        plate_id: int | None = None
+        plate_name: str = ""
+        for m in plate_el.findall("metadata"):
+            k = m.get("key", "")
+            v = m.get("value", "")
+            if k == "plater_id":
+                try:
+                    plate_id = int(v)
+                except ValueError:
+                    pass
+            elif k == "plater_name":
+                plate_name = v
+        if plate_id is not None:
+            names[plate_id] = plate_name
+
+    return names
+
+
+def _parse_plates(
+    zf: zipfile.ZipFile,
+    file_bytes: bytes,
+    per_plate_slice_info: dict[int, dict],
+    plate_names: dict[int, str],
+) -> list[dict[str, Any]]:
     plate_count = get_plate_count(file_bytes)
     plates: list[dict[str, Any]] = []
     for i in range(1, max(1, plate_count) + 1):
         used = get_used_filament_slots(file_bytes, plate=i)
-        plates.append({
+        slice_data = per_plate_slice_info.get(i, {})
+
+        plate: dict[str, Any] = {
             "id": i,
+            "name": plate_names.get(i, ""),
             # `None` means "the slice metadata didn't say" — for un-sliced
             # 3MFs this gets filled in later by `orca-headless use-set`.
             "used_filament_indices": sorted(used) if used is not None else None,
-        })
-    return plates
-
-
-_FILAMENT_TAG_RE = re.compile(
-    r'<filament\s+id="(?P<id>\d+)"\s+'
-    r'tray_info_idx="(?P<tray>[^"]*)"\s+'
-    r'type="(?P<type>[^"]*)"\s+'
-    r'color="(?P<color>[^"]*)"\s+'
-    r'used_m="(?P<used_m>[^"]*)"\s+'
-    r'used_g="(?P<used_g>[^"]*)"',
-)
-
-
-def _parse_estimate(slice_info_xml: str) -> dict[str, Any] | None:
-    """Parse the global plate-1 estimate from `slice_info.config`."""
-    pred_m = re.search(r'key="prediction"\s+value="([^"]+)"', slice_info_xml)
-    weight_m = re.search(r'key="weight"\s+value="([^"]+)"', slice_info_xml)
-    if not pred_m or not weight_m:
-        return None
-    filaments_used: list[float] = []
-    for fm in _FILAMENT_TAG_RE.finditer(slice_info_xml):
-        try:
-            filaments_used.append(float(fm.group("used_m")))
-        except ValueError:
-            pass
-    try:
-        return {
-            "time_seconds": float(pred_m.group(1)),
-            "weight_g": float(weight_m.group(1)),
-            "filament_used_m": filaments_used,
+            "estimate": slice_data.get("estimate"),
+            "support_used": slice_data.get("support_used"),
+            "label_object_enabled": slice_data.get("label_object_enabled"),
+            "nozzle_diameters": slice_data.get("nozzle_diameters"),
+            "filament_maps": slice_data.get("filament_maps"),
+            "limit_filament_maps": slice_data.get("limit_filament_maps"),
+            "outside": slice_data.get("outside"),
+            "warnings": slice_data.get("warnings", []),
         }
-    except ValueError:
-        return None
+        plates.append(plate)
+    return plates
 
 
 def _parse_filaments(
@@ -112,15 +240,29 @@ def _parse_filaments(
       ``filament_type``).
     """
     if slice_info_xml is not None:
-        sliced = []
-        for m in _FILAMENT_TAG_RE.finditer(slice_info_xml):
-            sliced.append({
-                "slot": int(m.group("id")) - 1,
-                "type": m.group("type"),
-                "color": m.group("color"),
-                "filament_id": m.group("tray"),
-                "settings_id": "",  # not present in slice_info; settings_id only lives in project_settings.
-            })
+        # Parse filament tags directly via ElementTree for consistency,
+        # but the regex approach also works fine here; keep it as-is.
+        try:
+            root = ET.fromstring(slice_info_xml)
+        except ET.ParseError:
+            root = None
+
+        sliced: list[dict[str, Any]] = []
+        if root is not None:
+            for plate_el in root.findall("plate"):
+                for fil_el in plate_el.findall("filament"):
+                    try:
+                        fid = int(fil_el.get("id", "0"))
+                    except ValueError:
+                        continue
+                    sliced.append({
+                        "slot": fid - 1,
+                        "type": fil_el.get("type", ""),
+                        "color": fil_el.get("color", ""),
+                        "filament_id": fil_el.get("tray_info_idx", ""),
+                        "settings_id": "",
+                    })
+
         if sliced:
             # Project-side settings_id may still be useful; merge by slot.
             settings_ids = project_settings.get("filament_settings_id") or []
@@ -177,14 +319,30 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         out["is_sliced"] = slice_info_xml is not None
         project_settings = _read_project_settings(zf)
         out["plate_count"] = get_plate_count(file_bytes)
-        out["plates"] = _parse_plates(zf, file_bytes)
+
+        # Parse per-plate data from slice_info.config (sliced only)
+        per_plate_slice_info: dict[int, dict] = {}
+        if slice_info_xml is not None:
+            per_plate_slice_info = _parse_per_plate_slice_info(slice_info_xml)
+
+        # Parse plate names from model_settings.config (always)
+        plate_names = _parse_plate_names(zf)
+
+        out["plates"] = _parse_plates(zf, file_bytes, per_plate_slice_info, plate_names)
         out["filaments"] = _parse_filaments(project_settings, slice_info_xml)
         out["printer_model"] = project_settings.get("printer_model", "")
         out["printer_variant"] = project_settings.get("printer_variant", "")
         out["curr_bed_type"] = project_settings.get("curr_bed_type", "")
 
-        if slice_info_xml is not None:
-            out["estimate"] = _parse_estimate(slice_info_xml)
+        # Back-compat: global estimate = plate 1's estimate (without first_layer_time)
+        plate_1_data = per_plate_slice_info.get(1, {})
+        plate_1_estimate = plate_1_data.get("estimate")
+        if plate_1_estimate is not None:
+            out["estimate"] = {
+                "time_seconds": plate_1_estimate["time_seconds"],
+                "weight_g": plate_1_estimate["weight_g"],
+                "filament_used_m": plate_1_estimate["filament_used_m"],
+            }
 
     bbox = get_bounding_box(file_bytes)
     if bbox is not None:

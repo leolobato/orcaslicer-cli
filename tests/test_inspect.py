@@ -50,6 +50,19 @@ def test_parse_unsliced_input(fixture_01_input_bytes):
     assert result["printer_variant"] == "0.4"
     assert result["curr_bed_type"] == "Textured PEI Plate"
 
+    # Per-plate shape for un-sliced 3MFs.
+    assert len(result["plates"]) >= 1
+    p0 = result["plates"][0]
+    assert p0["name"] == ""
+    assert p0["estimate"] is None
+    assert p0["support_used"] is None
+    assert p0["label_object_enabled"] is None
+    assert p0["nozzle_diameters"] is None
+    assert p0["filament_maps"] is None
+    assert p0["limit_filament_maps"] is None
+    assert p0["outside"] is None
+    assert p0["warnings"] == []
+
 
 def test_parse_sliced_output(fixture_01_sliced_bytes):
     result = parse_inspect_data(fixture_01_sliced_bytes)
@@ -61,6 +74,17 @@ def test_parse_sliced_output(fixture_01_sliced_bytes):
     assert e["weight_g"] > 0
     # `slice_info.config` lists the filament slots that the plate actually uses.
     assert result["plates"][0]["used_filament_indices"] == [0]
+
+    # Per-plate sliced metadata.
+    p0 = result["plates"][0]
+    assert p0["estimate"] is not None
+    assert p0["estimate"]["time_seconds"] > 0
+    assert p0["estimate"]["weight_g"] > 0
+    assert p0["estimate"]["first_layer_time"] > 0
+    assert p0["support_used"] is False
+    assert p0["label_object_enabled"] is True
+    assert p0["nozzle_diameters"] == "0.4"
+    assert len(p0["warnings"]) >= 1
 
 
 def test_inspect_cache_hit_and_miss() -> None:
