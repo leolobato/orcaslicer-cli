@@ -38,6 +38,7 @@ add_executable(orca-headless
     src/json_io.cpp
     src/progress.cpp
     src/slice_mode.cpp
+    src/use_set_mode.cpp
     src/nanosvg_impl.cpp
 )
 

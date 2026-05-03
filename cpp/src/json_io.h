@@ -47,7 +47,27 @@ struct SliceResponse {
     nlohmann::json error_details = nlohmann::json::object();
 };
 
+struct UseSetRequest {
+    std::string input_3mf;
+};
+
+struct UseSetPlateInfo {
+    int plate_id = 0;          // 1-based
+    std::vector<int> used_filament_indices;  // 0-based, sorted
+};
+
+struct UseSetResponse {
+    std::string status;        // "ok" or "error"
+    std::vector<UseSetPlateInfo> plates;
+    std::string error_code;
+    std::string error_message;
+    nlohmann::json error_details = nlohmann::json::object();
+};
+
 SliceRequest parse_slice_request_from_stdin();
 void write_slice_response_to_stdout(const SliceResponse& r);
+
+UseSetRequest parse_use_set_request_from_stdin();
+void write_use_set_response_to_stdout(const UseSetResponse& r);
 
 }  // namespace orca_headless

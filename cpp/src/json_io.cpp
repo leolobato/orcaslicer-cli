@@ -51,4 +51,33 @@ void write_slice_response_to_stdout(const SliceResponse& r) {
     std::cout << out.dump() << std::endl;
 }
 
+UseSetRequest parse_use_set_request_from_stdin() {
+    std::stringstream ss;
+    ss << std::cin.rdbuf();
+    json j = json::parse(ss.str());
+    UseSetRequest req;
+    req.input_3mf = j.at("input_3mf").get<std::string>();
+    return req;
+}
+
+void write_use_set_response_to_stdout(const UseSetResponse& r) {
+    json out;
+    out["status"] = r.status;
+    if (r.status == "ok") {
+        json plates = json::array();
+        for (const auto& p : r.plates) {
+            plates.push_back({
+                {"id", p.plate_id},
+                {"used_filament_indices", p.used_filament_indices},
+            });
+        }
+        out["plates"] = plates;
+    } else {
+        out["code"] = r.error_code;
+        out["message"] = r.error_message;
+        out["details"] = r.error_details;
+    }
+    std::cout << out.dump() << std::endl;
+}
+
 }  // namespace orca_headless

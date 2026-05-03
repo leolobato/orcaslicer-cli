@@ -13,6 +13,7 @@
 
 #include "json_io.h"
 #include "slice_mode.h"
+#include "use_set_mode.h"
 
 // libslic3r writes diagnostic messages through boost::log. The default
 // install scribbles to whichever sink boost picks (often stdout in this
@@ -51,6 +52,15 @@ int main(int argc, char** argv) {
         try {
             auto req = orca_headless::parse_slice_request_from_stdin();
             return orca_headless::run_slice_mode(req);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "fatal: %s\n", e.what());
+            return 1;
+        }
+    }
+    if (std::strcmp(argv[1], "use-set") == 0) {
+        try {
+            auto req = orca_headless::parse_use_set_request_from_stdin();
+            return orca_headless::run_use_set_mode(req);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "fatal: %s\n", e.what());
             return 1;
