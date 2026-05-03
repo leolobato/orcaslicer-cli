@@ -169,7 +169,7 @@ RUN cmake -S cpp -B build -G Ninja \
         -DCMAKE_PREFIX_PATH=/opt/orca-deps/usr/local \
         -DCMAKE_INSTALL_PREFIX=/opt/orca-headless && \
     cmake --build build --target orca-headless -j4 && \
-    cmake --install build
+    install -D build/orca-headless /opt/orca-headless/bin/orca-headless
 
 # =============================================================================
 # Stage 4: Runtime
