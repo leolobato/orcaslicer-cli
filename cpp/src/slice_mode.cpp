@@ -13,13 +13,68 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 
+#include <nlohmann/json.hpp>
+
 namespace orca_headless {
 
 namespace {
+
+bool starts_with(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    return s.size() >= n && std::memcmp(s.data(), prefix, n) == 0;
+}
+
+bool ends_with(const std::string& s, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return s.size() >= n && std::memcmp(s.data() + s.size() - n, suffix, n) == 0;
+}
+
+std::vector<std::string> split_semicolons(const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i == s.size() || s[i] == ';') {
+            if (i > start) out.emplace_back(s, start, i - start);
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+// Overlay the keys declared in `different_settings_to_system[slot]` from
+// the 3MF's project config onto the target config. Returns the list of
+// keys actually transferred.
+//
+// For the process slot (index 0), filament-like keys (`filament_*` /
+// `*_filament`) are filtered out — they belong to filament slots, even
+// when listed under the process fingerprint. Same rule the legacy Python
+// path enforced.
+std::vector<std::string> apply_overrides_for_slot(
+    Slic3r::DynamicPrintConfig& dst,
+    const Slic3r::DynamicPrintConfig& src,
+    const std::string& key_list,
+    bool exclude_filament_keys) {
+    std::vector<std::string> transferred;
+    for (const auto& key : split_semicolons(key_list)) {
+        if (key == "compatible_printers" || key == "compatible_prints") continue;
+        if (exclude_filament_keys &&
+            (starts_with(key, "filament_") || ends_with(key, "_filament"))) {
+            continue;
+        }
+        const Slic3r::ConfigOption* src_opt = src.option(key);
+        if (src_opt == nullptr) continue;
+        Slic3r::ConfigOption* dst_opt = dst.option(key, /*create=*/false);
+        if (dst_opt == nullptr) continue;  // unknown to libslic3r
+        dst_opt->set(src_opt);
+        transferred.push_back(key);
+    }
+    return transferred;
+}
 
 // Load a single preset JSON file (machine / process / filament) into a
 // DynamicPrintConfig. The OrcaSlicer profiles are flat JSON objects whose
@@ -163,10 +218,43 @@ int run_slice_mode(const SliceRequest& req) {
     // index 0 on options that the JSON didn't carry — null deref → SIGSEGV.
     Slic3r::Preset::normalize(final_cfg);
 
-    // TODO: apply_project_overrides — overlay keys declared in
-    // threemf_config["different_settings_to_system"] onto final_cfg
-    // following the per-slot semantics described in CLAUDE.md.
-    // For now we leave settings_transfer empty.
+    // Honor the 3MF's `different_settings_to_system` fingerprint:
+    //   [process, filament_0, …, filament_{N-1}, printer]
+    // (See PresetBundle::load_3mf_*; the printer slot lives at
+    // num_filaments+1.) This is how the GUI carries user customizations
+    // — e.g. layer_height, sparse_infill_density — that should override
+    // the resolved system process. Without this overlay we slice with
+    // bare system defaults and the output diverges meaningfully from the
+    // GUI even on simple projects.
+    //
+    // For Phase 1 we apply the process slot and the trailing printer
+    // slot. Per-filament slots are applied in the multi-filament work
+    // (which also needs the per-slot vector merge libslic3r expects).
+    nlohmann::json transfer_status = nlohmann::json::object();
+    transfer_status["status"] = "no_3mf_settings";
+    if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "different_settings_to_system", false);
+        fp != nullptr && !fp->values.empty()) {
+        // Process slot (index 0): filament-like keys excluded.
+        auto process_keys = apply_overrides_for_slot(
+            final_cfg, threemf_config, fp->values[0],
+            /*exclude_filament_keys=*/true);
+        // Printer slot (last): no name guard — machine is fixed by the
+        // request, any declared printer key overlays straight onto the
+        // resolved machine config.
+        std::vector<std::string> printer_keys;
+        if (fp->values.size() >= 2) {
+            printer_keys = apply_overrides_for_slot(
+                final_cfg, threemf_config, fp->values.back(),
+                /*exclude_filament_keys=*/false);
+        }
+        const bool any =
+            !process_keys.empty() || !printer_keys.empty();
+        transfer_status["status"] = any ? "applied" : "no_customizations";
+        transfer_status["process_keys"] = process_keys;
+        transfer_status["printer_keys"] = printer_keys;
+    }
+    response.settings_transfer = transfer_status;
 
     // 4. Wire AMS / filament selection metadata onto the final config so
     //    libslic3r threads it into slice_info.config + gcode metadata.
@@ -350,8 +438,8 @@ int run_slice_mode(const SliceRequest& req) {
     // per slot in a later task once we wire per-filament tracking.
     response.estimate.filament_used_m.push_back(stats.total_used_filament / 1000.0);
 
-    response.settings_transfer = nlohmann::json::object();
-    response.settings_transfer["status"] = "no_3mf_settings";
+    // settings_transfer was populated inline during config composition;
+    // leave it as-is here.
 
     write_slice_response_to_stdout(response);
     return 0;
