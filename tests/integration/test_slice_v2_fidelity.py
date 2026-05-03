@@ -219,11 +219,11 @@ def test_fixture_05_matches_gui_within_tolerance() -> None:
 
 
 @pytest.mark.xfail(
-    reason="Multi-filament slicing crashes Print::process after a color-painted "
-    "XY-compensation warning. The headless binary's per-key vector merge "
-    "(slice_mode.cpp:227-262) now survives nullptr options, but the resulting "
-    "config still trips libslic3r's color-painting check during Slicing mesh. "
-    "Pending fix in the multi-filament composition path."
+    reason="Multi-filament composition now uses PresetBundle::construct_full_config "
+    "(GUI-authoritative path) but Print::process still rejects the resulting config "
+    "with `Flow::spacing produced negative spacing` during Slicing mesh — some "
+    "extrusion width is computing to <= 0. Likely an extruder-variant reshaping "
+    "mismatch we still need to chase in `cpp/src/slice_mode.cpp` setup."
 )
 def test_fixture_04_matches_gui_within_tolerance() -> None:
     """5 filament slots spanning 3 vendors (Bambu, SUNLU, Overture). Geometry

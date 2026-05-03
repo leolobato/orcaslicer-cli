@@ -3,12 +3,15 @@
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Utils.hpp"
+
+#include <optional>
 
 #include <algorithm>
 #include <atomic>
@@ -198,73 +201,91 @@ int run_slice_mode(const SliceRequest& req) {
 
     emit_progress("composing_config", 20);
 
-    // 3. Compose the final DynamicPrintConfig in the same order the GUI's
-    //    `PresetBundle::construct_full_config` uses (PresetBundle.cpp:71-79):
-    //    full defaults → machine → process → filament. The defaults pass is
-    //    critical: it pre-populates every per-filament/per-extruder vector
-    //    key with its default value, so that `Preset::normalize` below can
-    //    `resize(n, default)` without the vector being absent.
+    // 3. Compose the final DynamicPrintConfig via the GUI's authoritative
+    //    `PresetBundle::construct_full_config` (PresetBundle.cpp:61). It
+    //    handles defaults → printer → process → filament merge, the
+    //    extruder-variant reshaping (`update_values_to_printer_extruders`)
+    //    and the per-key vector composition for multi-filament setups —
+    //    all logic that lives in the GUI and that we MUST NOT reimplement
+    //    in our wrapper, because any drift surfaces as multi-filament
+    //    crashes the GUI doesn't have (e.g. SIGSEGV in
+    //    `Print::process` because filament_options_with_variant keys end
+    //    up the wrong length).
     //
-    //    For Phase 1 single-filament use the first filament cfg is applied
-    //    flat; multi-filament needs the per-key vector merge from
-    //    `construct_full_config` and is a follow-up task.
+    //    `construct_full_config` takes `Preset` references; we wrap each
+    //    loaded JSON config in a Preset of the appropriate type. Project
+    //    config is empty here — the 3MF's `different_settings_to_system`
+    //    overrides are applied to `final_cfg` afterwards.
+    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
+    // dereferences `filament_temp_configs[i].option(key)` without a
+    // nullptr check, so each filament Preset's config must have every
+    // key that filament[0]'s config has. The GUI gets this for free —
+    // its filament Presets inherit from `filaments.default_preset()`,
+    // which populates every filament option with a default. Our
+    // `load_preset_json` only loads what's literally in the JSON, so
+    // we pre-overlay each filament_cfg onto a fresh full-defaults copy
+    // before wrapping in a Preset. Same defensive backstop the GUI's
+    // inheritance chain provides.
+    // Pre-populate each filament config with libslic3r's default values
+    // for the *filament-only* options (Preset::filament_options()) before
+    // wrapping in a Preset. The GUI's filament Presets get this for free
+    // via the inheritance chain ending at `filaments.default_preset()`,
+    // which has every filament option populated. Our `load_preset_json`
+    // only loads what's literally in the JSON. Without these defaults,
+    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
+    // will hit nullptr when filament[0] declares a key that another
+    // slot's sparser JSON omits.
+    //
+    // Filter to filament keys only: applying *all* FullPrintConfig
+    // defaults would inject printer/process keys into the filament
+    // Preset, and `out.apply(filament[0].config)` inside
+    // construct_full_config would then overlay those defaults onto the
+    // already-applied printer and process settings, corrupting them.
+    const auto& full_defaults = Slic3r::FullPrintConfig::defaults();
+    Slic3r::DynamicPrintConfig filament_defaults;
+    for (const std::string& key : Slic3r::Preset::filament_options()) {
+        const Slic3r::ConfigOption* opt = full_defaults.option(key);
+        if (opt != nullptr) filament_defaults.set_key_value(key, opt->clone());
+    }
+    auto fill_filament_defaults =
+        [&filament_defaults](Slic3r::DynamicPrintConfig& cfg) {
+            Slic3r::DynamicPrintConfig out;
+            out.apply(filament_defaults);
+            out.apply(cfg);
+            cfg = std::move(out);
+        };
+    for (auto& fc : filament_cfgs) fill_filament_defaults(fc);
+
+    Slic3r::Preset printer_preset(Slic3r::Preset::TYPE_PRINTER, "wrapper-printer");
+    printer_preset.config = std::move(machine_cfg);
+    Slic3r::Preset print_preset(Slic3r::Preset::TYPE_PRINT, "wrapper-process");
+    print_preset.config = std::move(process_cfg);
+    std::vector<Slic3r::Preset> filament_presets;
+    filament_presets.reserve(filament_cfgs.size());
+    for (size_t i = 0; i < filament_cfgs.size(); ++i) {
+        Slic3r::Preset fp(Slic3r::Preset::TYPE_FILAMENT,
+                          "wrapper-filament-" + std::to_string(i));
+        fp.config = std::move(filament_cfgs[i]);
+        filament_presets.push_back(std::move(fp));
+    }
+    const Slic3r::DynamicPrintConfig empty_project_cfg;
     Slic3r::DynamicPrintConfig final_cfg;
-    final_cfg.apply(Slic3r::FullPrintConfig::defaults());
-    final_cfg.apply(machine_cfg);
-    final_cfg.apply(process_cfg);
-    // Replicate PresetBundle::construct_full_config (PresetBundle.cpp:115-180)
-    // for num_filaments > 1: scalar keys come from filament[0]; vector keys
-    // are assembled across all N filaments by taking each one's value at
-    // index 0 (each leaf preset is authored as a 1-element vector) and
-    // composing into a length-N vector that Print::apply expects. Without
-    // this, the second-and-later filament slots inherit filament[0]'s
-    // values silently and the gcode prints all extruders with slot 0's
-    // settings.
-    if (filament_cfgs.size() == 1) {
-        final_cfg.apply(filament_cfgs[0]);
-    } else if (filament_cfgs.size() > 1) {
-        final_cfg.apply(filament_cfgs[0]);
-        for (const std::string& key : filament_cfgs[0].keys()) {
-            if (key == "compatible_prints" || key == "compatible_printers") continue;
-            Slic3r::ConfigOption* dst = final_cfg.option(key, /*create=*/false);
-            if (dst == nullptr || dst->is_scalar()) continue;
-            auto* dst_vec = static_cast<Slic3r::ConfigOptionVectorBase*>(dst);
-            // Some filament JSONs are missing keys that filament[0] declares
-            // (especially user-imported profiles that omit defaults). The
-            // GUI doesn't hit this because its filament_temp_configs are
-            // copies of fully-populated Preset configs; ours come straight
-            // from the resolved JSON which can be sparser. Fall back to
-            // filament[0]'s value for missing slots — semantically the
-            // closest match and what the GUI's default-preset chain would
-            // have provided. ConfigOptionVector::set() dereferences each
-            // entry without a nullptr check (Config.hpp:409), so passing a
-            // null for any slot SIGSEGVs.
-            std::vector<const Slic3r::ConfigOption*> per_slot(
-                filament_cfgs.size(), nullptr);
-            const Slic3r::ConfigOption* slot0_opt =
-                filament_cfgs[0].option(key);
-            for (size_t i = 0; i < filament_cfgs.size(); ++i) {
-                const Slic3r::ConfigOption* opt = filament_cfgs[i].option(key);
-                if (opt == nullptr) opt = slot0_opt;
-                per_slot[i] = opt;
-            }
-            // set() throws on type mismatch / empty source vectors; we'd
-            // rather skip the key and keep slicing than abort the whole
-            // request, so swallow and log to stderr.
-            try {
-                dst_vec->set(per_slot);
-            } catch (const std::exception& e) {
-                std::fprintf(stderr,
-                    "[multi-filament] skip key %s: %s\n",
-                    key.c_str(), e.what());
-            }
-        }
+    try {
+        final_cfg = Slic3r::PresetBundle::construct_full_config(
+            printer_preset, print_preset, empty_project_cfg,
+            filament_presets,
+            /*apply_extruder=*/true,
+            /*filament_maps_new=*/std::nullopt);
+    } catch (const std::exception& e) {
+        return fail("compose_failed",
+                    std::string("construct_full_config: ") + e.what(),
+                    response);
     }
 
-    // Pad per-filament vector keys to `num_filaments` (taken from
-    // `filament_diameter` length when single_extruder_multi_material=1, else
-    // from `nozzle_diameter`). Without this, `Print::apply` derefs vector
-    // index 0 on options that the JSON didn't carry — null deref → SIGSEGV.
+    // construct_full_config doesn't call Preset::normalize itself, so still
+    // run it to pad any missing per-filament vectors (covers user-imported
+    // filament JSONs that omit keys the leaf system filament would have
+    // had via inheritance).
     Slic3r::Preset::normalize(final_cfg);
 
     // Honor the 3MF's `different_settings_to_system` fingerprint:
