@@ -419,7 +419,20 @@ int run_slice_mode(const SliceRequest& req) {
             out.apply(cfg);
             cfg = std::move(out);
         };
-    for (auto& fc : filament_cfgs) fill_filament_defaults(fc);
+    for (auto& fc : filament_cfgs) {
+        fill_filament_defaults(fc);
+        // Mirror what `PresetBundle::load_*` runs on every filament Preset
+        // it materialises (vendor/OrcaSlicer/src/libslic3r/Preset.cpp:370):
+        // walk filament_diameter's length and resize every per-filament
+        // vector key to match, padding from FullPrintConfig defaults. The
+        // explicit fill_filament_defaults above already covers the
+        // canonical key set, but `Preset::normalize` also picks up any
+        // upstream-Orca additions to `Preset::filament_options()` that
+        // a user-imported filament JSON happens to carry — without this
+        // call, a sparser slot's missing key in `construct_full_config`'s
+        // per-key merge nullptr-derefs.
+        Slic3r::Preset::normalize(fc);
+    }
 
     Slic3r::Preset printer_preset(Slic3r::Preset::TYPE_PRINTER, "wrapper-printer");
     printer_preset.config = std::move(machine_cfg);
