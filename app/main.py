@@ -64,6 +64,11 @@ from .models import (
     ProcessProfileImportPreview,
     ProcessProfileImportResponse,
     ReloadResponse,
+    ResolveForMachineRequest,
+    ResolveForMachineResponse,
+    ResolvedFilament,
+    ResolvedPlateType,
+    ResolvedProcess,
     SliceError,
 )
 from .profiles import (
@@ -74,6 +79,7 @@ from .profiles import (
     _safe_filename,
     export_user_filament,
     get_filament_profiles,
+    get_machine_model_metadata,
     get_machine_profiles,
     get_process_profiles,
     get_profile,
@@ -81,6 +87,9 @@ from .profiles import (
     load_all_profiles,
     materialize_filament_import,
     materialize_process_import,
+    resolve_filament_for_machine,
+    resolve_plate_type_for_machine,
+    resolve_process_for_machine,
 )
 from .inspect import (
     INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
@@ -293,6 +302,72 @@ async def list_plate_types():
         {"value": value, "label": label}
         for value, label in PLATE_TYPE_API_TO_ORCA.items()
     ]
+
+
+@app.post(
+    "/profiles/resolve-for-machine",
+    response_model=ResolveForMachineResponse,
+    tags=["Profiles"],
+)
+async def resolve_for_machine(req: ResolveForMachineRequest) -> ResolveForMachineResponse:
+    """Return GUI-equivalent profile fallbacks for the given machine.
+
+    Mirrors `PresetBundle::update_compatible` so callers can rotate a 3MF's
+    authored process / filaments / plate type to the target printer's
+    same-alias variants in one round-trip — instead of waiting for a
+    `filament_machine_mismatch` 400 at slice time. The handler is read-only
+    against the in-memory profile catalog, so latency is sub-millisecond.
+
+    Raises `ProfileNotFoundError` (handled globally as 400) when
+    `machine_id` doesn't resolve to a known machine.
+    """
+    metadata = get_machine_model_metadata(req.machine_id)
+
+    process_resolved: ResolvedProcess | None = None
+    if req.process_name:
+        r = resolve_process_for_machine(req.machine_id, req.process_name)
+        process_resolved = ResolvedProcess(
+            requested=req.process_name,
+            setting_id=r["setting_id"],
+            name=r["name"],
+            alias=r["alias"],
+            match=r["match"],
+        )
+
+    filaments_resolved: list[ResolvedFilament] = []
+    for slot, requested_name in enumerate(req.filament_names):
+        r = resolve_filament_for_machine(req.machine_id, requested_name)
+        filaments_resolved.append(
+            ResolvedFilament(
+                slot=slot,
+                requested=requested_name,
+                setting_id=r["setting_id"],
+                name=r["name"],
+                alias=r["alias"],
+                match=r["match"],
+            )
+        )
+
+    plate_resolved: ResolvedPlateType | None = None
+    if req.plate_type:
+        r = resolve_plate_type_for_machine(
+            req.machine_id,
+            req.plate_type,
+            plate_type_api_to_orca=PLATE_TYPE_API_TO_ORCA,
+        )
+        plate_resolved = ResolvedPlateType(
+            requested=req.plate_type,
+            resolved=r["resolved"],
+            match=r["match"],
+        )
+
+    return ResolveForMachineResponse(
+        machine_id=req.machine_id,
+        machine_name=str(metadata.get("name", "") or ""),
+        process=process_resolved,
+        filaments=filaments_resolved,
+        plate_type=plate_resolved,
+    )
 
 
 @app.post(
