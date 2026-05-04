@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -126,6 +127,111 @@ Slic3r::DynamicPrintConfig load_preset_json(const std::string& path) {
     cfg.load_from_json(path, ctx, /*load_inherits_in_config=*/false,
                        key_values, reason);
     return cfg;
+}
+
+// Resize the project's flush-volume vectors to match the target machine's
+// extruder count and the active filament count. Mirrors the GUI's
+// `PresetBundle::update_multi_material_preferences`
+// (vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:4316-4355) — the GUI
+// runs this whenever the active printer or filament list changes, so by
+// the time the slicer runs the matrix dimensions match. We have no
+// PresetBundle, so we run it explicitly here on the filtered
+// `project_config` before it's handed to `construct_full_config`.
+//
+// Without this, a 3MF authored on a 4-filament project sliced with 2
+// filaments (or any cross-printer flow that changes nozzle count) keeps
+// the 4×4 matrix and trips
+// `vendor/OrcaSlicer/src/libslic3r/GCode.cpp:5394-5411`'s
+// "Flush volumes matrix do not match to the correct size!" abort
+// mid-export.
+//
+// Layout (per OrcaSlicer): `flush_volumes_matrix` is `num_filaments² ·
+// nozzle_count` doubles laid out per-nozzle slab; `flush_volumes_vector`
+// is `2 · num_filaments` doubles (purge volume in/out per filament);
+// `flush_multiplier` is `nozzle_count` doubles. New cells default to
+// `i == j ? 0 : flush_vec[2i] + flush_vec[2j+1]` for the per-pair
+// purge, matching the GUI's preserve-and-fill at line 4350.
+void resize_flush_volumes_for_topology(
+    Slic3r::DynamicPrintConfig& project_config,
+    size_t num_filaments, size_t nozzle_count) {
+    if (num_filaments == 0 || nozzle_count == 0) return;
+
+    auto* matrix_opt = project_config.option<Slic3r::ConfigOptionFloats>(
+        "flush_volumes_matrix");
+    auto* mult_opt = project_config.option<Slic3r::ConfigOptionFloats>(
+        "flush_multiplier");
+    auto* vec_opt = project_config.option<Slic3r::ConfigOptionFloats>(
+        "flush_volumes_vector");
+
+    size_t old_nozzle_count = (mult_opt != nullptr) ? mult_opt->values.size() : 0;
+    size_t old_matrix_total = (matrix_opt != nullptr) ? matrix_opt->values.size() : 0;
+    size_t old_num_filaments = 0;
+    if (old_nozzle_count > 0 && old_matrix_total > 0) {
+        old_num_filaments = static_cast<size_t>(
+            std::sqrt(static_cast<double>(old_matrix_total) /
+                      static_cast<double>(old_nozzle_count)) + 1e-6);
+    }
+
+    if (mult_opt != nullptr && old_nozzle_count != nozzle_count) {
+        mult_opt->values.resize(nozzle_count, 1.0);
+    }
+
+    const size_t target_matrix_per_slab = num_filaments * num_filaments;
+    if (matrix_opt == nullptr ||
+        old_matrix_total == target_matrix_per_slab * nozzle_count) {
+        return;
+    }
+
+    // Pad/truncate flush_volumes_vector to 2 entries per filament before
+    // synthesising new matrix cells from it (matches GUI lines 4327-4335).
+    if (vec_opt != nullptr) {
+        auto& vec = vec_opt->values;
+        while (vec.size() < 2 * num_filaments) {
+            vec.push_back(vec.size() > 1 ? vec[0] : 140.0);
+            vec.push_back(vec.size() > 1 ? vec[1] : 140.0);
+        }
+        while (vec.size() > 2 * num_filaments) {
+            vec.pop_back();
+            vec.pop_back();
+        }
+    }
+
+    const std::vector<double>& old_matrix = matrix_opt->values;
+    const std::vector<double>* fill_vec =
+        (vec_opt != nullptr) ? &vec_opt->values : nullptr;
+
+    std::vector<double> new_matrix(target_matrix_per_slab * nozzle_count, 0.0);
+    for (size_t i = 0; i < num_filaments; ++i) {
+        for (size_t j = 0; j < num_filaments; ++j) {
+            for (size_t nozzle_id = 0; nozzle_id < nozzle_count; ++nozzle_id) {
+                const size_t dst_idx =
+                    i * num_filaments + j + target_matrix_per_slab * nozzle_id;
+                if (i < old_num_filaments && j < old_num_filaments &&
+                    nozzle_id < old_nozzle_count) {
+                    const size_t old_per_slab =
+                        old_num_filaments * old_num_filaments;
+                    const size_t src_idx =
+                        i * old_num_filaments + j + old_per_slab * nozzle_id;
+                    if (src_idx < old_matrix.size()) {
+                        new_matrix[dst_idx] = old_matrix[src_idx];
+                        continue;
+                    }
+                }
+                if (i == j) {
+                    new_matrix[dst_idx] = 0.0;
+                } else if (fill_vec != nullptr &&
+                           2 * i < fill_vec->size() &&
+                           2 * j + 1 < fill_vec->size()) {
+                    new_matrix[dst_idx] =
+                        (*fill_vec)[2 * i] + (*fill_vec)[2 * j + 1];
+                } else {
+                    // Fallback if vec_opt was missing entirely.
+                    new_matrix[dst_idx] = 280.0;
+                }
+            }
+        }
+    }
+    matrix_opt->values = std::move(new_matrix);
 }
 
 // Center the combined instance bounding box on the build plate. Mirrors
@@ -270,6 +376,24 @@ int run_slice_mode(const SliceRequest& req) {
     };
     Slic3r::DynamicPrintConfig project_config;
     project_config.apply_only(threemf_config, s_project_options);
+
+    // 3a.1. Resize flush-volumes vectors so they match the active filament
+    //       count and the target machine's nozzle count. The 3MF's matrix
+    //       was sized for whatever the file was authored with; if we slice
+    //       it on a printer with a different nozzle count or a request
+    //       with a different filament count, GCode export aborts with
+    //       "Flush volumes matrix do not match to the correct size!".
+    //       The GUI runs this on every printer/filament-list change via
+    //       `update_multi_material_preferences`; we run it once here.
+    {
+        size_t nozzle_count = 1;
+        if (const auto* nd = machine_cfg.option<Slic3r::ConfigOptionFloats>(
+                "nozzle_diameter"); nd != nullptr && !nd->values.empty()) {
+            nozzle_count = nd->values.size();
+        }
+        resize_flush_volumes_for_topology(
+            project_config, filament_cfgs.size(), nozzle_count);
+    }
 
     // 3b. Pre-populate each filament config with libslic3r's filament-key
     //     defaults before wrapping it in a Preset. The GUI's filament
