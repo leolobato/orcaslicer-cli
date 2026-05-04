@@ -114,19 +114,26 @@ std::vector<std::string> apply_overrides_for_slot(
 // keys map 1:1 to libslic3r config option names. We use load_from_json
 // with `load_inherits=false` because callers (the Python service)
 // pre-resolve the inheritance chain before passing files in.
-Slic3r::DynamicPrintConfig load_preset_json(const std::string& path) {
+//
+// The optional `out_key_values` captures top-level JSON metadata that
+// libslic3r returns separately from the config (e.g. "name", "from",
+// "type", "filament_id", "setting_id"). Filament loading needs
+// `filament_id` to stamp on the Preset so `construct_full_config`
+// emits a populated `filament_ids` vector matching GUI behaviour —
+// without it the gcode CONFIG_BLOCK has `filament_ids = ` empty,
+// which Bambu printers and downstream tools (Cloud, Handy) read to
+// confirm AMS tray contents at print start.
+Slic3r::DynamicPrintConfig load_preset_json(
+    const std::string& path,
+    std::map<std::string, std::string>* out_key_values = nullptr) {
     Slic3r::DynamicPrintConfig cfg;
     Slic3r::ConfigSubstitutionContext ctx(
         Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
-    // libslic3r returns extra key/value pairs (e.g. "name", "from", "type"
-    // metadata that aren't config options) via key_values, plus any error
-    // text via reason. We don't propagate either for Phase 1; failures
-    // surface as exit-non-zero from the int return and are caught by the
-    // caller's try/catch.
     std::map<std::string, std::string> key_values;
     std::string reason;
     cfg.load_from_json(path, ctx, /*load_inherits_in_config=*/false,
                        key_values, reason);
+    if (out_key_values != nullptr) *out_key_values = std::move(key_values);
     return cfg;
 }
 
@@ -374,12 +381,20 @@ int run_slice_mode(const SliceRequest& req) {
     // 2. Load the three profile JSONs (resolved upstream by Python).
     Slic3r::DynamicPrintConfig machine_cfg, process_cfg;
     std::vector<Slic3r::DynamicPrintConfig> filament_cfgs;
+    // Capture the per-filament JSON metadata (name, filament_id, setting_id…)
+    // so we can stamp `filament_id` on each Preset below — the GUI does the
+    // same at PresetBundle.cpp:1112-1114, lifting the value from
+    // `key_values[BBL_JSON_KEY_FILAMENT_ID]` onto `preset.filament_id`.
+    std::vector<std::map<std::string, std::string>> filament_key_values;
+    filament_key_values.reserve(req.filament_profiles.size());
 
     try {
         machine_cfg = load_preset_json(req.machine_profile);
         process_cfg = load_preset_json(req.process_profile);
         for (const auto& fp : req.filament_profiles) {
-            filament_cfgs.push_back(load_preset_json(fp));
+            std::map<std::string, std::string> kv;
+            filament_cfgs.push_back(load_preset_json(fp, &kv));
+            filament_key_values.push_back(std::move(kv));
         }
     } catch (const std::exception& e) {
         return fail("invalid_profile",
@@ -488,6 +503,19 @@ int run_slice_mode(const SliceRequest& req) {
         Slic3r::Preset fp(Slic3r::Preset::TYPE_FILAMENT,
                           "wrapper-filament-" + std::to_string(i));
         fp.config = std::move(filament_cfgs[i]);
+        // Stamp filament_id from the JSON's top-level metadata, mirroring
+        // PresetBundle.cpp:1113-1114. construct_full_config writes this
+        // into the merged config's `filament_ids` vector (PresetBundle.cpp:215),
+        // which the gcode CONFIG_BLOCK emits as `filament_ids = GFA00;...`
+        // and Bambu printers / Cloud / Handy read at print start to confirm
+        // AMS tray contents match the gcode's expectation. Without it our
+        // gcode emits `filament_ids = ` empty.
+        if (i < filament_key_values.size()) {
+            const auto& kv = filament_key_values[i];
+            if (auto it = kv.find("filament_id"); it != kv.end()) {
+                fp.filament_id = it->second;
+            }
+        }
         filament_presets.push_back(std::move(fp));
     }
 
