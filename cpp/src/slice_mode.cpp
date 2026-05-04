@@ -209,6 +209,16 @@ int run_slice_mode(const SliceRequest& req) {
         return fail("empty_model", "loaded 3MF has no objects", response);
     }
 
+    // Match the GUI's cleanup at PresetBundle.cpp:3528-3529: drop
+    // `extruder_ams_count` from the parsed 3MF config so no later code
+    // path can read stale data. The `s_project_options` whitelist already
+    // keeps it out of `project_config`, but `threemf_config` is still
+    // passed to `apply_overrides_for_slot` for the per-slot fingerprints,
+    // and the `s_printer_slot_blocklist` only blocks declared keys —
+    // erasing here keeps the data structure honest if the fingerprint
+    // ever expands.
+    threemf_config.erase("extruder_ams_count");
+
     emit_progress("loading_profiles", 10);
 
     // 2. Load the three profile JSONs (resolved upstream by Python).
