@@ -542,6 +542,25 @@ int run_slice_mode(const SliceRequest& req) {
     // had via inheritance).
     Slic3r::Preset::normalize(final_cfg);
 
+    // construct_full_config only `emplace_back`s `filament_ids` in its
+    // single-filament branch (PresetBundle.cpp:124); the multi-filament
+    // else branch leaves the vector empty. The GUI's `full_fff_config`
+    // wraps construct_full_config and re-populates filament_ids from
+    // each filament Preset (PresetBundle.cpp:3155). We don't use
+    // full_fff_config (no PresetBundle), so do the same fixup here —
+    // otherwise the gcode CONFIG_BLOCK emits `filament_ids = ` empty
+    // for any multi-filament slice.
+    {
+        std::vector<std::string> filament_ids_vec;
+        filament_ids_vec.reserve(filament_presets.size());
+        for (const auto& fp : filament_presets) {
+            filament_ids_vec.push_back(fp.filament_id);
+        }
+        auto* opt = final_cfg.opt<Slic3r::ConfigOptionStrings>(
+            "filament_ids", true);
+        opt->values = std::move(filament_ids_vec);
+    }
+
     // Honor the 3MF's `different_settings_to_system` fingerprint:
     //   [process, filament_0, …, filament_{N-1}, printer]
     // (See PresetBundle::load_3mf_*; the printer slot lives at
