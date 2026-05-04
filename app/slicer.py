@@ -78,6 +78,58 @@ class SlicingError(Exception):
         self.critical_warnings = critical_warnings or []
 
 
+class IncompatibleFilamentError(Exception):
+    """Raised when a filament profile isn't compatible with the target machine.
+
+    The headless binary's ``construct_full_config`` SIGSEGVs when a filament
+    profile is incompatible with the resolved machine (e.g. an A1 mini machine
+    paired with a P2S filament): the per-key vector merge dereferences keys
+    that don't exist in the foreign filament's config. Surfacing this as a
+    400 *before* invoking the binary keeps the failure actionable instead of
+    landing as ``exit -11`` with no context.
+    """
+
+    def __init__(self, mismatches: list[dict[str, Any]]):
+        self.mismatches = mismatches
+        msg = "; ".join(
+            f"slot {m['slot']} filament {m['filament']!r} is only compatible with "
+            f"{m['compatible_printers']!r} (machine {m['machine']!r})"
+            for m in mismatches
+        )
+        super().__init__(msg)
+
+
+def _filament_compat_mismatches(
+    machine_name: str,
+    filament_paths: list[str],
+    filament_names: list[str],
+) -> list[dict[str, Any]]:
+    """Return per-slot compatibility mismatches against ``machine_name``.
+
+    A filament is treated as compatible when its ``compatible_printers`` list
+    is missing/empty (meaning "applies anywhere") or contains the resolved
+    machine's display name. Anything else is a mismatch.
+    """
+    mismatches: list[dict[str, Any]] = []
+    for slot, (path, name) in enumerate(zip(filament_paths, filament_names)):
+        try:
+            cfg = json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        compat = cfg.get("compatible_printers") or []
+        if not compat:
+            continue
+        if machine_name in compat:
+            continue
+        mismatches.append({
+            "slot": slot,
+            "filament": name,
+            "compatible_printers": compat,
+            "machine": machine_name,
+        })
+    return mismatches
+
+
 async def materialize_profiles_for_binary(
     machine_id: str,
     process_id: str,
@@ -114,6 +166,14 @@ async def materialize_profiles_for_binary(
         # per-filament-slot name guard for project overrides compares
         # against those, so forward the display name rather than the slug.
         filament_names.append(fcfg.get("name", fid))
+
+    mismatches = _filament_compat_mismatches(
+        machine.get("name", machine_id),
+        filament_paths,
+        filament_names,
+    )
+    if mismatches:
+        raise IncompatibleFilamentError(mismatches)
 
     return {
         "machine": str(machine_path),

@@ -93,6 +93,7 @@ from .slicer import (
     VALID_BRIM_TYPES,
     VALID_INFILL_PATTERNS,
     VALID_SUPPORT_TYPES,
+    IncompatibleFilamentError,
     ModelTooBigError,
     SlicingError,
     materialize_profiles_for_binary,
@@ -979,11 +980,21 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             content={"code": "token_unknown", "token": body.input_token},
         )
 
-    paths = await materialize_profiles_for_binary(
-        machine_id=body.machine_id,
-        process_id=body.process_id,
-        filament_setting_ids=body.filament_settings_ids,
-    )
+    try:
+        paths = await materialize_profiles_for_binary(
+            machine_id=body.machine_id,
+            process_id=body.process_id,
+            filament_setting_ids=body.filament_settings_ids,
+        )
+    except IncompatibleFilamentError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "filament_machine_mismatch",
+                "message": str(e),
+                "mismatches": e.mismatches,
+            },
+        )
 
     output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
     binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
@@ -1036,11 +1047,21 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
     except KeyError:
         return JSONResponse(404, content={"code": "token_unknown", "token": body.input_token})
 
-    paths = await materialize_profiles_for_binary(
-        machine_id=body.machine_id,
-        process_id=body.process_id,
-        filament_setting_ids=body.filament_settings_ids,
-    )
+    try:
+        paths = await materialize_profiles_for_binary(
+            machine_id=body.machine_id,
+            process_id=body.process_id,
+            filament_setting_ids=body.filament_settings_ids,
+        )
+    except IncompatibleFilamentError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "filament_machine_mismatch",
+                "message": str(e),
+                "mismatches": e.mismatches,
+            },
+        )
     output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
     binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
 
