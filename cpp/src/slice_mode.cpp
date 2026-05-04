@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -58,11 +59,36 @@ std::vector<std::string> split_semicolons(const std::string& s) {
 // `*_filament`) are filtered out — they belong to filament slots, even
 // when listed under the process fingerprint. Same rule the legacy Python
 // path enforced.
+// Printer-slot blocklist: keys whose values describe the printer's
+// per-extruder topology (vector layouts indexed by extruder count) and must
+// only ever come from the printer preset itself. The 3MF's
+// `different_settings_to_system[printer_slot]` may declare them when the
+// authoring printer had a different topology (e.g. P-series multi-extruder
+// values exported into a project later sliced for an A1 mini), and overlaying
+// them onto our resolved machine config recreates the SIGSEGV class the
+// `s_project_options` whitelist closed for the project-config path —
+// `update_values_to_printer_extruders` dereferences these vectors out of
+// bounds when the size doesn't match the active machine's extruder count.
+//
+// Mirrors the reasoning behind `s_project_options` above; keep both lists
+// read together at the top of the file so future audits see the pair.
+static const std::unordered_set<std::string> s_printer_slot_blocklist{
+    "extruder_variant_list",
+    "printer_extruder_variant",
+    "printer_extruder_id",
+    "extruder_type",
+    "nozzle_volume_type",
+    "filament_extruder_variant",
+    "filament_self_index",
+    "extruder_ams_count",
+};
+
 std::vector<std::string> apply_overrides_for_slot(
     Slic3r::DynamicPrintConfig& dst,
     const Slic3r::DynamicPrintConfig& src,
     const std::string& key_list,
-    bool exclude_filament_keys) {
+    bool exclude_filament_keys,
+    const std::unordered_set<std::string>& excluded_keys) {
     std::vector<std::string> transferred;
     for (const auto& key : split_semicolons(key_list)) {
         if (key == "compatible_printers" || key == "compatible_prints") continue;
@@ -70,6 +96,7 @@ std::vector<std::string> apply_overrides_for_slot(
             (starts_with(key, "filament_") || ends_with(key, "_filament"))) {
             continue;
         }
+        if (excluded_keys.count(key) != 0) continue;
         const Slic3r::ConfigOption* src_opt = src.option(key);
         if (src_opt == nullptr) continue;
         Slic3r::ConfigOption* dst_opt = dst.option(key, /*create=*/false);
@@ -326,7 +353,8 @@ int run_slice_mode(const SliceRequest& req) {
         // Process slot (index 0): filament-like keys excluded.
         auto process_keys = apply_overrides_for_slot(
             final_cfg, threemf_config, fp->values[0],
-            /*exclude_filament_keys=*/true);
+            /*exclude_filament_keys=*/true,
+            /*excluded_keys=*/{});
 
         // Per-filament slots: indexes 1..N. Layout is
         // [process, filament_0, …, filament_{N-1}, printer].
@@ -357,7 +385,8 @@ int run_slice_mode(const SliceRequest& req) {
                 // per-key overlay is a Phase 4 follow-up.
                 const auto transferred = apply_overrides_for_slot(
                     final_cfg, threemf_config, key_list,
-                    /*exclude_filament_keys=*/false);
+                    /*exclude_filament_keys=*/false,
+                    /*excluded_keys=*/{});
                 entry["status"] = "applied";
                 entry["transferred"] = transferred;
                 entry["discarded"] = nlohmann::json::array();
@@ -371,12 +400,15 @@ int run_slice_mode(const SliceRequest& req) {
 
         // Printer slot (last): no name guard — machine is fixed by the
         // request, any declared printer key overlays straight onto the
-        // resolved machine config.
+        // resolved machine config. Per-extruder topology keys are blocked
+        // (see s_printer_slot_blocklist) because their vector layouts
+        // belong to the authoring printer's nozzle count, not ours.
         std::vector<std::string> printer_keys;
         if (fp->values.size() >= 2) {
             printer_keys = apply_overrides_for_slot(
                 final_cfg, threemf_config, fp->values.back(),
-                /*exclude_filament_keys=*/false);
+                /*exclude_filament_keys=*/false,
+                /*excluded_keys=*/s_printer_slot_blocklist);
         }
         const bool any_filament_applied = std::any_of(
             filament_slot_status.begin(), filament_slot_status.end(),
