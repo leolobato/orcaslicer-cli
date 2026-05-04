@@ -1057,6 +1057,44 @@ def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
     return PLATE_TYPE_API_TO_ORCA.get(r["resolved"], "")
 
 
+def _validate_filament_map(
+    machine_id: str, filament_map: list[int] | None,
+) -> tuple[bool, str | None]:
+    """Reject ``filament_map`` values that don't match the machine's topology.
+
+    libslic3r's ``filament_map`` is a 1-based per-filament-extruder index:
+    each entry must be in ``1..nozzle_count``. Historically the gateway
+    overloaded this field with AMS-tray-slot semantics, sending values
+    like ``[0, 2]`` for an A1 mini (single extruder), which corrupted
+    ``Print::extruders()`` and silenced the prime-tower auto-disable in
+    ``DynamicPrintConfig::normalize_fdm_2``. AMS routing now flows
+    through MQTT ``ams_mapping`` at print time, so any ``filament_map``
+    we receive here must be a valid extruder mapping.
+
+    Returns ``(ok, error_message)``. ``ok=True`` when the value is empty,
+    None, or every entry is in range.
+    """
+    if not filament_map:
+        return True, None
+    machine = get_profile("machine", machine_id)
+    nozzle_diameter = machine.get("nozzle_diameter") or []
+    nozzle_count = len(nozzle_diameter) if isinstance(nozzle_diameter, list) else 0
+    if nozzle_count <= 0:
+        # Machine profile didn't declare nozzles; skip rather than
+        # invent a constraint.
+        return True, None
+    for i, v in enumerate(filament_map):
+        if not isinstance(v, int) or v < 1 or v > nozzle_count:
+            return (
+                False,
+                f"filament_map[{i}]={v!r} is out of range for machine "
+                f"{machine_id!r} (nozzle_count={nozzle_count}). "
+                f"Valid values are 1..{nozzle_count}. "
+                "AMS tray slots belong on the print/start command, not the slice request.",
+            )
+    return True, None
+
+
 @app.post("/slice/v2", tags=["Slice"])
 async def slice_v2(request: Request, body: SliceTokenRequest):
     """Slice a previously-uploaded 3MF file using the headless binary.
@@ -1070,6 +1108,13 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
         return JSONResponse(
             status_code=404,
             content={"code": "token_unknown", "token": body.input_token},
+        )
+
+    fm_ok, fm_err = _validate_filament_map(body.machine_id, body.filament_map)
+    if not fm_ok:
+        return JSONResponse(
+            status_code=400,
+            content={"code": "invalid_filament_map", "message": fm_err},
         )
 
     try:
@@ -1139,6 +1184,13 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
         input_path = cache.path(body.input_token)
     except KeyError:
         return JSONResponse(404, content={"code": "token_unknown", "token": body.input_token})
+
+    fm_ok, fm_err = _validate_filament_map(body.machine_id, body.filament_map)
+    if not fm_ok:
+        return JSONResponse(
+            status_code=400,
+            content={"code": "invalid_filament_map", "message": fm_err},
+        )
 
     try:
         paths = await materialize_profiles_for_binary(
