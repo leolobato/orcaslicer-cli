@@ -158,6 +158,49 @@ Erase extruder_ams_count from threemf_config to match GUI cleanup
 
 ---
 
+## Session Log — 2026-05-04 (post-plan)
+
+Three GUI-parity issues were diagnosed and fixed in the same session as this plan was written. They aren't from the six gaps above (those are still pending) but are recorded here so future audits don't re-investigate.
+
+### Fixed: `plate_type` not honored on `/slice/v2` (orcaslicer-cli `13e6ff9`)
+
+**Symptom:** the gateway's plate-type dropdown ("Textured PEI Plate" etc.) had no effect end-to-end. The slicer always emitted `curr_bed_type = Cool Plate` for an A1 mini regardless of the user's pick.
+
+**Root cause:** the `SliceTokenRequest` schema and both v2 handlers (`/slice/v2`, `/slice-stream/v2`) had no `plate_type` field — FastAPI silently dropped it. The C++ binary then carried `curr_bed_type` over from the input 3MF; on a P-series-authored project sliced for A1 mini, libslic3r's machine-compat reset collapsed `Supertack Plate` to the printer's `default_bed_type` (= `Cool Plate`).
+
+**Fix:** added `plate_type: str | None` to `SliceTokenRequest`; resolve via `resolve_plate_type_for_machine` and forward the OrcaSlicer label to the binary. Binary applies it via `set_deserialize("curr_bed_type", …)` AFTER the 3MF carry-over so the override wins. Mirrors `Plater::on_change_bed_type`. Bad values surface as `invalid_plate_type`.
+
+**Lesson:** when adding a new project-level slice control, the schema needs to thread through `SliceTokenRequest` → C++ `SliceRequest` → `final_cfg` mutation, and the override must apply after the 3MF carry-over (line 392 of `slice_mode.cpp`).
+
+### Fixed: `filament_map` corrupted by AMS-tray semantics (orcaslicer-cli `5e53050` + bambu-gateway `7fa0edb`)
+
+**Symptom:** prime-tower auto-disable wasn't firing for single-filament-actually-used plates. Output had `enable_prime_tower = 1` and a wipe-tower position; GUI's same input emitted `enable_prime_tower = 0`. Cost: ~+1% time, +0.5g filament per print.
+
+**Initial hypothesis:** libslic3r's prime-tower auto-disable was GUI-only. **Wrong.** It lives in `DynamicPrintConfig::normalize_fdm_2` (PrintConfig.cpp:8081-8087) and is called by `Print::apply` itself — both GUI and headless flows hit it. The branch fires only when `extruders().size() == 1` (or `ByObject + multi-object`), gated off by smooth-timelapse and wrapping-detection.
+
+**Actual root cause:** the gateway's `tray_slot` UI was repurposing libslic3r's `filament_map` field for AMS-tray-slot semantics. `slicer_client._normalize_filament_selection` computed `filament_map = [tray_slots.get(i, i+1) for i in range(N)]` — for an A1 mini with one tray-slot override, this produced values like `[0, 2]`. libslic3r interpreted that as "filaments use extruders 0 and 2", `extruders().size()` returned 2, and the auto-disable branch never fired.
+
+The two concepts are different:
+- **`filament_map` (libslic3r)**: per-filament extruder index (1-based), `1..nozzle_count`. For A1 mini it's always `[1, 1, …]`.
+- **AMS tray slot**: which physical tray loads each filament. Print-time concern, sent via MQTT `ams_mapping`. The gateway already had `build_ams_mapping` building this independently from the same `tray_slot` payload.
+
+**Fix:**
+- (Gateway) `_normalize_filament_selection` always returns `(filament_ids, None)`. `tray_slot` continues flowing to `build_ams_mapping` at print time.
+- (orcaslicer-cli, defense-in-depth) v2 handlers reject any `filament_map[i]` outside `1..nozzle_count` with HTTP 400 `invalid_filament_map`.
+
+**Lessons:**
+1. Two distinct concepts shared the name `filament_map` across the stack (libslic3r per-extruder-index vs the gateway's AMS-tray-slot map). The naming collision masked the bug for months. **When the slicer field name and the UI concept aren't the same thing, keep them separate at every layer.**
+2. The "GUI does X that we don't" diagnosis was wrong twice in a row before instrumentation pinned the right answer. Lesson reinforced: **gather evidence at every component boundary before proposing fixes** — a direct curl to `/slice/v2` with explicit `filament_map=[1, 1]` would have flipped the prime tower in 30 seconds and skipped two hours of vendor-source archaeology.
+3. The v2 handlers' validation is now a paper trail for any future client that confuses the two: a 400 + clear message catches the mistake at the API boundary, before it reaches libslic3r.
+
+### Implication for the six gaps above
+
+None of the gaps as originally written address the AMS-tray confusion — they're about `slice_mode.cpp`'s preset composition, not the API contract. **Gap 2** ("per-filament-slot overrides go flat, not indexed") still stands, though it's worth re-checking whether the corrupted-`filament_map` symptom was masking any per-slot override misbehavior we'd otherwise have noticed.
+
+The prime-tower auto-disable behaviour now works without further changes — it was a symptom, not a separate gap. Don't add a Gap 7 for it.
+
+---
+
 ## Self-Review
 
 **Spec coverage:** the six gaps were identified by reading `slice_mode.cpp` end-to-end and diffing against `vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp`'s `load_config_file_config` (3423+) and `full_fff_config` (3039+). Each gap has a GUI source citation.
