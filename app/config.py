@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 ORCA_VERSION = "2.3.2"
-API_REVISION = "23"
+API_REVISION = "24"
 VERSION = f"{ORCA_VERSION}-{API_REVISION}"
 
 # Git commit baked in at image build time. The Dockerfile takes a

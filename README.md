@@ -109,6 +109,7 @@ mounts so subsequent rebuilds only recompile what changed.
 | GET | `/profiles/processes/{setting_id}` | Fully-resolved process profile with inheritance chain |
 | GET | `/profiles/filaments/{setting_id}` | Fully-resolved filament profile with inheritance chain |
 | GET | `/profiles/plate-types` | List supported bed surface types |
+| POST | `/profiles/resolve-for-machine` | GUI-equivalent process / filament / plate-type fallbacks for a target machine (alias > default > type/layer-height match) |
 | POST | `/profiles/filaments` | Import a custom filament profile JSON |
 | POST | `/profiles/filaments/resolve-import` | Preview filament import resolution without saving |
 | DELETE | `/profiles/filaments/{setting_id}` | Delete a custom filament profile |
