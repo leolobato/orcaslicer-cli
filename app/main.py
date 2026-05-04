@@ -3,7 +3,6 @@
 import io
 import json
 import zipfile
-from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
 import os
@@ -43,11 +42,14 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, File, Query, Request, UploadFile, status as fastapi_status
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
+from .cache import TokenCache
+from . import config as cfg
 from .config import GIT_COMMIT, USER_PROFILES_DIR, VERSION
 from .models import (
     FilamentProfile,
@@ -80,8 +82,11 @@ from .profiles import (
     materialize_filament_import,
     materialize_process_import,
 )
-from .slice_request import parse_filament_profile_ids
-from .stl_to_3mf import detect_file_type as _detect_file_type
+from .inspect import (
+    INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
+)
+from .threemf import list_plate_thumbnails, read_plate_thumbnail
+from .binary_client import BinaryClient, BinaryError
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
     SUPPORTED_PLATE_TYPES,
@@ -90,8 +95,7 @@ from .slicer import (
     VALID_SUPPORT_TYPES,
     ModelTooBigError,
     SlicingError,
-    slice_3mf,
-    slice_3mf_streaming,
+    materialize_profiles_for_binary,
 )
 
 
@@ -113,6 +117,12 @@ def _ensure_user_profile_dirs() -> None:
 async def lifespan(app: FastAPI):
     logger.info("orcaslicer-cli %s (commit %s)", VERSION, GIT_COMMIT)
     _ensure_user_profile_dirs()
+    app.state.token_cache = TokenCache(
+        cache_dir=cfg.CACHE_DIR,
+        max_bytes=cfg.CACHE_MAX_BYTES,
+        max_files=cfg.CACHE_MAX_FILES,
+    )
+    app.state.inspect_cache = InspectCache()
     load_all_profiles()
     yield
 
@@ -790,285 +800,276 @@ async def export_filaments_batch(request: Request):
     )
 
 
-def _collect_process_overrides(
-    layer_height: float | None,
-    sparse_infill_density: float | None,
-    sparse_infill_pattern: str | None,
-    wall_loops: int | None,
-    top_shell_layers: int | None,
-    bottom_shell_layers: int | None,
-    support_type: str | None,
-    brim_type: str | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Collect non-None overrides into a dict. Returns (overrides, error_message)."""
-    errors: list[str] = []
-    overrides: dict[str, Any] = {}
+@app.post("/3mf", tags=["3MF"])
+async def upload_3mf(request: Request, file: UploadFile = File(...)):
+    """Upload a .3mf file and receive a stable token for use with /slice/v2."""
+    payload = await file.read()
+    cache: TokenCache = request.app.state.token_cache
+    token, sha, size, evicted = cache.put(payload)
+    return {"token": token, "sha256": sha, "size": size, "evicts": evicted}
 
-    if layer_height is not None:
-        if layer_height <= 0 or layer_height > 1.0:
-            errors.append("layer_height must be between 0 and 1.0 mm")
-        else:
-            overrides["layer_height"] = layer_height
 
-    if sparse_infill_density is not None:
-        if sparse_infill_density < 0 or sparse_infill_density > 100:
-            errors.append("sparse_infill_density must be between 0 and 100")
-        else:
-            overrides["sparse_infill_density"] = sparse_infill_density
+@app.delete("/3mf/cache", tags=["3MF"])
+async def clear_cache(request: Request):
+    """Evict all entries from the 3MF token cache."""
+    cache: TokenCache = request.app.state.token_cache
+    count, freed = cache.clear()
+    return {"evicted": count, "freed_bytes": freed}
 
-    if sparse_infill_pattern is not None:
-        if sparse_infill_pattern not in VALID_INFILL_PATTERNS:
-            errors.append(
-                f"sparse_infill_pattern must be one of: {', '.join(sorted(VALID_INFILL_PATTERNS))}"
+
+@app.get("/3mf/cache/stats", tags=["3MF"])
+async def cache_stats(request: Request):
+    """Return current 3MF token cache statistics."""
+    cache: TokenCache = request.app.state.token_cache
+    return cache.stats()
+
+
+@app.get("/3mf/{token}", tags=["3MF"])
+async def download_3mf(request: Request, token: str):
+    """Download a previously uploaded .3mf file by token."""
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        path = cache.path(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    return FileResponse(
+        path,
+        media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+    )
+
+
+@app.get("/3mf/{token}/inspect", tags=["3MF"])
+async def inspect_3mf(token: str, request: Request) -> JSONResponse:
+    """Return a cheap structured summary of a cached 3MF.
+
+    Pure read — does not slice. For un-sliced 3MFs `used_filament_indices`
+    on each plate is `None`; a later task wires `orca-headless use-set` to
+    populate it.
+    """
+    cache: TokenCache = request.app.state.token_cache
+    inspect_cache: InspectCache = request.app.state.inspect_cache
+    try:
+        path = cache.path(token)
+        sha256 = cache.sha256_for(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    cached = inspect_cache.get(sha256)
+    if cached is not None:
+        return JSONResponse(content=cached)
+    file_bytes = path.read_bytes()
+    data = parse_inspect_data(file_bytes)
+    thumbs = list_plate_thumbnails(file_bytes)
+    data["thumbnail_urls"] = [
+        {
+            "plate": t["plate"],
+            "kind": t["kind"],
+            "url": f"/3mf/{token}/plates/{t['plate']}/thumbnail?kind={t['kind']}",
+        }
+        for t in thumbs
+    ]
+
+    # Populate use_set_per_plate. Sliced 3MFs already carry per-plate
+    # used-slot data via `slice_info.config` (parse_inspect_data fills
+    # `plates[i].used_filament_indices` from there). For un-sliced 3MFs
+    # we shell out to `orca-headless use-set`.
+    use_set_per_plate: dict[int, list[int]] = {}
+    needs_binary = any(
+        p["used_filament_indices"] is None for p in data["plates"]
+    )
+    if needs_binary:
+        binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+        try:
+            us_response = await binary.use_set(input_3mf=str(path))
+        except BinaryError as e:
+            logger.warning(
+                "use-set failed; returning inspect without per-plate slots: %s",
+                e.message,
             )
         else:
-            overrides["sparse_infill_pattern"] = sparse_infill_pattern
-
-    if wall_loops is not None:
-        if wall_loops < 0:
-            errors.append("wall_loops must be >= 0")
-        else:
-            overrides["wall_loops"] = wall_loops
-
-    if top_shell_layers is not None:
-        if top_shell_layers < 0:
-            errors.append("top_shell_layers must be >= 0")
-        else:
-            overrides["top_shell_layers"] = top_shell_layers
-
-    if bottom_shell_layers is not None:
-        if bottom_shell_layers < 0:
-            errors.append("bottom_shell_layers must be >= 0")
-        else:
-            overrides["bottom_shell_layers"] = bottom_shell_layers
-
-    if support_type is not None:
-        if support_type not in VALID_SUPPORT_TYPES:
-            errors.append(f"support_type must be one of: {', '.join(sorted(VALID_SUPPORT_TYPES))}")
-        else:
-            overrides["support_type"] = support_type
-
-    if brim_type is not None:
-        if brim_type not in VALID_BRIM_TYPES:
-            errors.append(f"brim_type must be one of: {', '.join(sorted(VALID_BRIM_TYPES))}")
-        else:
-            overrides["brim_type"] = brim_type
-
-    if errors:
-        return None, "; ".join(errors)
-    return (overrides or None), None
+            for p in us_response.get("plates", []):
+                use_set_per_plate[p["id"]] = p["used_filament_indices"]
+            # Backfill into data["plates"].
+            for plate in data["plates"]:
+                if plate["used_filament_indices"] is None and \
+                        plate["id"] in use_set_per_plate:
+                    plate["used_filament_indices"] = use_set_per_plate[plate["id"]]
+    # Sliced-side data already in data["plates"][i] — also surface as
+    # the dict-keyed shape for gateway convenience.
+    for plate in data["plates"]:
+        if plate["used_filament_indices"] is not None:
+            use_set_per_plate.setdefault(plate["id"], plate["used_filament_indices"])
+    data["use_set_per_plate"] = use_set_per_plate
+    inspect_cache.put(sha256, data)
+    return JSONResponse(content=data)
 
 
-@app.post(
-    "/slice",
-    tags=["Slicing"],
-    summary="Slice a 3MF or STL file",
-    responses={
-        200: {
-            "description": "Sliced G-code inside a `.3mf` archive.",
-            "content": {"application/octet-stream": {}},
-        },
-        400: {"description": "Invalid input (bad profiles or file).", "model": SliceError},
-        500: {"description": "OrcaSlicer failed.", "model": SliceError},
-    },
-)
-async def slice_file(
-    file: UploadFile = File(description="A `.3mf` or `.stl` file to slice."),
-    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
-    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
-    filament_profiles: str = Form(
-        description=(
-            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
-            "or a JSON object mapping project filament indexes to setting_ids or "
-            "to `{profile_setting_id, tray_slot}` selections."
-        ),
-        examples=['["GFL99"]'],
-    ),
-    plate_type: str | None = Form(
-        default=None,
-        description=(
-            "Optional bed surface type. "
-            "One of: cool_plate, engineering_plate, high_temp_plate, "
-            "textured_pei_plate, textured_cool_plate, supertack_plate."
-        ),
-        examples=["textured_pei_plate"],
-    ),
-    layer_height: float | None = Form(default=None, description="Override layer height (mm)."),
-    sparse_infill_density: float | None = Form(default=None, description="Override infill density (0-100)."),
-    sparse_infill_pattern: str | None = Form(default=None, description="Override infill pattern."),
-    wall_loops: int | None = Form(default=None, description="Override wall loop count."),
-    top_shell_layers: int | None = Form(default=None, description="Override top solid layers."),
-    bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
-    support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
-    brim_type: str | None = Form(default=None, description="Override brim type."),
-    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
-):
-    """Slice a `.3mf` or `.stl` file using the specified machine, process, and filament profiles.
-
-    Returns the sliced `.3mf` archive containing G-code.
-    Optional parameter overrides are applied on top of the selected process profile.
-    """
-    file_bytes = await file.read()
-    if not file_bytes:
-        return JSONResponse(status_code=400, content={"error": "Empty file"})
-
-    # Detect file type
-    file_type = _detect_file_type(file.filename, file_bytes)
-    if file_type not in ("3mf", "stl"):
-        return JSONResponse(status_code=400, content={"error": "File must be a .3mf or .stl file"})
-
-    # For STL files, only the JSON array format for filament_profiles is supported
-    filament_source = file_bytes if file_type == "3mf" else b""
-    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, filament_source)
-    if error_message is not None or filament_ids is None:
-        if file_type == "stl" and "object format" in (error_message or ""):
-            error_message = "STL files only support filament_profiles as a JSON array of setting_ids"
-        return JSONResponse(status_code=400, content={"error": error_message})
-
-    if plate_type is not None:
-        plate_type = plate_type.strip().lower()
-        if not plate_type:
-            plate_type = None
-    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
+@app.get("/3mf/{token}/plates/{plate}/thumbnail", tags=["3MF"])
+async def get_plate_thumbnail(
+    token: str, plate: int, request: Request, kind: str = "main",
+) -> Response:
+    """Return the PNG thumbnail for a specific plate of a cached 3MF."""
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        path = cache.path(token)
+    except KeyError:
         return JSONResponse(
-            status_code=400,
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+    png = read_plate_thumbnail(path.read_bytes(), plate=plate, kind=kind)
+    if png is None:
+        return JSONResponse(
+            status_code=404,
             content={
-                "error": (
-                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
-                ),
+                "code": "thumbnail_not_found",
+                "token": token, "plate": plate, "kind": kind,
             },
-        )
-    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
-
-    process_overrides, override_error = _collect_process_overrides(
-        layer_height, sparse_infill_density, sparse_infill_pattern,
-        wall_loops, top_shell_layers, bottom_shell_layers, support_type, brim_type,
-    )
-    if override_error:
-        return JSONResponse(status_code=400, content={"error": override_error})
-
-    result, settings_transfer = await slice_3mf(
-        file_bytes, machine_profile, process_profile, filament_ids,
-        plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type, plate=plate,
-    )
-    headers = {
-        "Content-Disposition": "attachment; filename=sliced.3mf",
-        "X-Settings-Transfer-Status": settings_transfer.status,
-    }
-    if settings_transfer.status == "applied" and settings_transfer.transferred:
-        headers["X-Settings-Transferred"] = json.dumps(settings_transfer.transferred)
-    if settings_transfer.filaments:
-        headers["X-Filament-Settings-Transferred"] = json.dumps(
-            [asdict(f) for f in settings_transfer.filaments]
-        )
-    if settings_transfer.machine_transferred:
-        headers["X-Machine-Settings-Transferred"] = json.dumps(
-            settings_transfer.machine_transferred,
         )
     return Response(
-        content=result,
-        media_type="application/octet-stream",
-        headers=headers,
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
-@app.post(
-    "/slice-stream",
-    tags=["Slicing"],
-    summary="Slice a 3MF file with streaming progress",
-    responses={
-        200: {
-            "description": "SSE stream with progress events, result (base64), and done.",
-            "content": {"text/event-stream": {}},
-        },
-        400: {"description": "Invalid input (bad profiles or file).", "model": SliceError},
-    },
-)
-async def slice_file_stream(
-    file: UploadFile = File(description="A `.3mf` or `.stl` file to slice."),
-    machine_profile: str = Form(description="Machine setting_id (e.g. GM014).", examples=["GM014"]),
-    process_profile: str = Form(description="Process setting_id (e.g. GP004).", examples=["GP004"]),
-    filament_profiles: str = Form(
-        description=(
-            "Either a JSON array of filament setting_ids, e.g. `[`\"GFL99\"`]`, "
-            "or a JSON object mapping project filament indexes to setting_ids or "
-            "to `{profile_setting_id, tray_slot}` selections."
-        ),
-        examples=['["GFL99"]'],
-    ),
-    plate_type: str | None = Form(
-        default=None,
-        description=(
-            "Optional bed surface type. "
-            "One of: cool_plate, engineering_plate, high_temp_plate, "
-            "textured_pei_plate, textured_cool_plate, supertack_plate."
-        ),
-        examples=["textured_pei_plate"],
-    ),
-    layer_height: float | None = Form(default=None, description="Override layer height (mm)."),
-    sparse_infill_density: float | None = Form(default=None, description="Override infill density (0-100)."),
-    sparse_infill_pattern: str | None = Form(default=None, description="Override infill pattern."),
-    wall_loops: int | None = Form(default=None, description="Override wall loop count."),
-    top_shell_layers: int | None = Form(default=None, description="Override top solid layers."),
-    bottom_shell_layers: int | None = Form(default=None, description="Override bottom solid layers."),
-    support_type: str | None = Form(default=None, description="Override support type: normal, tree, or none."),
-    brim_type: str | None = Form(default=None, description="Override brim type."),
-    plate: int = Form(default=1, description="Plate number to slice (1-based). Defaults to 1.", ge=1),
-):
-    """Slice a `.3mf` or `.stl` file and stream progress via Server-Sent Events.
+@app.delete("/3mf/{token}", status_code=fastapi_status.HTTP_204_NO_CONTENT, tags=["3MF"])
+async def delete_token(request: Request, token: str):
+    """Delete a previously uploaded .3mf file by token."""
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        sha256 = cache.sha256_for(token)
+    except KeyError:
+        sha256 = None
+    deleted = cache.delete(token)
+    if not deleted:
+        return JSONResponse(status_code=404, content={"code": "token_unknown", "token": token})
+    if sha256:
+        request.app.state.inspect_cache.invalidate(sha256)
+    return None
 
-    Returns an SSE stream with event types: `status`, `progress`, `result`, `error`, `done`.
-    The `result` event contains the sliced file as base64.
-    Optional parameter overrides are applied on top of the selected process profile.
+
+class SliceTokenRequest(BaseModel):
+    input_token: str
+    machine_id: str
+    process_id: str
+    filament_settings_ids: list[str]
+    filament_map: list[int] | None = None
+    plate_id: int = 1
+    recenter: bool = True
+
+
+@app.post("/slice/v2", tags=["Slice"])
+async def slice_v2(request: Request, body: SliceTokenRequest):
+    """Slice a previously-uploaded 3MF file using the headless binary.
+
+    Accepts a JSON body referencing an uploaded token and profile setting_ids.
     """
-    file_bytes = await file.read()
-    if not file_bytes:
-        return JSONResponse(status_code=400, content={"error": "Empty file"})
-
-    file_type = _detect_file_type(file.filename, file_bytes)
-    if file_type not in ("3mf", "stl"):
-        return JSONResponse(status_code=400, content={"error": "File must be a .3mf or .stl file"})
-
-    filament_source = file_bytes if file_type == "3mf" else b""
-    filament_ids, error_message = parse_filament_profile_ids(filament_profiles, filament_source)
-    if error_message is not None or filament_ids is None:
-        if file_type == "stl" and "object format" in (error_message or ""):
-            error_message = "STL files only support filament_profiles as a JSON array of setting_ids"
-        return JSONResponse(status_code=400, content={"error": error_message})
-
-    if plate_type is not None:
-        plate_type = plate_type.strip().lower()
-        if not plate_type:
-            plate_type = None
-    if plate_type and plate_type not in SUPPORTED_PLATE_TYPES:
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        input_path = cache.path(body.input_token)
+    except KeyError:
         return JSONResponse(
-            status_code=400,
+            status_code=404,
+            content={"code": "token_unknown", "token": body.input_token},
+        )
+
+    paths = await materialize_profiles_for_binary(
+        machine_id=body.machine_id,
+        process_id=body.process_id,
+        filament_setting_ids=body.filament_settings_ids,
+    )
+
+    output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    try:
+        result = await binary.slice(request={
+            "input_3mf": str(input_path),
+            "output_3mf": str(output_path),
+            "machine_profile": paths["machine"],
+            "process_profile": paths["process"],
+            "filament_profiles": paths["filaments"],
+            "plate_id": body.plate_id,
+            "options": {"recenter": body.recenter},
+            "filament_map": body.filament_map or [],
+            "filament_settings_id": paths["filament_names"],
+            "printer_model_id": paths.get("printer_model_id", ""),
+        })
+    except BinaryError as e:
+        return JSONResponse(
+            status_code=500,
             content={
-                "error": (
-                    f"plate_type must be one of: {', '.join(SUPPORTED_PLATE_TYPES)}"
-                ),
+                "code": e.code,
+                "message": e.message,
+                "details": e.details,
+                "stderr_tail": e.stderr_tail,
             },
         )
-    orca_plate_type = PLATE_TYPE_API_TO_ORCA[plate_type] if plate_type else None
 
-    process_overrides, override_error = _collect_process_overrides(
-        layer_height, sparse_infill_density, sparse_infill_pattern,
-        wall_loops, top_shell_layers, bottom_shell_layers, support_type, brim_type,
-    )
-    if override_error:
-        return JSONResponse(status_code=400, content={"error": override_error})
+    out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
 
-    generator = await slice_3mf_streaming(
-        file_bytes, machine_profile, process_profile, filament_ids,
-        plate_type=orca_plate_type, process_overrides=process_overrides,
-        file_type=file_type, plate=plate,
+    return {
+        "input_token": body.input_token,
+        "output_token": out_token,
+        "output_sha256": out_sha,
+        "estimate": result["estimate"],
+        "settings_transfer": result["settings_transfer"],
+        "thumbnail_urls": [],
+        "download_url": f"/3mf/{out_token}",
+    }
+
+
+@app.post("/slice-stream/v2", tags=["Slice"])
+async def slice_stream_v2(request: Request, body: SliceTokenRequest):
+    """Slice a previously-uploaded 3MF file and stream progress via SSE (headless binary).
+
+    Events: `progress` (phase/percent) and `result` (estimate, tokens, download_url).
+    """
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        input_path = cache.path(body.input_token)
+    except KeyError:
+        return JSONResponse(404, content={"code": "token_unknown", "token": body.input_token})
+
+    paths = await materialize_profiles_for_binary(
+        machine_id=body.machine_id,
+        process_id=body.process_id,
+        filament_setting_ids=body.filament_settings_ids,
     )
-    return StreamingResponse(
-        generator,
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    output_path = cache.cache_dir / f"sliced-{body.input_token[:8]}.3mf"
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+
+    async def event_gen():
+        async for ev in binary.slice_stream(request={
+            "input_3mf": str(input_path),
+            "output_3mf": str(output_path),
+            "machine_profile": paths["machine"],
+            "process_profile": paths["process"],
+            "filament_profiles": paths["filaments"],
+            "plate_id": body.plate_id,
+            "options": {"recenter": body.recenter},
+            "filament_map": body.filament_map or [],
+            "filament_settings_id": paths["filament_names"],
+            "printer_model_id": paths.get("printer_model_id", ""),
+        }):
+            if ev["type"] == "result":
+                out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
+                ev["payload"] = {
+                    "input_token": body.input_token,
+                    "output_token": out_token,
+                    "output_sha256": out_sha,
+                    "estimate": ev["payload"]["estimate"],
+                    "settings_transfer": ev["payload"]["settings_transfer"],
+                    "download_url": f"/3mf/{out_token}",
+                }
+            yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 # Mount web UI — must be last so API routes take priority

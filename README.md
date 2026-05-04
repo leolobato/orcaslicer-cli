@@ -36,11 +36,64 @@ cd orcaslicer-cli
 docker compose up --build
 ```
 
-> **Note:** Building from source takes a while — OrcaSlicer is downloaded and extracted from the official AppImage.
+> **Note:** Building from source compiles `libslic3r` and the `orca-headless` binary from the OrcaSlicer C++ source (vendored as a git submodule pinned to v2.3.2). Expect a 10–15 minute first build with BuildKit cache mounts; subsequent builds reuse the deps layer.
 
 ---
 
 The API will be available at `http://localhost:8000`.
+
+## Architecture
+
+The service is a thin Python (FastAPI) layer over a purpose-built C++ binary
+(`orca-headless`) that links `libslic3r` directly. The Python side owns
+profile loading, the token cache, and HTTP routing; the C++ side owns
+slicing and 3MF reads/writes through the same code paths the OrcaSlicer
+GUI uses.
+
+- **`app/`** — FastAPI app, profile resolution, token cache (`/data/cache`),
+  request adapters into `orca-headless`.
+- **`cpp/orca-headless`** — compiled from `vendor/OrcaSlicer` (pinned at
+  v2.3.2). Two subcommands: `slice` and `use-set`.
+- **Token cache** — every uploaded `.3mf` is stored once by sha256;
+  subsequent calls (inspect, slice, thumbnail) reference the token.
+
+### Why a custom binary instead of OrcaSlicer's built-in CLI
+
+OrcaSlicer ships a `--slice` CLI mode on its main GUI binary. We deliberately
+don't shell out to it. The reasons, roughly in order of importance:
+
+- **GUI dependencies.** The Orca binary links wxWidgets, OpenGL, GLEW, GLFW,
+  OpenCSG, and a stack of other UI libraries even when invoked headlessly.
+  In a server image that's ~150 MB+ of dead weight plus a runtime requirement
+  for an X-server-shaped environment. Our binary disables `SLIC3R_GUI` at
+  configure time and links only `libslic3r` and its actual dependencies —
+  ~60 MB and zero display assumptions.
+- **No streaming protocol.** The Orca CLI runs to completion, writes output
+  files, and exits. There's no way to read incremental progress while
+  slicing. Our binary speaks a line-delimited JSON protocol on stdout
+  (`{"phase": "...", "percent": N}` per progress event), which the FastAPI
+  layer turns into SSE for `/slice-stream/v2`.
+- **Output channel coupling.** Orca's CLI scatters `result.json`, log files,
+  and the sliced 3MF into a working directory we'd have to scrape and
+  reconcile per call. Our binary returns a structured JSON response on
+  stdout; failure modes are typed `code` strings (`invalid_3mf`,
+  `slice_failed`, `binary_crashed`, …) instead of regex-matched log lines.
+- **Behavioural guarantees.** `--slice` is a side-mode of the GUI app and
+  not a stable surface — flags, output layout, and exit codes have shifted
+  release-to-release. We pin to `vendor/OrcaSlicer` at a specific commit
+  and call into `libslic3r` directly through the same entry points
+  (`PresetBundle::construct_full_config`, `Print::process`, `bbs_3mf`
+  readers/writers) that the GUI uses, so when the GUI's behaviour changes
+  for a config we get the same change at the same source — there's no
+  separately-evolving CLI to drift from.
+- **`use-set` mode.** We need a fast read path that just parses a 3MF and
+  reports its plates/filaments/thumbnails without slicing. Orca's CLI has
+  no equivalent; we'd have to slice-and-discard or open the GUI. Our
+  binary's `use-set` command does this in milliseconds.
+
+The cost is a ~12-minute first build of `libslic3r` and its transitive deps
+when there's no Docker layer cache. The Dockerfile uses BuildKit cache
+mounts so subsequent rebuilds only recompile what changed.
 
 ## API Endpoints
 
@@ -58,22 +111,40 @@ The API will be available at `http://localhost:8000`.
 | POST | `/profiles/filaments/resolve-import` | Preview filament import resolution without saving |
 | DELETE | `/profiles/filaments/{setting_id}` | Delete a custom filament profile |
 | POST | `/profiles/reload` | Hot-reload all profiles from disk |
-| POST | `/slice` | Slice a `.3mf` file, returns sliced `.3mf` binary |
-| POST | `/slice-stream` | Same as `/slice` but streams progress via SSE |
+| POST | `/3mf` | Upload a `.3mf` to the token cache; returns `{token, sha256, size}` |
+| GET | `/3mf/{token}` | Download cached `.3mf` bytes |
+| DELETE | `/3mf/{token}` | Drop a cached upload |
+| GET | `/3mf/{token}/inspect` | Structured summary (plates, filaments, used-filament dispatch, estimate, thumbnails) |
+| GET | `/3mf/{token}/plates/{n}/thumbnail` | PNG bytes of the plate thumbnail (`?kind=main\|small\|top\|pick\|no_light`) |
+| POST | `/slice/v2` | Slice a cached `.3mf`, returns `{output_token, estimate, settings_transfer}` |
+| POST | `/slice-stream/v2` | Same as `/slice/v2` but streams progress via SSE |
 
 All profile identifiers use `setting_id` values (e.g. `GM014`, `GP004`, `GFSA00`).
 
 ### Slicing example
 
 ```bash
-curl -o sliced.3mf \
+# 1. Upload — get a cache token
+TOK=$(curl -s -X POST http://localhost:8000/3mf \
   -F "file=@model.3mf" \
-  -F "machine_profile=GM014" \
-  -F "process_profile=GP004" \
-  -F "plate_type=textured_pei_plate" \
-  -F 'filament_profiles=["GFSA00"]' \
-  http://localhost:8000/slice
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+
+# 2. Slice via JSON body
+OUT=$(curl -s -X POST http://localhost:8000/slice/v2 \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"input_token\": \"$TOK\",
+    \"machine_id\": \"GM014\",
+    \"process_id\": \"GP004\",
+    \"filament_settings_ids\": [\"GFSA00\"],
+    \"recenter\": false
+  }" | python3 -c "import json,sys; print(json.load(sys.stdin)['output_token'])")
+
+# 3. Download the sliced .3mf
+curl -s -o sliced.3mf http://localhost:8000/3mf/$OUT
 ```
+
+The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `recenter=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
 
 ### Custom filament import
 
@@ -117,10 +188,20 @@ Environment variables (set in `docker-compose.yml`):
 
 | Variable | Default | Description |
 |---|---|---|
-| `ORCA_BINARY` | `/opt/orcaslicer/bin/orca-slicer` | Path to OrcaSlicer binary |
+| `ORCA_HEADLESS_BINARY` | `/opt/orca-headless/bin/orca-headless` | Path to the compiled `orca-headless` binary |
 | `PROFILES_DIR` | `/opt/orcaslicer/profiles` | Path to vendor profile directory |
 | `USER_PROFILES_DIR` | `/data` | Path for imported/custom profiles |
+| `CACHE_DIR` | `/data/cache` | Path for the token cache (uploaded + sliced 3MFs) |
+| `CACHE_MAX_BYTES` | `10737418240` (10 GB) | Token cache size cap; oldest evicted first |
+| `CACHE_MAX_FILES` | `200` | Token cache entry-count cap |
 | `LOG_LEVEL` | `INFO` | Logging level |
+
+## Known Caveats
+
+These don't affect output correctness in any case observed so far, but they're worth knowing:
+
+- **Multi-filament start-XY can pick the opposite endpoint of an axis.** When the GUI begins a perimeter at one end of the model's bounding box on a given axis, our slice may begin at the other end. Time, weight, layer count, and toolpath geometry still match within the parity tolerances; the start-point pick is a libslic3r ordering heuristic and not stable across config equivalences.
+- **~0.6% structural diff on the fidelity baseline.** Fixture 01 produces 157 internal-solid-infill regions in our output vs the GUI's 137 — likely a `FullPrintConfig::defaults()` vs `PresetBundle::full_config()` discrepancy upstream of slicing. Cosmetic, and currently within the parity tolerance.
 
 ## Related Projects
 

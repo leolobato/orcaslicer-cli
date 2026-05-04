@@ -19,3 +19,9 @@ build/
 .env
 *.log
 .venv
+
+# Runtime data (slice token cache, user-imported profiles)
+data/cache/
+data/filament/
+data/process/
+data/machine/

@@ -1,0 +1,647 @@
+#include "slice_mode.h"
+#include "progress.h"
+
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Utils.hpp"
+
+#include <optional>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+#include <nlohmann/json.hpp>
+
+namespace orca_headless {
+
+namespace {
+
+bool starts_with(const std::string& s, const char* prefix) {
+    const size_t n = std::strlen(prefix);
+    return s.size() >= n && std::memcmp(s.data(), prefix, n) == 0;
+}
+
+bool ends_with(const std::string& s, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return s.size() >= n && std::memcmp(s.data() + s.size() - n, suffix, n) == 0;
+}
+
+std::vector<std::string> split_semicolons(const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i == s.size() || s[i] == ';') {
+            if (i > start) out.emplace_back(s, start, i - start);
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+// Overlay the keys declared in `different_settings_to_system[slot]` from
+// the 3MF's project config onto the target config. Returns the list of
+// keys actually transferred.
+//
+// For the process slot (index 0), filament-like keys (`filament_*` /
+// `*_filament`) are filtered out — they belong to filament slots, even
+// when listed under the process fingerprint. Same rule the legacy Python
+// path enforced.
+std::vector<std::string> apply_overrides_for_slot(
+    Slic3r::DynamicPrintConfig& dst,
+    const Slic3r::DynamicPrintConfig& src,
+    const std::string& key_list,
+    bool exclude_filament_keys) {
+    std::vector<std::string> transferred;
+    for (const auto& key : split_semicolons(key_list)) {
+        if (key == "compatible_printers" || key == "compatible_prints") continue;
+        if (exclude_filament_keys &&
+            (starts_with(key, "filament_") || ends_with(key, "_filament"))) {
+            continue;
+        }
+        const Slic3r::ConfigOption* src_opt = src.option(key);
+        if (src_opt == nullptr) continue;
+        Slic3r::ConfigOption* dst_opt = dst.option(key, /*create=*/false);
+        if (dst_opt == nullptr) continue;  // unknown to libslic3r
+        dst_opt->set(src_opt);
+        transferred.push_back(key);
+    }
+    return transferred;
+}
+
+// Load a single preset JSON file (machine / process / filament) into a
+// DynamicPrintConfig. The OrcaSlicer profiles are flat JSON objects whose
+// keys map 1:1 to libslic3r config option names. We use load_from_json
+// with `load_inherits=false` because callers (the Python service)
+// pre-resolve the inheritance chain before passing files in.
+Slic3r::DynamicPrintConfig load_preset_json(const std::string& path) {
+    Slic3r::DynamicPrintConfig cfg;
+    Slic3r::ConfigSubstitutionContext ctx(
+        Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    // libslic3r returns extra key/value pairs (e.g. "name", "from", "type"
+    // metadata that aren't config options) via key_values, plus any error
+    // text via reason. We don't propagate either for Phase 1; failures
+    // surface as exit-non-zero from the int return and are caught by the
+    // caller's try/catch.
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    cfg.load_from_json(path, ctx, /*load_inherits_in_config=*/false,
+                       key_values, reason);
+    return cfg;
+}
+
+// Center the combined instance bounding box on the build plate. Mirrors
+// `Model::center_instances_around_point`, which is how the GUI's "fit to
+// plate" path reseats objects (it shifts each instance's offset, NOT the
+// object's intrinsic mesh — the latter is what the previous implementation
+// did, and it produced positions hundreds of mm off-center because the
+// 3MF's stored instance offsets stayed in place on top of our translate).
+void recenter_on_plate(Slic3r::Model& model,
+                       const Slic3r::DynamicPrintConfig& cfg) {
+    const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
+    if (!area || area->values.size() < 3) return;
+    double min_x = area->values[0].x(), max_x = min_x;
+    double min_y = area->values[0].y(), max_y = min_y;
+    for (const auto& p : area->values) {
+        min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
+        min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
+    }
+    Slic3r::Vec2d center((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+    model.center_instances_around_point(center);
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        obj->ensure_on_bed(/*allow_negative_z=*/false);
+    }
+}
+
+// Helper: emit error + return 1 with a populated SliceResponse.
+int fail(const std::string& code, const std::string& message,
+         SliceResponse& r) {
+    r.status = "error";
+    r.error_code = code;
+    r.error_message = message;
+    write_slice_response_to_stdout(r);
+    return 1;
+}
+
+}  // namespace
+
+int run_slice_mode(const SliceRequest& req) {
+    SliceResponse response;
+    response.output_3mf = req.output_3mf;
+
+    // libslic3r writes backup files to temporary_dir() during 3MF reads.
+    // On a fresh container the global isn't initialized; default it to the
+    // platform's temp dir before touching Model::read_from_file.
+    if (Slic3r::temporary_dir().empty()) {
+        std::error_code ec;
+        std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+        if (ec || tmp.empty()) tmp = "/tmp";
+        Slic3r::set_temporary_dir(tmp.string());
+    }
+
+    emit_progress("loading_3mf", 0);
+
+    // 1. Load the input 3MF as a project — pulls the model, bundled config,
+    //    plate data, and project_presets all in one call. This is the same
+    //    entry the GUI uses (Plater::priv::load_files for .3mf with project).
+    Slic3r::DynamicPrintConfig threemf_config;
+    Slic3r::ConfigSubstitutionContext subs_ctx(
+        Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    Slic3r::PlateDataPtrs plate_data;
+    std::vector<Slic3r::Preset*> project_presets;
+
+    Slic3r::Model model;
+    try {
+        model = Slic3r::Model::read_from_file(
+            req.input_3mf,
+            &threemf_config,
+            &subs_ctx,
+            Slic3r::LoadStrategy::LoadModel
+                | Slic3r::LoadStrategy::LoadConfig
+                | Slic3r::LoadStrategy::LoadAuxiliary,
+            &plate_data,
+            &project_presets);
+    } catch (const std::exception& e) {
+        return fail("invalid_3mf",
+                    std::string("read_from_file: ") + e.what(), response);
+    }
+
+    if (model.objects.empty()) {
+        return fail("empty_model", "loaded 3MF has no objects", response);
+    }
+
+    emit_progress("loading_profiles", 10);
+
+    // 2. Load the three profile JSONs (resolved upstream by Python).
+    Slic3r::DynamicPrintConfig machine_cfg, process_cfg;
+    std::vector<Slic3r::DynamicPrintConfig> filament_cfgs;
+
+    try {
+        machine_cfg = load_preset_json(req.machine_profile);
+        process_cfg = load_preset_json(req.process_profile);
+        for (const auto& fp : req.filament_profiles) {
+            filament_cfgs.push_back(load_preset_json(fp));
+        }
+    } catch (const std::exception& e) {
+        return fail("invalid_profile",
+                    std::string("load preset JSON: ") + e.what(), response);
+    }
+
+    emit_progress("composing_config", 20);
+
+    // 3. Compose the final DynamicPrintConfig via the GUI's authoritative
+    //    `PresetBundle::construct_full_config` (PresetBundle.cpp:61). It
+    //    handles defaults → printer → process → filament merge, the
+    //    extruder-variant reshaping (`update_values_to_printer_extruders`)
+    //    and the per-key vector composition for multi-filament setups —
+    //    all logic that lives in the GUI and that we MUST NOT reimplement
+    //    in our wrapper, because any drift surfaces as multi-filament
+    //    crashes the GUI doesn't have (e.g. SIGSEGV in
+    //    `Print::process` because filament_options_with_variant keys end
+    //    up the wrong length).
+    //
+    //    `construct_full_config` takes `Preset` references; we wrap each
+    //    loaded JSON config in a Preset of the appropriate type. Project
+    //    config is empty here — the 3MF's `different_settings_to_system`
+    //    overrides are applied to `final_cfg` afterwards.
+    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
+    // dereferences `filament_temp_configs[i].option(key)` without a
+    // nullptr check, so each filament Preset's config must have every
+    // key that filament[0]'s config has. The GUI gets this for free —
+    // its filament Presets inherit from `filaments.default_preset()`,
+    // which populates every filament option with a default. Our
+    // `load_preset_json` only loads what's literally in the JSON, so
+    // we pre-overlay each filament_cfg onto a fresh full-defaults copy
+    // before wrapping in a Preset. Same defensive backstop the GUI's
+    // inheritance chain provides.
+    // Pre-populate each filament config with libslic3r's default values
+    // for the *filament-only* options (Preset::filament_options()) before
+    // wrapping in a Preset. The GUI's filament Presets get this for free
+    // via the inheritance chain ending at `filaments.default_preset()`,
+    // which has every filament option populated. Our `load_preset_json`
+    // only loads what's literally in the JSON. Without these defaults,
+    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
+    // will hit nullptr when filament[0] declares a key that another
+    // slot's sparser JSON omits.
+    //
+    // Filter to filament keys only: applying *all* FullPrintConfig
+    // defaults would inject printer/process keys into the filament
+    // Preset, and `out.apply(filament[0].config)` inside
+    // construct_full_config would then overlay those defaults onto the
+    // already-applied printer and process settings, corrupting them.
+    const auto& full_defaults = Slic3r::FullPrintConfig::defaults();
+    Slic3r::DynamicPrintConfig filament_defaults;
+    for (const std::string& key : Slic3r::Preset::filament_options()) {
+        const Slic3r::ConfigOption* opt = full_defaults.option(key);
+        if (opt != nullptr) filament_defaults.set_key_value(key, opt->clone());
+    }
+    auto fill_filament_defaults =
+        [&filament_defaults](Slic3r::DynamicPrintConfig& cfg) {
+            Slic3r::DynamicPrintConfig out;
+            out.apply(filament_defaults);
+            out.apply(cfg);
+            cfg = std::move(out);
+        };
+    for (auto& fc : filament_cfgs) fill_filament_defaults(fc);
+
+    Slic3r::Preset printer_preset(Slic3r::Preset::TYPE_PRINTER, "wrapper-printer");
+    printer_preset.config = std::move(machine_cfg);
+    Slic3r::Preset print_preset(Slic3r::Preset::TYPE_PRINT, "wrapper-process");
+    print_preset.config = std::move(process_cfg);
+    std::vector<Slic3r::Preset> filament_presets;
+    filament_presets.reserve(filament_cfgs.size());
+    for (size_t i = 0; i < filament_cfgs.size(); ++i) {
+        Slic3r::Preset fp(Slic3r::Preset::TYPE_FILAMENT,
+                          "wrapper-filament-" + std::to_string(i));
+        fp.config = std::move(filament_cfgs[i]);
+        filament_presets.push_back(std::move(fp));
+    }
+    // Pass the 3MF's project_settings.config as the `project_config` arg.
+    // This is what the GUI does — it carries the user's saved selections
+    // for project-level fields like `filament_ids`, `filament_colour`,
+    // `flush_volumes_matrix` (sized N×N), `extruder_ams_count`, etc. that
+    // aren't part of any preset and that downstream code (gcode export,
+    // wipe-tower planner) requires to be the right shape. Without it the
+    // matrix stays at its default 4×4 size and a 5-filament print SIGSEGVs
+    // accessing out-of-range slots.
+    Slic3r::DynamicPrintConfig final_cfg;
+    try {
+        final_cfg = Slic3r::PresetBundle::construct_full_config(
+            printer_preset, print_preset, threemf_config,
+            filament_presets,
+            /*apply_extruder=*/true,
+            /*filament_maps_new=*/std::nullopt);
+    } catch (const std::exception& e) {
+        return fail("compose_failed",
+                    std::string("construct_full_config: ") + e.what(),
+                    response);
+    }
+
+    // construct_full_config doesn't call Preset::normalize itself, so still
+    // run it to pad any missing per-filament vectors (covers user-imported
+    // filament JSONs that omit keys the leaf system filament would have
+    // had via inheritance).
+    Slic3r::Preset::normalize(final_cfg);
+
+    // Honor the 3MF's `different_settings_to_system` fingerprint:
+    //   [process, filament_0, …, filament_{N-1}, printer]
+    // (See PresetBundle::load_3mf_*; the printer slot lives at
+    // num_filaments+1.) This is how the GUI carries user customizations
+    // — e.g. layer_height, sparse_infill_density — that should override
+    // the resolved system process. Without this overlay we slice with
+    // bare system defaults and the output diverges meaningfully from the
+    // GUI even on simple projects.
+    //
+    // Per-filament slots (indexes 1..N) are applied with a name guard:
+    // only when the request's `filament_settings_id[i]` (a display name)
+    // matches the 3MF's `filament_settings_id[i]`. When the user swapped
+    // filaments, the customizations referenced the OLD filament's
+    // defaults and become meaningless on the new one — discard and report
+    // back so the client can surface what was dropped.
+    std::vector<std::string> threemf_filament_names;
+    if (const auto* opt = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "filament_settings_id", false);
+        opt != nullptr) {
+        threemf_filament_names = opt->values;
+    }
+
+    nlohmann::json transfer_status = nlohmann::json::object();
+    transfer_status["status"] = "no_3mf_settings";
+    if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "different_settings_to_system", false);
+        fp != nullptr && !fp->values.empty()) {
+        // Process slot (index 0): filament-like keys excluded.
+        auto process_keys = apply_overrides_for_slot(
+            final_cfg, threemf_config, fp->values[0],
+            /*exclude_filament_keys=*/true);
+
+        // Per-filament slots: indexes 1..N. Layout is
+        // [process, filament_0, …, filament_{N-1}, printer].
+        nlohmann::json filament_slot_status = nlohmann::json::array();
+        const size_t num_filament_slots =
+            fp->values.size() >= 2 ? fp->values.size() - 2 : 0;
+        for (size_t i = 0; i < num_filament_slots; ++i) {
+            const std::string& key_list = fp->values[i + 1];
+            const std::string original =
+                i < threemf_filament_names.size()
+                    ? threemf_filament_names[i] : "";
+            const std::string selected =
+                i < req.filament_settings_id.size()
+                    ? req.filament_settings_id[i] : "";
+            nlohmann::json entry;
+            entry["slot"] = i;
+            entry["original_filament"] = original;
+            entry["selected_filament"] = selected;
+            if (key_list.empty()) {
+                entry["status"] = "no_customizations";
+                entry["transferred"] = nlohmann::json::array();
+                entry["discarded"] = nlohmann::json::array();
+            } else if (!original.empty() && original == selected) {
+                // Phase 1 limitation: overlays the keys flat onto
+                // final_cfg rather than into the per-slot vector index.
+                // For the single-customized-slot case this matches what
+                // PresetBundle does for filament_cfgs[0]; multi-slot
+                // per-key overlay is a Phase 4 follow-up.
+                const auto transferred = apply_overrides_for_slot(
+                    final_cfg, threemf_config, key_list,
+                    /*exclude_filament_keys=*/false);
+                entry["status"] = "applied";
+                entry["transferred"] = transferred;
+                entry["discarded"] = nlohmann::json::array();
+            } else {
+                entry["status"] = "filament_changed";
+                entry["transferred"] = nlohmann::json::array();
+                entry["discarded"] = split_semicolons(key_list);
+            }
+            filament_slot_status.push_back(entry);
+        }
+
+        // Printer slot (last): no name guard — machine is fixed by the
+        // request, any declared printer key overlays straight onto the
+        // resolved machine config.
+        std::vector<std::string> printer_keys;
+        if (fp->values.size() >= 2) {
+            printer_keys = apply_overrides_for_slot(
+                final_cfg, threemf_config, fp->values.back(),
+                /*exclude_filament_keys=*/false);
+        }
+        const bool any_filament_applied = std::any_of(
+            filament_slot_status.begin(), filament_slot_status.end(),
+            [](const nlohmann::json& e) { return e["status"] == "applied"; });
+        const bool any =
+            !process_keys.empty() || !printer_keys.empty() || any_filament_applied;
+        transfer_status["status"] = any ? "applied" : "no_customizations";
+        transfer_status["process_keys"] = process_keys;
+        transfer_status["printer_keys"] = printer_keys;
+        transfer_status["filament_slots"] = filament_slot_status;
+    }
+
+    // curr_bed_type is a project-level field stored in the 3MF's
+    // project_settings.config but NOT listed in different_settings_to_system.
+    // libslic3r reads it to pick which <plate>_temp keys drive bed
+    // temperature gcode (GCode.cpp:2116/2580/2937). Carry it over so our
+    // output uses the same bed type the user authored.
+    if (const auto* opt = threemf_config.option("curr_bed_type"); opt != nullptr) {
+        if (auto* dst = final_cfg.option("curr_bed_type", /*create=*/false);
+            dst != nullptr) {
+            dst->set(opt);
+            transfer_status["curr_bed_type"] = opt->serialize();
+        }
+    }
+
+    response.settings_transfer = transfer_status;
+
+    // 4. Wire AMS / filament selection metadata onto the final config so
+    //    libslic3r threads it into slice_info.config + gcode metadata.
+    if (!req.filament_map.empty()) {
+        auto* opt = final_cfg.opt<Slic3r::ConfigOptionInts>("filament_map", true);
+        opt->values = req.filament_map;
+    }
+    if (!req.filament_settings_id.empty()) {
+        auto* opt = final_cfg.opt<Slic3r::ConfigOptionStrings>(
+            "filament_settings_id", true);
+        opt->values = req.filament_settings_id;
+    }
+
+    // 5. Recenter the model on the plate (GUI does this on import).
+    if (req.recenter) {
+        emit_progress("recentering", 25);
+        try {
+            recenter_on_plate(model, final_cfg);
+        } catch (const std::exception& e) {
+            return fail("recenter_failed", std::string("recenter: ") + e.what(),
+                        response);
+        }
+    } else {
+        // Even when not recentering, drop any model that the 3MF saved
+        // hovering above (or buried below) z=0 onto the bed. The GUI
+        // implicitly does this on every load — without it, libslic3r's
+        // skirt/brim generator throws "Coordinate outside allowed range"
+        // when the printable-area polygon is intersected against a model
+        // whose instance offset puts it outside the bed in Z.
+        for (auto* obj : model.objects) {
+            if (!obj) continue;
+            obj->ensure_on_bed(/*allow_negative_z=*/false);
+        }
+    }
+
+    emit_progress("slicing_construct_print", 28);
+
+    // 6. Configure the Print and run process(). BBL-printer flag controls
+    //    output formatting (CONFIG_BLOCK markers, label_object tagging).
+    Slic3r::Print print;
+    print.restart();
+    print.is_BBL_printer() = true;
+
+    emit_progress("slicing_apply", 30);
+    try {
+        print.apply(model, final_cfg);
+    } catch (const std::exception& e) {
+        return fail("apply_failed",
+                    std::string("Print::apply: ") + e.what(), response);
+    }
+
+    emit_progress("slicing_callback", 32);
+    print.set_status_callback(
+        [](const Slic3r::PrintBase::SlicingStatus& status) {
+            // Map libslic3r's 0..100 percent into our 30..90 band so the
+            // bookend phases (load, export) keep their share of progress.
+            int pct = 30 + static_cast<int>(status.percent * 0.6);
+            emit_progress(status.text, pct);
+        });
+
+    emit_progress("slicing_process", 35);
+    try {
+        print.process();
+    } catch (const std::exception& e) {
+        return fail("slice_failed",
+                    std::string("Print::process: ") + e.what(), response);
+    }
+
+    emit_progress("exporting_gcode", 90);
+
+    // 7. Export gcode to a temp file. store_bbs_3mf reads the gcode bytes
+    //    from PlateData.gcode_file when SaveStrategy::WithGcode is set.
+    const std::filesystem::path temp_gcode_path =
+        std::filesystem::temp_directory_path() /
+        ("orca-headless-gcode-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".gcode");
+
+    Slic3r::GCodeProcessorResult gcode_result;
+    try {
+        print.export_gcode(temp_gcode_path.string(), &gcode_result, nullptr);
+    } catch (const std::exception& e) {
+        return fail("gcode_export_failed",
+                    std::string("export_gcode: ") + e.what(), response);
+    }
+
+    emit_progress("writing_3mf", 95);
+
+    // 8. Build single-plate PlateData. Mirrors the layout
+    //    PartPlateList::store_to_3mf_structure produces for a 1-plate print.
+    auto* plate = new Slic3r::PlateData();
+    plate->plate_index = std::max(0, req.plate_id - 1);
+    plate->gcode_file = gcode_result.filename;
+    plate->is_sliced_valid = true;
+    plate->config.apply(final_cfg);
+    plate->toolpath_outside = gcode_result.toolpath_outside;
+    plate->is_label_object_enabled = gcode_result.label_object_enabled;
+    plate->limit_filament_maps = gcode_result.limit_filament_maps;
+    plate->layer_filaments = gcode_result.layer_filaments;
+    // Identifies the target physical printer in slice_info.config — e.g.
+    // "N1" for an A1 mini. Resolved by the Python service from the parent
+    // BBL machine profile; empty for vendors that don't declare model_id.
+    plate->printer_model_id = req.printer_model_id;
+    // Stamp nozzle_diameters as a space-delimited string mirroring the GUI
+    // (PartPlate.cpp:7240). Without this, slice_info.config carries an
+    // empty string even though the value sits in final_cfg.
+    if (const auto* nd = final_cfg.opt<Slic3r::ConfigOptionFloats>("nozzle_diameter")) {
+        std::string joined;
+        for (size_t i = 0; i < nd->values.size(); ++i) {
+            if (i) joined += ' ';
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%g", nd->values[i]);
+            joined += buf;
+        }
+        plate->nozzle_diameters = joined;
+    }
+
+    {
+        const auto& ps = print.print_statistics();
+        if (ps.total_weight != 0.0) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.2f", ps.total_weight);
+            plate->gcode_weight = buf;
+        }
+        const size_t normal_idx =
+            static_cast<size_t>(Slic3r::PrintEstimatedStatistics::ETimeMode::Normal);
+        const float normal_time =
+            gcode_result.print_statistics.modes[normal_idx].time;
+        plate->gcode_prediction = std::to_string(static_cast<int>(normal_time));
+        // first_layer_time lives at the top of GCodeProcessorResult (see
+        // GCodeProcessor.hpp:155; GCodeProcessor.cpp:2614 populates it from
+        // get_first_layer_time(Normal)). The GUI reads the same field at
+        // Plater.cpp:10308.
+        if (gcode_result.initial_layer_time > 0.0f) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%f", gcode_result.initial_layer_time);
+            plate->first_layer_time = buf;
+        }
+        plate->is_support_used = print.is_support_used();
+
+        for (size_t obj_id = 0; obj_id < model.objects.size(); ++obj_id) {
+            const auto* obj = model.objects[obj_id];
+            if (!obj) continue;
+            for (size_t inst_id = 0; inst_id < obj->instances.size(); ++inst_id) {
+                plate->objects_and_instances.emplace_back(
+                    static_cast<int>(obj_id), static_cast<int>(inst_id));
+            }
+        }
+
+        plate->parse_filament_info(&gcode_result);
+
+        // parse_filament_info only sets id/used_m/used_g (bbs_3mf.cpp:593).
+        // Fill the remaining fields the GUI emits:
+        //   - type comes from the resolved system filament profile
+        //   - color and filament_id (the BBL tray catalog ID, e.g. "GFA00")
+        //     are user-authored per-slot picks that live in the input 3MF's
+        //     project_settings.config — read them from threemf_config
+        //
+        // tray_info_idx stays empty until Phase 3 plumbs AMS slot info
+        // from the gateway.
+        const auto* threemf_colors =
+            threemf_config.option<Slic3r::ConfigOptionStrings>(
+                "filament_colour", false);
+        const auto* threemf_ids =
+            threemf_config.option<Slic3r::ConfigOptionStrings>(
+                "filament_ids", false);
+        for (size_t i = 0; i < plate->slice_filaments_info.size(); ++i) {
+            auto& info = plate->slice_filaments_info[i];
+            if (i < filament_cfgs.size()) {
+                if (const auto* t = filament_cfgs[i]
+                        .opt<Slic3r::ConfigOptionStrings>("filament_type");
+                    t && !t->values.empty()) {
+                    info.type = t->values.front();
+                }
+            }
+            if (threemf_colors && i < threemf_colors->values.size()) {
+                info.color = threemf_colors->values[i];
+            }
+            if (threemf_ids && i < threemf_ids->values.size()) {
+                info.filament_id = threemf_ids->values[i];
+            }
+        }
+    }
+
+    // 9. Write the .3mf with embedded gcode + slice_info.
+    Slic3r::StoreParams store_params;
+    const std::string output_path_str = req.output_3mf;
+    store_params.path = output_path_str.c_str();
+    store_params.model = &model;
+    store_params.config = &final_cfg;
+    // SkipModel mirrors the GUI's "min-save" mode (Plater.cpp:14624 etc.)
+    // and the legacy CLI's `--min-save 1` flag (commit 317b3d0): omit the
+    // input geometry from the output 3MF since it's not needed downstream
+    // — gcode + settings + thumbnails carry everything consumers use.
+    // Saves ~3MB on a typical benchy-sized project.
+    store_params.strategy =
+        Slic3r::SaveStrategy::Zip64
+        | Slic3r::SaveStrategy::WithGcode
+        | Slic3r::SaveStrategy::WithSliceInfo
+        | Slic3r::SaveStrategy::SkipModel;
+    store_params.plate_data_list.push_back(plate);
+
+    bool stored = false;
+    try {
+        stored = Slic3r::store_bbs_3mf(store_params);
+    } catch (const std::exception& e) {
+        Slic3r::release_PlateData_list(store_params.plate_data_list);
+        std::error_code ec;
+        std::filesystem::remove(temp_gcode_path, ec);
+        return fail("store_3mf_failed",
+                    std::string("store_bbs_3mf: ") + e.what(), response);
+    }
+
+    Slic3r::release_PlateData_list(store_params.plate_data_list);
+    std::error_code ec;
+    std::filesystem::remove(temp_gcode_path, ec);
+
+    if (!stored) {
+        return fail("store_3mf_returned_false",
+                    "store_bbs_3mf returned false", response);
+    }
+
+    emit_progress("done", 100);
+
+    // 10. Populate the success response from print + GCodeProcessorResult.
+    const auto& stats = print.print_statistics();
+    const size_t normal_idx =
+        static_cast<size_t>(Slic3r::PrintEstimatedStatistics::ETimeMode::Normal);
+    response.status = "ok";
+    response.estimate.weight_g = stats.total_weight;
+    response.estimate.time_seconds =
+        gcode_result.print_statistics.modes[normal_idx].time;
+    // Single-element filament-used vector for v1; multi-filament splits this
+    // per slot in a later task once we wire per-filament tracking.
+    response.estimate.filament_used_m.push_back(stats.total_used_filament / 1000.0);
+
+    // settings_transfer was populated inline during config composition;
+    // leave it as-is here.
+
+    write_slice_response_to_stdout(response);
+    return 0;
+}
+
+}  // namespace orca_headless

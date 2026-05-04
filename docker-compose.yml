@@ -15,8 +15,11 @@ services:
       - ./app:/app/app
       - ./tests:/app/tests
       - ./conftest.py:/app/conftest.py
+      - ./pytest.ini:/app/pytest.ini
     environment:
       - ORCA_BINARY=/opt/orcaslicer/bin/orca-slicer
+      - ORCA_HEADLESS_BINARY=/opt/orca-headless/bin/orca-headless
       - PROFILES_DIR=/opt/orcaslicer/profiles
       - USER_PROFILES_DIR=/data
+      - CACHE_DIR=/data/cache
       - LOG_LEVEL=DEBUG

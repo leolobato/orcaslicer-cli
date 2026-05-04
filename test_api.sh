@@ -71,36 +71,62 @@ echo "=== Error Handling ==="
 ERR=$(curl -sf -o /dev/null -w "%{http_code}" "$BASE_URL/profiles/processes?machine=INVALID" || true)
 check "invalid machine returns 400 (got $ERR)" "$([ "$ERR" = "400" ] && echo true || echo false)"
 
-echo ""
-echo "=== Slice: example3.3mf (A1 mini, 0.20mm Standard, Generic PLA) ==="
-if [ -f "$EXAMPLES_DIR/example3.3mf" ]; then
-    SLICE_OUT="test_output_example3.3mf"
-    SLICE_HEADERS="test_headers_example3.txt"
-    HTTP_CODE=$(curl -s -o "$SLICE_OUT" -D "$SLICE_HEADERS" -w "%{http_code}" \
-        -F "file=@$EXAMPLES_DIR/example3.3mf" \
-        -F "machine_profile=GM020" \
-        -F "process_profile=GP000" \
-        -F "plate_type=textured_pei_plate" \
-        -F 'filament_profiles=["GFSL99_02"]' \
-        "$BASE_URL/slice")
-    check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
-    if [ "$HTTP_CODE" = "200" ]; then
-        SIZE=$(wc -c < "$SLICE_OUT" | tr -d ' ')
-        check "output is non-empty ($SIZE bytes)" "$([ "$SIZE" -gt 0 ] && echo true || echo false)"
-        HAS_GCODE=$(python3 -c "
-import zipfile, sys
+# Upload a 3MF file, slice via /slice/v2, download result; sets SLICE_OUT.
+# Usage: slice_v2_test <label> <3mf_file> <machine_id> <process_id> <filament_ids_json>
+slice_v2_test() {
+    local label="$1" src="$2" machine="$3" process="$4" filaments="$5"
+    local raw_resp tok out_tok http_code size has_gcode transfer_status
+    local slice_out="test_output_$(basename "$src")"
+    local raw_file="test_slice_v2_raw.json"
+
+    # Step 1: upload
+    tok=$(curl -s -X POST "$BASE_URL/3mf" -F "file=@$src" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+    check "$label upload returns token" "$([ -n \"$tok\" ] && echo true || echo false)"
+    [ -z "$tok" ] && return
+
+    # Step 2: slice/v2
+    http_code=$(curl -s -o "$raw_file" -w "%{http_code}" \
+        -X POST "$BASE_URL/slice/v2" \
+        -H 'Content-Type: application/json' \
+        -d "{\"input_token\":\"$tok\",\"machine_id\":\"$machine\",\"process_id\":\"$process\",\"filament_settings_ids\":$filaments,\"recenter\":false}")
+    check "$label slice/v2 returns 200 (got $http_code)" "$([ "$http_code" = "200" ] && echo true || echo false)"
+
+    if [ "$http_code" = "200" ]; then
+        # Step 3: extract output token and download
+        out_tok=$(python3 -c "import json,sys; print(json.load(open('$raw_file'))['output_token'])")
+        curl -s -o "$slice_out" "$BASE_URL/3mf/$out_tok"
+
+        size=$(wc -c < "$slice_out" | tr -d ' ')
+        check "$label output is non-empty ($size bytes)" "$([ "$size" -gt 0 ] && echo true || echo false)"
+
+        has_gcode=$(python3 -c "
+import zipfile
 try:
-    with zipfile.ZipFile('$SLICE_OUT') as zf:
+    with zipfile.ZipFile('$slice_out') as zf:
         has = any('plate_' in n and n.endswith('.gcode') for n in zf.namelist())
         print('true' if has else 'false')
 except:
     print('false')
 ")
-        check "output contains gcode" "$HAS_GCODE"
-        TRANSFER_STATUS=$(grep -i 'x-settings-transfer-status' "$SLICE_HEADERS" | tr -d '\r' | awk '{print $2}')
-        check "has X-Settings-Transfer-Status header ($TRANSFER_STATUS)" "$([ -n "$TRANSFER_STATUS" ] && echo true || echo false)"
+        check "$label output contains gcode" "$has_gcode"
+
+        transfer_status=$(python3 -c "
+import json
+d = json.load(open('$raw_file'))
+st = d.get('settings_transfer', {})
+print(st.get('status', ''))
+")
+        check "$label has settings_transfer.status ($transfer_status)" "$([ -n \"$transfer_status\" ] && echo true || echo false)"
     fi
-    rm -f "$SLICE_OUT" "$SLICE_HEADERS"
+
+    rm -f "$slice_out" "$raw_file"
+}
+
+echo ""
+echo "=== Slice: example3.3mf (A1 mini, 0.20mm Standard, Generic PLA) ==="
+if [ -f "$EXAMPLES_DIR/example3.3mf" ]; then
+    slice_v2_test "example3" "$EXAMPLES_DIR/example3.3mf" "GM020" "GP000" '["GFSL99_02"]'
 else
     red "  SKIP: $EXAMPLES_DIR/example3.3mf not found"
 fi
@@ -108,29 +134,7 @@ fi
 echo ""
 echo "=== Slice: example.3mf (P1S, 0.20mm Standard, PLA Basic) ==="
 if [ -f "$EXAMPLES_DIR/example.3mf" ]; then
-    SLICE_OUT="test_output_example.3mf"
-    HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
-        -F "file=@$EXAMPLES_DIR/example.3mf" \
-        -F "machine_profile=GM014" \
-        -F "process_profile=GP004" \
-        -F 'filament_profiles=["GFSA00"]' \
-        "$BASE_URL/slice")
-    check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
-    if [ "$HTTP_CODE" = "200" ]; then
-        SIZE=$(wc -c < "$SLICE_OUT" | tr -d ' ')
-        check "output is non-empty ($SIZE bytes)" "$([ "$SIZE" -gt 0 ] && echo true || echo false)"
-        HAS_GCODE=$(python3 -c "
-import zipfile
-try:
-    with zipfile.ZipFile('$SLICE_OUT') as zf:
-        has = any('plate_' in n and n.endswith('.gcode') for n in zf.namelist())
-        print('true' if has else 'false')
-except:
-    print('false')
-")
-        check "output contains gcode" "$HAS_GCODE"
-    fi
-    rm -f "$SLICE_OUT"
+    slice_v2_test "example" "$EXAMPLES_DIR/example.3mf" "GM014" "GP004" '["GFSA00"]'
 else
     red "  SKIP: $EXAMPLES_DIR/example.3mf not found"
 fi
@@ -138,29 +142,7 @@ fi
 echo ""
 echo "=== Slice: example2.3mf (P1S, 0.28mm Extra Draft, 4 filaments) ==="
 if [ -f "$EXAMPLES_DIR/example2.3mf" ]; then
-    SLICE_OUT="test_output_example2.3mf"
-    HTTP_CODE=$(curl -s -o "$SLICE_OUT" -w "%{http_code}" \
-        -F "file=@$EXAMPLES_DIR/example2.3mf" \
-        -F "machine_profile=GM014" \
-        -F "process_profile=GP006" \
-        -F 'filament_profiles=["GFSA00","GFSA00","GFSA00","GFSA00"]' \
-        "$BASE_URL/slice")
-    check "slice returns 200 (got $HTTP_CODE)" "$([ "$HTTP_CODE" = "200" ] && echo true || echo false)"
-    if [ "$HTTP_CODE" = "200" ]; then
-        SIZE=$(wc -c < "$SLICE_OUT" | tr -d ' ')
-        check "output is non-empty ($SIZE bytes)" "$([ "$SIZE" -gt 0 ] && echo true || echo false)"
-        HAS_GCODE=$(python3 -c "
-import zipfile
-try:
-    with zipfile.ZipFile('$SLICE_OUT') as zf:
-        has = any('plate_' in n and n.endswith('.gcode') for n in zf.namelist())
-        print('true' if has else 'false')
-except:
-    print('false')
-")
-        check "output contains gcode" "$HAS_GCODE"
-    fi
-    rm -f "$SLICE_OUT"
+    slice_v2_test "example2" "$EXAMPLES_DIR/example2.3mf" "GM014" "GP006" '["GFSA00","GFSA00","GFSA00","GFSA00"]'
 else
     red "  SKIP: $EXAMPLES_DIR/example2.3mf not found"
 fi

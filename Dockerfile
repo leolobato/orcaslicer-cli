@@ -1,5 +1,8 @@
-# Stage 1: Extract pre-built OrcaSlicer from AppImage
-FROM --platform=linux/amd64 ubuntu:24.04 AS builder
+# =============================================================================
+# Stage 1: Extract pre-built OrcaSlicer from AppImage (legacy path; kept for
+# back-compat during Phase 1 — switched off via USE_HEADLESS_BINARY).
+# =============================================================================
+FROM --platform=linux/amd64 ubuntu:24.04 AS appimage-extractor
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget squashfs-tools && \
@@ -7,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Download AppImage
 RUN wget --max-redirect=10 -q "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.3.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.3.2.AppImage" \
     -O orcaslicer.AppImage
 
@@ -23,7 +25,155 @@ RUN ELF_END=$( \
     unsquashfs -d squashfs-root squashfs.img && \
     rm orcaslicer.AppImage squashfs.img
 
-# Stage 2: Runtime
+# =============================================================================
+# Stage 2: Build OrcaSlicer's deps superbuild from the vendored source.
+# Produces /deps/destdir/usr/local/{lib,include} containing CGAL,
+# OpenCASCADE, OpenVDB, Boost, TBB, draco, OpenCV, JPEG, etc.
+#
+# Pinned to linux/amd64 to match the runtime stage (which must be amd64 to
+# run the legacy AppImage binary). Once Phase 4 retires the AppImage, this
+# pin can drop and builds become native-arch.
+# =============================================================================
+FROM --platform=linux/amd64 ubuntu:24.04 AS deps-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ninja-build \
+    pkg-config \
+    autoconf automake libtool \
+    file \
+    libssl-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libdbus-1-dev \
+    libglib2.0-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    libxml2-dev \
+    libtiff-dev \
+    libxext-dev \
+    libxmu-dev \
+    libxi-dev \
+    texinfo \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY vendor/OrcaSlicer/deps deps
+COPY vendor/OrcaSlicer/cmake cmake
+COPY vendor/OrcaSlicer/version.inc version.inc
+
+# Skip GUI-only deps that orca-headless doesn't link: GLEW, GLFW, OpenCSG,
+# wxWidgets. These would otherwise add ~30–60 min to the build and pull in
+# Wayland / X11 / GTK system requirements we don't have. They're leaf deps
+# (no other dep depends on them), so removing them is safe.
+#
+# Also clamp NPROC to 2: each ExternalProject_Add uses `-j${NPROC}` for its
+# inner build, ignoring our outer cmake --build -jN. With 4 outer × 12 inner
+# (host nproc) = 48 parallel compile jobs, OCCT's libTKRWMesh.a linking
+# OOM-killed silently on 8 GB OrbStack. Inner -j2 × outer -j4 = 8 peak,
+# fits comfortably.
+RUN sed -i \
+        -e '/^include(GLEW\/GLEW\.cmake)$/d' \
+        -e '/^include(GLFW\/GLFW\.cmake)$/d' \
+        -e '/^include(OpenCSG\/OpenCSG\.cmake)$/d' \
+        -e '/^include(wxWidgets\/wxWidgets\.cmake)$/d' \
+        -e 's/^    dep_GLFW$//' \
+        -e 's/^    dep_OpenCSG$//' \
+        -e 's/^    \${WXWIDGETS_PKG}$//' \
+        -e 's/^ProcessorCount(NPROC)$/ProcessorCount(NPROC)\nset(NPROC 2)/' \
+        deps/CMakeLists.txt && \
+    sed -i 's/BUILD_COMMAND     make -j$/BUILD_COMMAND     make -j2/' deps/GMP/GMP.cmake && \
+    sed -i 's/BUILD_COMMAND make -j$/BUILD_COMMAND make -j2/' deps/MPFR/MPFR.cmake
+
+# Build the deps superbuild. This is the long phase — first time can be
+# 60–90 minutes depending on the host. The deps tree is self-contained;
+# we only need its destdir/ output.
+#
+# Parallelism intentionally capped at -j4 (not nproc): linking OCCT's
+# libTKRWMesh.a + Boost + OpenCV concurrently can spike past 8 GB peak
+# memory, which OOM-kills under typical OrbStack defaults (8 GB) with
+# no log trace. Inner ExternalProject ninja inherits this cap via
+# CMAKE_BUILD_PARALLEL_LEVEL.
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
+# Cache downloaded source tarballs across builds so a transient network
+# blip on one dep (we hit a partial-transfer on Draco's GitHub zip) doesn't
+# force re-downloading every other dep. The deps superbuild looks at
+# DEP_DOWNLOAD_DIR (defaults to deps/DL_CACHE under its CMAKE_CURRENT_SOURCE_DIR);
+# we point it at a stable location and mount that as a cache.
+#
+# On failure: BuildKit truncates progress output past ~2MB, which has been
+# eating OCCT's actual `FAILED:` lines. Bash trap below grep-extracts
+# "FAILED:" blocks from the full inner log so the real error survives.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN --mount=type=cache,target=/dep-downloads,sharing=locked \
+    cmake -S deps -B build/deps -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDESTDIR=/src/build/destdir \
+        -DDEP_DOWNLOAD_DIR=/dep-downloads && \
+    ( cmake --build build/deps -j4 2>&1 | tee /tmp/deps-build.log ); \
+    rc=${PIPESTATUS[0]}; \
+    if [ $rc -ne 0 ]; then \
+        echo "==================== FAILED: BLOCKS ===================="; \
+        grep -B 2 -A 200 "^FAILED:" /tmp/deps-build.log | tail -800 || true; \
+        echo "==================== LAST ERROR-ish LINES ===================="; \
+        grep -iE "(\\bError\\b|\\bfatal\\b|Stop\\.)" /tmp/deps-build.log | tail -50 || true; \
+        exit $rc; \
+    fi
+
+# =============================================================================
+# Stage 3: Build the orca-headless binary against libslic3r + the deps
+# superbuild's destdir.
+# =============================================================================
+FROM --platform=linux/amd64 ubuntu:24.04 AS cpp-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ninja-build \
+    pkg-config \
+    libssl-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libdbus-1-dev \
+    libglib2.0-dev \
+    libbz2-dev \
+    liblzma-dev \
+    libzstd-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    libglew-dev \
+    libglfw3-dev \
+    libjpeg-dev \
+    libpng-dev \
+    zlib1g-dev \
+    libexpat1-dev \
+    libcurl4-openssl-dev \
+    libtiff-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY --from=deps-builder /src/build/destdir /opt/orca-deps
+COPY vendor/OrcaSlicer vendor/OrcaSlicer
+COPY cpp cpp
+
+# Configure orca-headless using the deps destdir as CMAKE_PREFIX_PATH and
+# building libslic3r in-tree via cpp/CMakeLists.txt's add_subdirectory.
+# Cap parallelism to -j4 like deps-builder. Each libslic3r .cpp compile
+# uses 200–500 MB, so -j12 can spike past OrbStack's 8 GB and cause
+# BuildKit's daemon to die mid-build with an "EOF" rpc error.
+RUN cmake -S cpp -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/orca-deps/usr/local \
+        -DCMAKE_INSTALL_PREFIX=/opt/orca-headless && \
+    cmake --build build --target orca-headless -j4 && \
+    install -D build/orca-headless /opt/orca-headless/bin/orca-headless
+
+# =============================================================================
+# Stage 4: Runtime
+# =============================================================================
 FROM --platform=linux/amd64 ubuntu:24.04
 
 RUN apt-get update && \
@@ -55,17 +205,17 @@ ENV LC_ALL=en_US.utf8
 RUN locale-gen $LC_ALL
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Copy OrcaSlicer binary and resources from extracted AppImage.
-# `/opt/resources/` is where the binary resolves its `resources_dir()` —
-# multi-filament slicing reads `/opt/resources/info/filament_info.json`
-# via `get_filament_temp_type()` and fails if it's missing.
-COPY --from=builder /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
-COPY --from=builder /build/squashfs-root/resources/ /opt/resources/
-COPY --from=builder /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
-
-# Make binary executable and add to PATH
+# Legacy AppImage binary (kept for back-compat in Phase 1)
+COPY --from=appimage-extractor /build/squashfs-root/bin/orca-slicer /opt/orcaslicer/bin/orca-slicer
+COPY --from=appimage-extractor /build/squashfs-root/resources/ /opt/resources/
+COPY --from=appimage-extractor /build/squashfs-root/resources/profiles/ /opt/orcaslicer/profiles/
 RUN chmod +x /opt/orcaslicer/bin/orca-slicer
-ENV PATH="/opt/orcaslicer/bin:${PATH}"
+
+# New orca-headless binary (built from vendored source in cpp-builder stage)
+COPY --from=cpp-builder /opt/orca-headless/bin/orca-headless /opt/orca-headless/bin/orca-headless
+RUN chmod +x /opt/orca-headless/bin/orca-headless
+
+ENV PATH="/opt/orcaslicer/bin:/opt/orca-headless/bin:${PATH}"
 
 # Install Python dependencies
 WORKDIR /app
