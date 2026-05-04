@@ -1321,6 +1321,436 @@ def get_machine_model_id(slug: str) -> str:
     return ""
 
 
+def _find_machine_model_raw(printer_model: str) -> dict[str, Any] | None:
+    """Locate the top-level ``machine_model`` raw JSON for a printer model name.
+
+    Same lookup pattern as ``get_machine_model_id``: the variant's
+    ``printer_model`` field (e.g. ``"Bambu Lab A1 mini"``) matches the
+    ``name`` of a top-level machine entry whose JSON carries
+    ``not_support_bed_type``, ``default_bed_type``, ``default_materials``
+    and ``model_id``.
+    """
+    for other_key, raw in _raw_profiles.items():
+        if _type_map.get(other_key) != "machine":
+            continue
+        if raw.get("inherits"):
+            continue
+        if raw.get("name") != printer_model:
+            continue
+        return raw
+    return None
+
+
+def _split_semicolons(value: Any) -> list[str]:
+    """Split an OrcaSlicer-style semicolon-joined field into trimmed entries."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [part.strip() for part in str(value).split(";") if part.strip()]
+
+
+def get_machine_model_metadata(slug: str) -> dict[str, Any]:
+    """Return the machine_model fields the GUI consults for compat fallback.
+
+    Combines fields from the variant (``default_filament_profile``,
+    ``default_print_profile``, ``printer_model``) and from the
+    ``machine_model`` JSON it links to (``default_bed_type``,
+    ``not_support_bed_type``, ``default_materials``, ``model_id``).
+    Used by ``resolve_*_for_machine`` to score replacement candidates the
+    way ``PresetBundle::update_compatible`` does in the GUI.
+    """
+    profile_key, resolved = _resolve_by_slug("machine", slug)
+    raw_variant = _raw_profiles.get(profile_key, {})
+    printer_model = (
+        resolved.get("printer_model")
+        or raw_variant.get("printer_model")
+        or ""
+    )
+
+    default_filament_profile: list[str] = []
+    raw_default_filament = (
+        resolved.get("default_filament_profile")
+        or raw_variant.get("default_filament_profile")
+        or []
+    )
+    if isinstance(raw_default_filament, list):
+        default_filament_profile = [str(s) for s in raw_default_filament if s]
+    elif isinstance(raw_default_filament, str) and raw_default_filament:
+        default_filament_profile = [raw_default_filament]
+
+    default_print_profile = str(
+        resolved.get("default_print_profile")
+        or raw_variant.get("default_print_profile")
+        or ""
+    )
+
+    model_raw = _find_machine_model_raw(printer_model) if printer_model else None
+    default_bed_type = ""
+    not_support_bed_types: list[str] = []
+    default_materials: list[str] = []
+    model_id = ""
+    if model_raw is not None:
+        default_bed_type = str(model_raw.get("default_bed_type", "") or "")
+        # JSON spells the key in the singular even though the parsed shape
+        # is a list (matches OrcaSlicer's ``unescape_strings_cstyle`` path
+        # in ``PresetBundle.cpp:3952``).
+        not_support_bed_types = _split_semicolons(
+            model_raw.get("not_support_bed_type"),
+        )
+        default_materials = _split_semicolons(model_raw.get("default_materials"))
+        model_id = str(model_raw.get("model_id", "") or "")
+
+    return {
+        "name": resolved.get("name", _display_name(profile_key)),
+        "printer_model": printer_model,
+        "default_filament_profile": default_filament_profile,
+        "default_print_profile": default_print_profile,
+        "default_bed_type": default_bed_type,
+        "not_support_bed_types": not_support_bed_types,
+        "default_materials": default_materials,
+        "model_id": model_id,
+    }
+
+
+def _machine_compat_candidates(
+    machine_names: set[str],
+    *,
+    category: str,
+) -> list[dict[str, Any]]:
+    """Return resolved leaf profiles whose ``compatible_printers`` includes
+    any of the given machine display names. ``category`` is "filament" or
+    "process".
+    """
+    out: list[dict[str, Any]] = []
+    for profile_key, raw in _raw_profiles.items():
+        if _type_map.get(profile_key) != category:
+            continue
+        if raw.get("instantiation") != "true":
+            continue
+        try:
+            resolved = resolve_profile_by_name(profile_key)
+        except ProfileNotFoundError:
+            continue
+        if resolved is None:
+            continue
+        compat = resolved.get("compatible_printers") or []
+        if not any(m in compat for m in machine_names):
+            continue
+        out.append({
+            "profile_key": profile_key,
+            "raw": raw,
+            "resolved": resolved,
+            "name": resolved.get("name", _display_name(profile_key)),
+            "setting_id": _slug_for_profile(profile_key),
+        })
+    return out
+
+
+def _filament_type_of(resolved: dict[str, Any]) -> str:
+    """Read the first entry from a filament profile's ``filament_type`` field."""
+    val = resolved.get("filament_type", "")
+    if isinstance(val, list):
+        return str(val[0]) if val else ""
+    return str(val or "")
+
+
+def _layer_height_of(resolved: dict[str, Any]) -> float:
+    """Parse a process profile's ``layer_height`` as a float (0.0 if missing)."""
+    val = resolved.get("layer_height", "")
+    if isinstance(val, list):
+        val = val[0] if val else ""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _score_filament_for_machine(
+    candidate_resolved: dict[str, Any],
+    *,
+    requested_alias: str,
+    requested_type: str,
+    prefered_names: list[str],
+) -> int:
+    """Score a candidate filament for replacing the requested one.
+
+    Mirrors ``PreferedFilamentProfileMatch::operator()`` in
+    ``vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:4416-4441``:
+      - Same alias wins outright (``int.max``).
+      - +1 if the candidate's name is in the printer's
+        ``default_filament_profile`` list.
+      - +1 visibility bonus (we treat all loaded presets as visible).
+      - ×10 multiplier when ``filament_type`` matches.
+    """
+    cand_name = str(candidate_resolved.get("name", ""))
+    if requested_alias and _logical_filament_name(cand_name) == requested_alias:
+        # Match by alias — same logical filament across machine variants.
+        return 2**31 - 1
+
+    score = 1  # base for any compat candidate
+    if cand_name in prefered_names:
+        score += 1
+    score += 1  # visibility bonus (all loaded presets considered visible)
+    if requested_type and _filament_type_of(candidate_resolved) == requested_type:
+        score *= 10
+    return score
+
+
+def resolve_filament_for_machine(
+    machine_slug: str,
+    requested_filament_name: str,
+) -> dict[str, Any]:
+    """Return the GUI-equivalent replacement for ``requested_filament_name``.
+
+    Mirrors ``PresetBundle::update_compatible``'s filament path. Returns a
+    dict with ``setting_id``, ``name``, ``alias`` and a ``match`` reason
+    (``unchanged``/``alias``/``type``/``default``/``first_compat``/``none``).
+    """
+    machine_names = _machine_names_for_slug(machine_slug)
+    if not machine_names:
+        raise ProfileNotFoundError(f"Machine '{machine_slug}' not found")
+
+    metadata = get_machine_model_metadata(machine_slug)
+    prefered_names = list(metadata.get("default_filament_profile") or [])
+
+    requested_alias = _logical_filament_name(requested_filament_name)
+    requested_resolved: dict[str, Any] | None = None
+    requested_key = _select_profile_key_by_name(
+        requested_filament_name, category="filament",
+    )
+    if requested_key:
+        try:
+            requested_resolved = resolve_profile_by_name(requested_key)
+        except ProfileNotFoundError:
+            requested_resolved = None
+    requested_type = _filament_type_of(requested_resolved or {})
+
+    candidates = _machine_compat_candidates(machine_names, category="filament")
+    if not candidates:
+        return {
+            "setting_id": "",
+            "name": "",
+            "alias": requested_alias,
+            "match": "none",
+        }
+
+    # If the requested filament is itself among the compat candidates, keep it.
+    for c in candidates:
+        if c["name"] == requested_filament_name:
+            return {
+                "setting_id": c["setting_id"],
+                "name": c["name"],
+                "alias": _logical_filament_name(c["name"]),
+                "match": "unchanged",
+            }
+
+    scored = [
+        (
+            _score_filament_for_machine(
+                c["resolved"],
+                requested_alias=requested_alias,
+                requested_type=requested_type,
+                prefered_names=prefered_names,
+            ),
+            c,
+        )
+        for c in candidates
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    best_score, best = scored[0]
+    cand_name = best["name"]
+    cand_alias = _logical_filament_name(cand_name)
+
+    if requested_alias and cand_alias == requested_alias:
+        match = "alias"
+    elif cand_name in prefered_names:
+        match = "default"
+    elif requested_type and _filament_type_of(best["resolved"]) == requested_type:
+        match = "type"
+    else:
+        match = "first_compat"
+
+    return {
+        "setting_id": best["setting_id"],
+        "name": cand_name,
+        "alias": cand_alias,
+        "match": match,
+    }
+
+
+def _score_process_for_machine(
+    candidate_resolved: dict[str, Any],
+    *,
+    requested_alias: str,
+    requested_layer_height: float,
+    prefered_name: str,
+) -> int:
+    """Score a candidate process profile.
+
+    Mirrors ``PreferedPrintProfileMatch::operator()`` in
+    ``vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:4388-4411``:
+      - Same alias wins outright.
+      - +1 if name == ``default_print_profile``.
+      - +1 visibility bonus.
+      - ×10 multiplier when ``layer_height`` is within 0.0005 mm.
+    """
+    cand_name = str(candidate_resolved.get("name", ""))
+    if requested_alias and _logical_filament_name(cand_name) == requested_alias:
+        return 2**31 - 1
+
+    score = 1
+    if cand_name == prefered_name:
+        score += 1
+    score += 1  # visibility bonus
+    cand_layer = _layer_height_of(candidate_resolved)
+    if (
+        requested_layer_height > 0
+        and abs(cand_layer - requested_layer_height) < 0.0005
+    ):
+        score *= 10
+    return score
+
+
+def resolve_process_for_machine(
+    machine_slug: str,
+    requested: str,
+) -> dict[str, Any]:
+    """Return the GUI-equivalent replacement process profile.
+
+    ``requested`` accepts either a setting_id (e.g. ``"GP005"``) or a
+    display name (e.g. ``"0.20mm Standard @BBL P2S"``) — the 3MF carries
+    display names so the gateway forwards those without re-resolving.
+    """
+    machine_names = _machine_names_for_slug(machine_slug)
+    if not machine_names:
+        raise ProfileNotFoundError(f"Machine '{machine_slug}' not found")
+
+    metadata = get_machine_model_metadata(machine_slug)
+    prefered_name = str(metadata.get("default_print_profile") or "")
+
+    requested_resolved: dict[str, Any] | None = None
+    requested_key: str | None = None
+    if requested:
+        requested_key = _select_profile_key_by_name(requested, category="process")
+        if not requested_key:
+            try:
+                _, requested_resolved = _resolve_by_slug("process", requested)
+                if requested_resolved:
+                    requested_key = _select_profile_key_by_name(
+                        requested_resolved.get("name", ""), category="process",
+                    )
+            except ProfileNotFoundError:
+                pass
+        if requested_key and requested_resolved is None:
+            try:
+                requested_resolved = resolve_profile_by_name(requested_key)
+            except ProfileNotFoundError:
+                requested_resolved = None
+
+    requested_name = (
+        (requested_resolved or {}).get("name")
+        or (_display_name(requested_key) if requested_key else "")
+        or requested
+    )
+    requested_alias = _logical_filament_name(requested_name)
+    requested_layer_height = _layer_height_of(requested_resolved or {})
+
+    candidates = _machine_compat_candidates(machine_names, category="process")
+    if not candidates:
+        return {
+            "setting_id": "",
+            "name": "",
+            "alias": requested_alias,
+            "match": "none",
+        }
+
+    for c in candidates:
+        if c["name"] == requested_name:
+            return {
+                "setting_id": c["setting_id"],
+                "name": c["name"],
+                "alias": _logical_filament_name(c["name"]),
+                "match": "unchanged",
+            }
+
+    scored = [
+        (
+            _score_process_for_machine(
+                c["resolved"],
+                requested_alias=requested_alias,
+                requested_layer_height=requested_layer_height,
+                prefered_name=prefered_name,
+            ),
+            c,
+        )
+        for c in candidates
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    best_score, best = scored[0]
+    cand_name = best["name"]
+    cand_alias = _logical_filament_name(cand_name)
+
+    if requested_alias and cand_alias == requested_alias:
+        match = "alias"
+    elif cand_name == prefered_name:
+        match = "default"
+    elif requested_layer_height > 0 and abs(
+        _layer_height_of(best["resolved"]) - requested_layer_height
+    ) < 0.0005:
+        match = "layer_height"
+    else:
+        match = "first_compat"
+
+    return {
+        "setting_id": best["setting_id"],
+        "name": cand_name,
+        "alias": cand_alias,
+        "match": match,
+    }
+
+
+def resolve_plate_type_for_machine(
+    machine_slug: str,
+    requested_plate_type: str,
+    *,
+    plate_type_api_to_orca: dict[str, str],
+) -> dict[str, Any]:
+    """Return the GUI-equivalent replacement plate type.
+
+    ``requested_plate_type`` is the API value (snake_case, e.g.
+    ``"supertack_plate"``); the result is also an API value. Mirrors
+    ``PartPlateList::check_all_plate_local_bed_type`` in
+    ``vendor/OrcaSlicer/src/slic3r/GUI/PartPlate.cpp:4524``: when the
+    machine doesn't support the requested type, fall back to the
+    machine's ``default_bed_type`` (no clever same-family matching).
+    """
+    metadata = get_machine_model_metadata(machine_slug)
+    not_support = set(metadata.get("not_support_bed_types") or [])
+    default_label = str(metadata.get("default_bed_type") or "")
+
+    orca_to_api = {v: k for k, v in plate_type_api_to_orca.items()}
+    requested_label = plate_type_api_to_orca.get(requested_plate_type, "")
+    requested_supported = bool(requested_label) and requested_label not in not_support
+
+    if requested_supported:
+        return {
+            "resolved": requested_plate_type,
+            "match": "unchanged",
+        }
+
+    if default_label and default_label not in not_support:
+        return {
+            "resolved": orca_to_api.get(default_label, ""),
+            "match": "default",
+        }
+
+    return {
+        "resolved": "",
+        "match": "none",
+    }
+
+
 def get_profile_by_id_or_name(category: str, slug_or_name: str) -> dict[str, Any]:
     """Resolve a profile by setting_id, falling back to display name.
 
