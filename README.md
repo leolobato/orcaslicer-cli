@@ -158,6 +158,13 @@ Environment variables (set in `docker-compose.yml`):
 | `CACHE_MAX_FILES` | `200` | Token cache entry-count cap |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
+## Known Caveats
+
+These don't affect output correctness in any case observed so far, but they're worth knowing:
+
+- **Multi-filament start-XY can pick the opposite endpoint of an axis.** When the GUI begins a perimeter at one end of the model's bounding box on a given axis, our slice may begin at the other end. Time, weight, layer count, and toolpath geometry still match within the parity tolerances; the start-point pick is a libslic3r ordering heuristic and not stable across config equivalences.
+- **~0.6% structural diff on the fidelity baseline.** Fixture 01 produces 157 internal-solid-infill regions in our output vs the GUI's 137 — likely a `FullPrintConfig::defaults()` vs `PresetBundle::full_config()` discrepancy upstream of slicing. Cosmetic, and currently within the parity tolerance.
+
 ## Related Projects
 
 OrcaSlicer CLI is the **headless slicing engine and profile catalog** in a suite of self-hosted projects that together replace the Bambu Handy app for printers in **Developer Mode** — keeping everything on your LAN, with no Bambu cloud.
