@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -234,6 +235,40 @@ void resize_flush_volumes_for_topology(
     matrix_opt->values = std::move(new_matrix);
 }
 
+// Build a lookup from project-local filament preset names → the base
+// system preset they inherit from. OrcaSlicer marks a per-slot override
+// of a system filament with an arbitrary user-typed suffixed name (e.g.
+// `Bambu PLA Basic @BBL A1M(my-project.3mf)` — the suffix can be
+// anything, no structural pattern), and embeds the project-local
+// preset's actual definition in `Metadata/filament_settings_*.config`
+// inside the .3mf. The embedded preset's `inherits` field is the
+// reliable signal for "this is a variant of base preset X".
+//
+// `Model::read_from_file` with `LoadConfig` populates `project_presets`
+// from those embedded configs (see
+// `vendor/OrcaSlicer/src/libslic3r/Format/bbs_3mf.cpp:1862-1874`'s
+// `_extract_project_embedded_presets_from_archive` calls). We use that
+// to resolve project-local names to their base before the per-slot
+// name guard fires — without this, our exact-string match treats the
+// suffixed name as a different filament and discards a perfectly valid
+// override (the GUI itself has no name guard at all and applies these
+// unconditionally; see PresetBundle.cpp:3641-3712).
+std::unordered_map<std::string, std::string>
+build_project_filament_inherits_map(
+    const std::vector<Slic3r::Preset*>& project_presets) {
+    std::unordered_map<std::string, std::string> out;
+    for (const auto* preset : project_presets) {
+        if (preset == nullptr) continue;
+        if (preset->type != Slic3r::Preset::TYPE_FILAMENT) continue;
+        const std::string& name = preset->name;
+        const std::string& inherits = preset->inherits();
+        if (!name.empty() && !inherits.empty()) {
+            out[name] = inherits;
+        }
+    }
+    return out;
+}
+
 // Center the combined instance bounding box on the build plate. Mirrors
 // `Model::center_instances_around_point`, which is how the GUI's "fit to
 // plate" path reseats objects (it shifts each instance's offset, NOT the
@@ -324,6 +359,15 @@ int run_slice_mode(const SliceRequest& req) {
     // erasing here keeps the data structure honest if the fingerprint
     // ever expands.
     threemf_config.erase("extruder_ams_count");
+
+    // Map from project-local filament preset names to their inherited
+    // base preset. Populated from the embedded `Metadata/filament_settings_*.config`
+    // files inside the .3mf (loaded into `project_presets` by
+    // `Model::read_from_file`). Used by the per-slot name guard below
+    // to recognise that `Foo @A1M(arbitrary user text)` is a variant of
+    // base preset `Foo @A1M` and the per-slot override should still apply.
+    const auto project_filament_inherits =
+        build_project_filament_inherits_map(project_presets);
 
     emit_progress("loading_profiles", 10);
 
@@ -481,10 +525,21 @@ int run_slice_mode(const SliceRequest& req) {
     //
     // Per-filament slots (indexes 1..N) are applied with a name guard:
     // only when the request's `filament_settings_id[i]` (a display name)
-    // matches the 3MF's `filament_settings_id[i]`. When the user swapped
-    // filaments, the customizations referenced the OLD filament's
-    // defaults and become meaningless on the new one — discard and report
-    // back so the client can surface what was dropped.
+    // matches the 3MF's `filament_settings_id[i]` — modulo project-local
+    // preset variants, which carry an arbitrary user-typed suffix on
+    // their name (e.g. `Foo @A1M(my notes)`) but inherit from a system
+    // base preset. We resolve those through `project_filament_inherits`
+    // before the comparison so the override doesn't get silently dropped.
+    // The GUI itself has no name guard at all and applies these
+    // unconditionally (see `PresetBundle::load_3mf_*` at
+    // vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:3641-3712); ours
+    // is a more conservative report-on-divergence behaviour for genuine
+    // filament swaps.
+    //
+    // When the user genuinely swapped filaments (different base preset),
+    // the customizations referenced the OLD filament's defaults and
+    // become meaningless on the new one — discard and report back so
+    // the client can surface what was dropped.
     std::vector<std::string> threemf_filament_names;
     if (const auto* opt = threemf_config.option<Slic3r::ConfigOptionStrings>(
             "filament_settings_id", false);
@@ -520,16 +575,27 @@ int run_slice_mode(const SliceRequest& req) {
             entry["slot"] = i;
             entry["original_filament"] = original;
             entry["selected_filament"] = selected;
+            // Resolve project-local preset names (e.g. `Foo @A1M(my notes)`)
+            // to their base via the embedded preset's `inherits` field
+            // before the name guard fires. Falls through to the original
+            // name when the 3MF didn't embed a project-local preset for
+            // this slot (i.e. it just references a system preset directly).
+            std::string original_resolved = original;
+            if (auto it = project_filament_inherits.find(original);
+                it != project_filament_inherits.end()) {
+                original_resolved = it->second;
+            }
+            entry["original_filament_resolved"] = original_resolved;
             if (key_list.empty()) {
                 entry["status"] = "no_customizations";
                 entry["transferred"] = nlohmann::json::array();
                 entry["discarded"] = nlohmann::json::array();
-            } else if (!original.empty() && original == selected) {
-                // Phase 1 limitation: overlays the keys flat onto
-                // final_cfg rather than into the per-slot vector index.
-                // For the single-customized-slot case this matches what
-                // PresetBundle does for filament_cfgs[0]; multi-slot
-                // per-key overlay is a Phase 4 follow-up.
+            } else if (!original.empty() && original_resolved == selected) {
+                // The per-slot override applies as a full-vector copy of
+                // the listed keys from threemf_config onto final_cfg —
+                // each per-filament key is stored as a parallel vector
+                // indexed by slot, so `dst_opt->set(src_opt)` lands the
+                // values at their correct indices automatically.
                 const auto transferred = apply_overrides_for_slot(
                     final_cfg, threemf_config, key_list,
                     /*exclude_filament_keys=*/false,

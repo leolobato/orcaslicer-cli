@@ -52,32 +52,45 @@ Block printer-extruder topology keys from 3MF printer-slot overrides
 
 ---
 
-### Gap 2 (medium-high): per-filament-slot overrides go flat, not indexed
+### Gap 2 (revised): per-slot name guard rejects project-local preset variants
 
-`slice_mode.cpp` lines 353-360 (the comment is the existing TODO):
+> **Original framing was wrong.** The plan claimed `apply_overrides_for_slot` writes
+> overrides flat at index 0 instead of at the slot index. Reading the
+> code again (and verifying with fixture 07): `dst_opt->set(src_opt)`
+> for vector keys copies the full source vector — values land at the
+> right indices automatically. **There is no flat-vs-indexed bug.**
+>
+> The actual bug surfaced by fixture 07: when the user authors a per-
+> slot override in the GUI on two slots that share a base preset,
+> OrcaSlicer breaks the sister-slot sync by saving the modified slot
+> as a project-local preset variant of the base. The variant's name
+> is the base preset name + an arbitrary user-typed suffix (e.g.
+> `Bambu PLA Basic @BBL A1M(my notes)`). Our exact-string name guard
+> at `slice_mode.cpp:561` then treats the suffixed name as a different
+> filament and discards the override entirely (`status: filament_changed`,
+> `discarded: ["nozzle_temperature"]`), even though it inherits from
+> the same system preset the request asked for.
+>
+> The GUI itself has no name guard — `PresetBundle::load_3mf_*`
+> (`vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:3641-3712`)
+> applies per-slot values unconditionally via
+> `set_at(other_opt, 0, i)`. Our guard is over-defensive.
 
-```cpp
-// Phase 1 limitation: overlays the keys flat onto final_cfg rather than
-// into the per-slot vector index. For the single-customized-slot case
-// this matches what PresetBundle does for filament_cfgs[0]; multi-slot
-// per-key overlay is a Phase 4 follow-up.
-```
-
-When the GUI exports a 3MF with per-filament customizations (e.g. user bumped `nozzle_temperature` for slot 2 only), the binary's `apply_overrides_for_slot` writes the key flat onto `final_cfg`. After `construct_full_config` already built the per-filament vector at length N, our flat write puts the override at index 0 (or wherever `set_at` lands), not at the slot index. Slot 2 sees default temperature; slot 0 sees slot 2's override.
-
-**Why this is risk-class 2 (silent wrong output, not crash):** for single-filament slices it's fine (slot 0 is the only slot). Multi-filament slices with per-slot user edits (rare but real) silently produce gcode with the wrong temperatures/speeds.
+**Why this is risk-class 2 (silent wrong output, not crash):** any
+multi-filament 3MF that uses the GUI's natural "modify settings for
+one slot" workflow ends up with at least one project-local preset
+variant. We discard those overrides; gcode emits with default
+temperatures/flow ratios where the user wanted overrides.
 
 **Fix:**
 
-- [ ] **Pivot the apply target:** instead of `apply_overrides_for_slot(final_cfg, ...)`, write a `apply_overrides_for_filament_slot(final_cfg, slot_index, threemf_config, key_list)` that, for each key in `key_list`, reads `threemf_config[key]` (a vector at slot N's value, since the 3MF stores per-filament keys as parallel vectors) and `set_at(slot_index)` on `final_cfg[key]`.
+- [x] **Resolve project-local preset names through their `inherits` field.** `Model::read_from_file` with `LoadConfig` populates `project_presets` from the embedded `Metadata/filament_settings_*.config` files inside the .3mf (via `_extract_project_embedded_presets_from_archive` at `bbs_3mf.cpp:1862-1874`). Build a name → inherits map from that vector and resolve `original` through the map before comparing with `selected` in the per-slot guard.
 
-- [ ] **Reference implementation:** `vendor/OrcaSlicer/src/libslic3r/Preset.cpp:s_Preset_filament_options` defines the canonical per-filament keys. The GUI applies these per-slot inside `PresetBundle::load_config_file_config` and the per-key merge inside `construct_full_config`. We mirror the same set of keys.
+- [x] **Test fixture:** `_fixture/07/reference-multi-filament-with-slot1-customization.3mf` (two bulbasaurs, slot 1 with `nozzle_temperature=235` override). GUI ground truth: `nozzle_temperature = 220,235` in output gcode CONFIG_BLOCK.
 
-- [ ] **Test:** the existing `_fixture/03` (`reference-benchy-with-filament-customizations.3mf`) was added for exactly this — currently the integration test asserts on a degraded output. Update the fixture's expected output to match GUI ground truth and assert per-slot keys land at the right index.
-
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
-Apply per-filament 3MF customizations at correct slot index
+Resolve project-local filament preset names via inherits map
 ```
 
 ---
