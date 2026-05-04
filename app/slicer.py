@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .inspect import parse_inspect_data
 from .profiles import (
+    ProfileNotFoundError,
     get_machine_model_id,
     get_profile,
     get_profile_by_id_or_name,
@@ -182,3 +184,52 @@ async def materialize_profiles_for_binary(
         "filament_names": filament_names,
         "printer_model_id": get_machine_model_id(machine_id),
     }
+
+
+def validate_3mf_preset_references(file_bytes: bytes) -> list[dict[str, str]]:
+    """Return 3MF-referenced presets that don't resolve in the catalog.
+
+    The GUI runs ``PresetBundle::validate_presets``
+    (``vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:1260``) on every
+    3MF load, surfacing a "preset not found" error when the file
+    references a printer/process/filament name we don't have. Our binary
+    skips that check because the Python service pre-resolves
+    ``inherits`` before writing the temp JSONs — but the *3MF's* own
+    ``printer_settings_id`` / ``print_settings_id`` /
+    ``filament_settings_id`` strings can still name a preset the
+    catalog has since renamed or removed. When that happens the binary
+    silently slices with the resolved fallback (the request's
+    ``machine_id`` / ``process_id`` / ``filament_settings_ids``) and
+    the user never learns the file's authored intent didn't survive.
+
+    Each entry: ``{"category", "name"}``. Empty list = all references
+    resolve. Best-effort only — never raises (a malformed 3MF returns
+    no findings rather than blocking the slice).
+    """
+    findings: list[dict[str, str]] = []
+    try:
+        info = parse_inspect_data(file_bytes)
+    except Exception:
+        # Inspector is best-effort itself; stay quiet.
+        return findings
+
+    # Display-name fields from project_settings.config.
+    candidates: list[tuple[str, str]] = []
+    if printer := str(info.get("printer_settings_id") or "").strip():
+        candidates.append(("machine", printer))
+    if process := str(info.get("print_settings_id") or "").strip():
+        candidates.append(("process", process))
+    seen_filaments: set[str] = set()
+    for f in info.get("filaments") or []:
+        name = str(f.get("settings_id") or "").strip()
+        if name and name not in seen_filaments:
+            seen_filaments.add(name)
+            candidates.append(("filament", name))
+
+    for category, name in candidates:
+        try:
+            get_profile_by_id_or_name(category, name)
+        except ProfileNotFoundError:
+            findings.append({"category": category, "name": name})
+
+    return findings

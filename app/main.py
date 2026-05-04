@@ -102,6 +102,7 @@ from .slicer import (
     VALID_BRIM_TYPES,
     VALID_INFILL_PATTERNS,
     VALID_SUPPORT_TYPES,
+    validate_3mf_preset_references,
     IncompatibleFilamentError,
     ModelTooBigError,
     SlicingError,
@@ -1117,6 +1118,13 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             content={"code": "invalid_filament_map", "message": fm_err},
         )
 
+    unknown_presets = validate_3mf_preset_references(input_path.read_bytes())
+    if unknown_presets:
+        logger.warning(
+            "slice/v2: 3MF references %d preset(s) not in catalog: %s",
+            len(unknown_presets), unknown_presets,
+        )
+
     try:
         paths = await materialize_profiles_for_binary(
             machine_id=body.machine_id,
@@ -1162,12 +1170,16 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
 
     out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
 
+    settings_transfer = dict(result["settings_transfer"] or {})
+    if unknown_presets:
+        settings_transfer["unknown_presets"] = unknown_presets
+
     return {
         "input_token": body.input_token,
         "output_token": out_token,
         "output_sha256": out_sha,
         "estimate": result["estimate"],
-        "settings_transfer": result["settings_transfer"],
+        "settings_transfer": settings_transfer,
         "thumbnail_urls": [],
         "download_url": f"/3mf/{out_token}",
     }
@@ -1190,6 +1202,13 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
         return JSONResponse(
             status_code=400,
             content={"code": "invalid_filament_map", "message": fm_err},
+        )
+
+    unknown_presets = validate_3mf_preset_references(input_path.read_bytes())
+    if unknown_presets:
+        logger.warning(
+            "slice-stream/v2: 3MF references %d preset(s) not in catalog: %s",
+            len(unknown_presets), unknown_presets,
         )
 
     try:
@@ -1226,12 +1245,15 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
         }):
             if ev["type"] == "result":
                 out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
+                settings_transfer = dict(ev["payload"]["settings_transfer"] or {})
+                if unknown_presets:
+                    settings_transfer["unknown_presets"] = unknown_presets
                 ev["payload"] = {
                     "input_token": body.input_token,
                     "output_token": out_token,
                     "output_sha256": out_sha,
                     "estimate": ev["payload"]["estimate"],
-                    "settings_transfer": ev["payload"]["settings_transfer"],
+                    "settings_transfer": settings_transfer,
                     "download_url": f"/3mf/{out_token}",
                 }
             yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
