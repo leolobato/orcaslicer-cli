@@ -59,37 +59,39 @@ GUI uses.
 
 ### Why a custom binary instead of OrcaSlicer's built-in CLI
 
-OrcaSlicer ships a `--slice` CLI mode on its main GUI binary. We deliberately
-don't shell out to it. The reasons, roughly in order of importance:
+**The headline reason is GUI parity.** This API exists to slice files exactly
+the way the OrcaSlicer GUI would, so the user gets identical gcode whether
+they hit "Slice" in the desktop app or send the same project here. OrcaSlicer
+ships a `--slice` CLI mode on its main GUI binary, but it is *not* the same
+code path as the GUI — it's a side-mode that skips parts of the GUI's
+load-time setup, applies its own normalization, and surfaces results
+differently. An earlier version of this project shelled out to that CLI, and
+every category of bug we fixed in production turned out to be the same
+shape: *the CLI accepted/produced something the GUI wouldn't, or rejected
+something the GUI handled, and we had to reimplement that piece in Python or
+work around it.* Examples of code we wrote then deleted when we cut over to
+the headless binary:
 
-- **GUI dependencies.** The Orca binary links wxWidgets, OpenGL, GLEW, GLFW,
-  OpenCSG, and a stack of other UI libraries even when invoked headlessly.
-  In a server image that's ~150 MB+ of dead weight plus a runtime requirement
-  for an X-server-shaped environment. Our binary disables `SLIC3R_GUI` at
-  configure time and links only `libslic3r` and its actual dependencies —
-  ~60 MB and zero display assumptions.
-- **No streaming protocol.** The Orca CLI runs to completion, writes output
-  files, and exits. There's no way to read incremental progress while
-  slicing. Our binary speaks a line-delimited JSON protocol on stdout
-  (`{"phase": "...", "percent": N}` per progress event), which the FastAPI
-  layer turns into SSE for `/slice-stream/v2`.
-- **Output channel coupling.** Orca's CLI scatters `result.json`, log files,
-  and the sliced 3MF into a working directory we'd have to scrape and
-  reconcile per call. Our binary returns a structured JSON response on
-  stdout; failure modes are typed `code` strings (`invalid_3mf`,
-  `slice_failed`, `binary_crashed`, …) instead of regex-matched log lines.
-- **Behavioural guarantees.** `--slice` is a side-mode of the GUI app and
-  not a stable surface — flags, output layout, and exit codes have shifted
-  release-to-release. We pin to `vendor/OrcaSlicer` at a specific commit
-  and call into `libslic3r` directly through the same entry points
-  (`PresetBundle::construct_full_config`, `Print::process`, `bbs_3mf`
-  readers/writers) that the GUI uses, so when the GUI's behaviour changes
-  for a config we get the same change at the same source — there's no
-  separately-evolving CLI to drift from.
-- **`use-set` mode.** We need a fast read path that just parses a 3MF and
-  reports its plates/filaments/thumbnails without slicing. Orca's CLI has
-  no equivalent; we'd have to slice-and-discard or open the GUI. Our
-  binary's `use-set` command does this in milliseconds.
+- A `_sanitize_3mf` pass that clamped values the CLI rejected but the GUI
+  silently corrected.
+- A `_normalize_filament_vector_shapes` shim that wrapped scalar
+  `filament_notes` into a list because the CLI's `coStrings` loader was
+  strict in ways the GUI's `Preset` chain was not.
+- A whole `app/normalize.py` (~140 lines) replicating `Preset::normalize`
+  for per-filament keys the CLI didn't reshape on its own.
+- `_write_bbl_machine_full_shims` to materialize files the AppImage's CLI
+  reads at slice time but doesn't ship.
+- A regex-driven failure parser that scraped boost-log lines plus
+  `result.json` because the CLI's failure surfacing didn't match what the
+  GUI tells the user.
+
+Every one of those was a divergence between two consumers of `libslic3r`
+(the GUI and the CLI), and every one was a maintenance liability — fixing
+the next slicer release meant porting our workaround forward too. The
+headless binary eliminates the divergence by calling the same `libslic3r`
+entry points the GUI uses (`PresetBundle::construct_full_config`,
+`Print::process`, `bbs_3mf` readers/writers) so when GUI behaviour changes
+for a given config, we inherit the change at the source.
 
 The cost is a ~12-minute first build of `libslic3r` and its transitive deps
 when there's no Docker layer cache. The Dockerfile uses BuildKit cache
