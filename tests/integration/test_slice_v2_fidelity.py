@@ -108,6 +108,66 @@ def _first_xy(threemf_bytes: bytes) -> tuple[float, float]:
     raise AssertionError("no G1 X/Y after first M624")
 
 
+def _read_gcode_config_block(threemf_bytes: bytes) -> dict[str, str]:
+    """Extract CONFIG_BLOCK key=value lines from the sliced gcode.
+
+    Each `; key = value` line in the CONFIG_BLOCK becomes one entry.
+    Multi-line script keys (e.g. `change_filament_gcode`) are dropped
+    because their values aren't meaningful for equality checks.
+    """
+    with zipfile.ZipFile(io.BytesIO(threemf_bytes)) as z:
+        gcode = z.read("Metadata/plate_1.gcode").decode(errors="replace")
+    out: dict[str, str] = {}
+    in_block = False
+    for raw in gcode.splitlines():
+        if raw.startswith("; CONFIG_BLOCK_START"):
+            in_block = True
+            continue
+        if raw.startswith("; CONFIG_BLOCK_END"):
+            break
+        if not in_block:
+            continue
+        m = re.match(r"^;\s+([\w]+)\s*=\s*(.*)$", raw)
+        if m:
+            key, val = m.group(1), m.group(2)
+            # Skip multi-line script-type keys; their first-line value
+            # is enough to detect presence but not useful for equality.
+            if "\\n" in val and len(val) > 200:
+                continue
+            out[key] = val
+    return out
+
+
+def _assert_gcode_config(
+    threemf_bytes: bytes,
+    expected: dict[str, str],
+    *,
+    fixture_label: str,
+) -> None:
+    """Assert each `key = value` pair appears verbatim in the CONFIG_BLOCK.
+
+    Use for locking in fixes whose signal is a specific CONFIG_BLOCK
+    field — e.g. `nozzle_temperature = 220,235` for Gap 2's per-slot
+    override apply, or `filament_ids = GFA00;GFA00` for the
+    `Preset.filament_id` stamping fix. Coarse-tolerance metadata
+    asserts won't catch regressions on these fields because they
+    don't move time/weight enough to trip the 2% threshold.
+    """
+    block = _read_gcode_config_block(threemf_bytes)
+    missing: list[str] = []
+    wrong: list[str] = []
+    for key, want in expected.items():
+        if key not in block:
+            missing.append(key)
+        elif block[key] != want:
+            wrong.append(f"{key}: got {block[key]!r}, want {want!r}")
+    assert not missing and not wrong, (
+        f"[{fixture_label}] gcode CONFIG_BLOCK mismatch:\n"
+        + ("missing keys: " + ", ".join(missing) + "\n" if missing else "")
+        + ("\n".join(wrong) if wrong else "")
+    )
+
+
 def _slice_and_compare(
     input_path: Path,
     gui_path: Path,
@@ -121,6 +181,8 @@ def _slice_and_compare(
     first_layer_time_tol: float = 0.01,
     xy_tol_mm: float = 0.01,
     require_xy_match: bool = True,
+    plate_type: str | None = None,
+    expected_config_block: dict[str, str] | None = None,
 ) -> None:
     """Slice ``input_path`` through ``/slice/v2`` and compare to GUI ground truth.
 
@@ -133,16 +195,16 @@ def _slice_and_compare(
     upload = _post_multipart_file(f"{API}/3mf", input_path)
     token = upload["token"]
 
-    slice_resp = _post_json(
-        f"{API}/slice/v2",
-        {
-            "input_token": token,
-            "machine_id": machine_id,
-            "process_id": process_id,
-            "filament_settings_ids": filament_settings_ids,
-            "recenter": recenter,
-        },
-    )
+    slice_body: dict = {
+        "input_token": token,
+        "machine_id": machine_id,
+        "process_id": process_id,
+        "filament_settings_ids": filament_settings_ids,
+        "recenter": recenter,
+    }
+    if plate_type is not None:
+        slice_body["plate_type"] = plate_type
+    slice_resp = _post_json(f"{API}/slice/v2", slice_body)
     out_token = slice_resp["output_token"]
     ours = _get_bytes(f"{API}/3mf/{out_token}")
     gui = gui_path.read_bytes()
@@ -184,15 +246,33 @@ def _slice_and_compare(
             f"start Y {ours_xy[1]} vs {gui_xy[1]}"
         )
 
+    if expected_config_block:
+        _assert_gcode_config(
+            ours, expected_config_block, fixture_label=input_path.name,
+        )
+
 
 def test_fixture_01_matches_gui_within_tolerance() -> None:
-    """Single-filament A1 mini benchy with process+printer customizations."""
+    """Single-filament A1 mini benchy with process+printer customizations.
+
+    CONFIG_BLOCK asserts lock in:
+    - `filament_ids = GFA00` (Preset.filament_id stamping fix, d838b8a).
+    - `enable_prime_tower = 0` (libslic3r normalize_fdm_2 flips on
+      single-filament-actually-used; depends on `filament_map = [1]` not
+      [0, 2] AKA the AMS-tray-semantic fix landed earlier).
+    - `curr_bed_type = Textured PEI Plate` (project carry-over).
+    """
     _slice_and_compare(
         FIXTURE_DIR / "01" / "reference-benchy-orca-no-filament-custom-settings.3mf",
         FIXTURE_DIR / "01" / "gui-benchy-orca-no-filament-custom-settings_sliced_gui.gcode.3mf.3mf",
         machine_id="GM020",
         process_id="GP000",
         filament_settings_ids=["GFSA00_02"],
+        expected_config_block={
+            "filament_ids": "GFA00",
+            "enable_prime_tower": "0",
+            "curr_bed_type": "Textured PEI Plate",
+        },
     )
 
 
@@ -206,6 +286,10 @@ def test_fixture_03_matches_gui_within_tolerance() -> None:
         machine_id="GM020",
         process_id="GP000",
         filament_settings_ids=["GFSA00_02"],
+        expected_config_block={
+            "filament_ids": "GFA00",
+            "enable_prime_tower": "0",
+        },
     )
 
 
@@ -218,6 +302,11 @@ def test_fixture_05_matches_gui_within_tolerance() -> None:
         machine_id="GM020",
         process_id="GP000",
         filament_settings_ids=["GFSA00_02"],
+        expected_config_block={
+            "filament_ids": "GFA00",
+            "enable_prime_tower": "0",
+            "curr_bed_type": "Cool Plate",
+        },
     )
 
 
@@ -300,4 +389,53 @@ def test_fixture_06_matches_gui_within_tolerance() -> None:
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
         ],
+    )
+
+
+def test_fixture_07_matches_gui_within_tolerance() -> None:
+    """Multi-filament A1 mini with per-filament-slot override on slot 1,
+    sequential printing (`print_sequence = by object`), and two
+    bulbasaur copies each pinned to a different filament via per-object
+    `extruder` metadata.
+
+    Locks in the recent fixes:
+    - **Gap 2** (per-slot name guard via `inherits` map, 944ccde):
+      slot 1 carries `nozzle_temperature` override on a project-local
+      preset variant whose name has a user-typed suffix. Pre-fix our
+      code discarded the override (`status: filament_changed`) and
+      emitted `nozzle_temperature = 220,220`. Post-fix it should match
+      GUI's `220,235`.
+    - **filament_id stamping** (Tier 1 #3, d838b8a): `filament_ids =
+      GFA00;GFA00` not empty. Bambu printers / Cloud / Handy read it
+      at print start.
+    - **`print_sequence = by object`** carry-through (Tier 2 #6):
+      `different_settings_to_system[0]` lists `print_sequence` as a
+      process-side override. Verifies the by-object branch round-trips.
+    - **plate_type plumbing** (13e6ff9): explicit `textured_pei_plate`
+      on the request lands as `curr_bed_type = Textured PEI Plate`.
+    """
+    _slice_and_compare(
+        FIXTURE_DIR / "07" / "reference-multi-filament-with-slot1-customization.3mf",
+        FIXTURE_DIR / "07" / "gui-reference-multi-filament-with-slot1-customization_sliced.3mf",
+        machine_id="GM020",
+        process_id="GP109",  # 0.16mm High Quality @BBL A1M
+        filament_settings_ids=["GFSA00_02", "GFSA00_02"],
+        plate_type="textured_pei_plate",
+        # Two bulbasaurs, slightly different starts; first XY isn't a
+        # robust GUI-parity signal here (object-traversal order can
+        # flip without affecting print quality).
+        require_xy_match=False,
+        # by_object can produce small per-object planning differences
+        # that nudge the metric totals more than by_layer; loosen
+        # tolerances slightly while still catching real regressions.
+        time_tol=0.03,
+        weight_tol=0.02,
+        first_layer_time_tol=0.05,
+        expected_config_block={
+            "nozzle_temperature": "220,235",
+            "filament_ids": "GFA00;GFA00",
+            "enable_prime_tower": "0",
+            "print_sequence": "by object",
+            "curr_bed_type": "Textured PEI Plate",
+        },
     )
