@@ -1,5 +1,7 @@
 # Phase 6: GUI-parity gaps in `slice_mode.cpp` — Implementation Plan
 
+> **Status (as of 2026-05-04 evening):** ✅ **All six gaps addressed.** Gap 2 was reframed mid-execution (the original "flat-vs-indexed" diagnosis was wrong; the actual bug was the per-slot name guard rejecting project-local preset variants). Three additional issues outside the original six were also fixed in the same session — see "Session Log" at the bottom. Pending: container recreate on `10.0.1.9` to put the combined `2.3.2-30` image live; end-to-end verification against `_fixture/07`.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Close the remaining points in `cpp/src/slice_mode.cpp` where our headless slice path diverges from OrcaSlicer's GUI. We landed two big GUI-faithful fixes today — `s_project_options` whitelist on `threemf_config` (commit just before this plan was written), and the cross-machine filament/process/plate-type resolver — but a careful audit of the `slice_mode.cpp` flow against `vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp` flagged six remaining gaps. Each is a place where the GUI does *something* the binary doesn't, and that "something" can either crash the binary in production or silently produce wrong output for a 3MF the GUI handles cleanly.
@@ -17,13 +19,23 @@
 
 **Out of scope:**
 - Reworking the slice flow into a single `full_fff_config` call. The current "build the configs ourselves, call `construct_full_config` directly" approach is intentional (we don't have a PresetBundle).
-- Rewriting `apply_overrides_for_slot` into a proper per-slot indexed apply (gap 3 — that's a bigger change than this plan covers).
+
+## Status summary
+
+| Gap | Original diagnosis | Status | Commit |
+|---|---|---|---|
+| 1 | Printer-slot override re-applies extruder topology (SIGSEGV class) | ✅ Fixed | `65b0fdd` |
+| 2 | ~~Per-filament-slot overrides go flat, not indexed~~ → reframed: name guard rejects project-local preset variants | ✅ Fixed (reframed) | `944ccde` |
+| 3 | `flush_volumes_matrix` dimension drift on cross-printer slices | ✅ Fixed | `51f8fde` |
+| 4 | Filament defaults filter uses `Preset::filament_options()` only | ✅ Fixed | `8660119` |
+| 5 | No `validate_presets` call | ✅ Fixed | `2e9429e` |
+| 6 | `extruder_ams_count` not erased from `threemf_config` | ✅ Fixed | `24a12a0` |
 
 ---
 
 ## Gaps, ordered by risk
 
-### Gap 1 (high): printer-slot override re-applies extruder topology
+### Gap 1 (high): printer-slot override re-applies extruder topology — ✅ FIXED `65b0fdd`
 
 `slice_mode.cpp` lines 377-380:
 
@@ -39,20 +51,20 @@ After `construct_full_config` produced a clean `final_cfg` from the printer + th
 
 **Fix:**
 
-- [ ] **Define a printer-slot blocklist** mirroring the keys that should *only* come from the printer preset, never from a 3MF override. At minimum: `extruder_variant_list`, `printer_extruder_variant`, `printer_extruder_id`, `extruder_type`, `nozzle_volume_type`, `filament_extruder_variant`, `filament_self_index`, `extruder_ams_count`. Live with `s_project_options` near the top of `slice_mode.cpp` so the two whitelists/blocklists are read together.
+- [x] **Define a printer-slot blocklist** mirroring the keys that should *only* come from the printer preset, never from a 3MF override. At minimum: `extruder_variant_list`, `printer_extruder_variant`, `printer_extruder_id`, `extruder_type`, `nozzle_volume_type`, `filament_extruder_variant`, `filament_self_index`, `extruder_ams_count`. Live with `s_project_options` near the top of `slice_mode.cpp` so the two whitelists/blocklists are read together.
 
-- [ ] **Wire the blocklist** into `apply_overrides_for_slot` for the printer-slot call only. Either filter `fp->values.back()` (split on `;`, drop blocklisted keys, re-join) before passing in, or add an `excluded_keys` parameter to `apply_overrides_for_slot`. Latter is cleaner; the function already has the `exclude_filament_keys` shape.
+- [x] **Wire the blocklist** into `apply_overrides_for_slot` for the printer-slot call only. Either filter `fp->values.back()` (split on `;`, drop blocklisted keys, re-join) before passing in, or add an `excluded_keys` parameter to `apply_overrides_for_slot`. Latter is cleaner; the function already has the `exclude_filament_keys` shape. — *Took the cleaner option.*
 
-- [ ] **Test:** capture a real 3MF with `different_settings_to_system[N+1]` containing a printer key, slice against a different machine, confirm no crash and the non-blocklisted printer keys still apply. Fixture for this can be hand-crafted from `_fixture/01` by editing `Metadata/project_settings.config` to add `extruder_variant_list` to the printer slot's diff list.
+- [ ] **Test:** capture a real 3MF with `different_settings_to_system[N+1]` containing a printer key, slice against a different machine, confirm no crash and the non-blocklisted printer keys still apply. Fixture for this can be hand-crafted from `_fixture/01` by editing `Metadata/project_settings.config` to add `extruder_variant_list` to the printer slot's diff list. — *Not added; defense-in-depth fix landed without a dedicated regression fixture. Track-back via `git log -- cpp/src/slice_mode.cpp`.*
 
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
 Block printer-extruder topology keys from 3MF printer-slot overrides
 ```
 
 ---
 
-### Gap 2 (revised): per-slot name guard rejects project-local preset variants
+### Gap 2 (revised): per-slot name guard rejects project-local preset variants — ✅ FIXED `944ccde`
 
 > **Original framing was wrong.** The plan claimed `apply_overrides_for_slot` writes
 > overrides flat at index 0 instead of at the slot index. Reading the
@@ -95,7 +107,7 @@ Resolve project-local filament preset names via inherits map
 
 ---
 
-### Gap 3 (medium): `flush_volumes_matrix` dimension drift on cross-printer slices
+### Gap 3 (medium): `flush_volumes_matrix` dimension drift on cross-printer slices — ✅ FIXED `51f8fde`
 
 The new resolver swaps filament names across printer variants when the user retargets a 3MF (`/profiles/resolve-for-machine`). It does *not* change filament *count*. But the legacy gateway path used to truncate per-filament arrays when count differed; the v2 path lost that guard, and we restored just the project-config filter via `s_project_options` — `flush_volumes_matrix` is one of the keys that *passes through* the filter (it's project-level), so its size still matches the 3MF's authored filament count.
 
@@ -105,20 +117,20 @@ If a future flow ends up slicing with M filaments while the 3MF's `flush_volumes
 
 **Fix:**
 
-- [ ] **Resize in C++** after the `s_project_options` filter and before `construct_full_config`. Compute `target_n = filament_presets.size()`, `nozzle_count = printer_extruder_id length`. Resize `flush_volumes_matrix` to `target_n²·nozzle_count`, `flush_volumes_vector` to `2·target_n`, `flush_multiplier` to `nozzle_count`. Preserve old entries where indices fit; fill new cells with 140 mm³ off-diagonal, 0 on-diagonal (OrcaSlicer defaults — see `_resize_flush_volumes` in commit `155fc34:app/slicer.py:580-620` for the exact formula).
+- [x] **Resize in C++** after the `s_project_options` filter and before `construct_full_config`. Compute `target_n = filament_presets.size()`, `nozzle_count = printer_extruder_id length`. Resize `flush_volumes_matrix` to `target_n²·nozzle_count`, `flush_volumes_vector` to `2·target_n`, `flush_multiplier` to `nozzle_count`. Preserve old entries where indices fit; fill new cells with 140 mm³ off-diagonal, 0 on-diagonal (OrcaSlicer defaults — see `_resize_flush_volumes` in commit `155fc34:app/slicer.py:580-620` for the exact formula). — *Implemented as `resize_flush_volumes_for_topology` in slice_mode.cpp; uses `nozzle_diameter.size()` for nozzle count rather than `printer_extruder_id` since that's what the GUI's `Print::support_material_extruders` also reads (Print.cpp:484).*
 
-- [ ] **GUI reference:** `vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:4316-4354` is the GUI's resize implementation. Mirror its preserve-and-fill logic.
+- [x] **GUI reference:** `vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:4316-4354` is the GUI's resize implementation. Mirror its preserve-and-fill logic.
 
-- [ ] **Test:** integration test with a 4-filament 3MF sliced with 2 filaments — assert no GCode error and a 2×2 matrix in the output.
+- [ ] **Test:** integration test with a 4-filament 3MF sliced with 2 filaments — assert no GCode error and a 2×2 matrix in the output. — *No fixture authored yet; today's flow doesn't change filament count so the resize is defensive. Track if a real cross-printer-with-filament-drop case lands.*
 
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
 Resize flush_volumes_matrix to match active filament count
 ```
 
 ---
 
-### Gap 4 (low-medium): filament defaults filter uses `Preset::filament_options()` only
+### Gap 4 (low-medium): filament defaults filter uses `Preset::filament_options()` only — ✅ FIXED `8660119`
 
 `slice_mode.cpp` lines ~262-275 — we pre-overlay each `filament_cfgs[i]` with defaults for keys in `Preset::filament_options()` to mitigate `construct_full_config`'s nullptr-deref on missing keys. The GUI populates *every* key on each filament Preset via the inheritance chain ending at `filaments.default_preset()`. If a 3MF carries an exotic per-filament key that's not in `Preset::filament_options()`, and `filament_cfgs[0]` has it but `filament_cfgs[1]` doesn't, the per-key merge in `construct_full_config` still nullptr-derefs.
 
@@ -126,18 +138,18 @@ Resize flush_volumes_matrix to match active filament count
 
 **Fix:**
 
-- [ ] **Use the inheritance chain instead of a static filter.** After loading each filament JSON, walk up its `inherits` chain (the JSON Python writes already has this resolved into `from`/`inherits` metadata) and apply parent values for any key not in the leaf. Or simpler: just call `Preset::normalize` on each filament_cfg after loading (which uses `set_num_filaments` to pad each per-filament key from `FullPrintConfig::defaults`). We already call `Preset::normalize(final_cfg)` on the merged config; doing it earlier on each filament_cfg costs almost nothing and matches GUI inheritance semantics.
+- [x] **Use the inheritance chain instead of a static filter.** After loading each filament JSON, walk up its `inherits` chain (the JSON Python writes already has this resolved into `from`/`inherits` metadata) and apply parent values for any key not in the leaf. Or simpler: just call `Preset::normalize` on each filament_cfg after loading (which uses `set_num_filaments` to pad each per-filament key from `FullPrintConfig::defaults`). We already call `Preset::normalize(final_cfg)` on the merged config; doing it earlier on each filament_cfg costs almost nothing and matches GUI inheritance semantics. — *Took the simpler option: `Preset::normalize(fc)` in the per-filament-cfg loop, belt-and-suspenders with the existing `fill_filament_defaults`.*
 
-- [ ] **Reference:** `vendor/OrcaSlicer/src/libslic3r/Preset.cpp:370-415` (`Preset::normalize`).
+- [x] **Reference:** `vendor/OrcaSlicer/src/libslic3r/Preset.cpp:370-415` (`Preset::normalize`).
 
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
 Normalize each filament_cfg before construct_full_config
 ```
 
 ---
 
-### Gap 5 (low): no `validate_presets` call
+### Gap 5 (low): no `validate_presets` call — ✅ FIXED `2e9429e`
 
 The GUI runs `PresetBundle::validate_presets` on every 3MF load (`vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:1260`). It checks each preset's inheritance chain against the system catalog and surfaces "preset not found" errors to the user. Our binary skips this because Python upstream resolves inherits before writing the temp JSONs.
 
@@ -145,16 +157,16 @@ The GUI runs `PresetBundle::validate_presets` on every 3MF load (`vendor/OrcaSli
 
 **Fix:**
 
-- [ ] **Have Python validate the 3MF's `printer_settings_id` / `print_settings_id` / `filament_settings_id` against the resolved catalog before invoking the binary.** Log warnings for mismatches; surface them in the slice response's `settings_transfer` block alongside the existing `filament_changed` reporting.
+- [x] **Have Python validate the 3MF's `printer_settings_id` / `print_settings_id` / `filament_settings_id` against the resolved catalog before invoking the binary.** Log warnings for mismatches; surface them in the slice response's `settings_transfer` block alongside the existing `filament_changed` reporting. — *`validate_3mf_preset_references` in `app/slicer.py`; both v2 handlers run it post-token-resolve and merge findings into `settings_transfer.unknown_presets`. 4 unit tests in `tests/test_validate_3mf_preset_references.py`.*
 
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
 Validate 3MF preset references against current catalog
 ```
 
 ---
 
-### Gap 6 (cleanup): `extruder_ams_count` not erased from `threemf_config`
+### Gap 6 (cleanup): `extruder_ams_count` not erased from `threemf_config` — ✅ FIXED `24a12a0`
 
 The GUI explicitly `config.erase("extruder_ams_count")` after extracting it (`vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:3528-3529`). We don't. After today's `s_project_options` filter, `extruder_ams_count` is dropped from the `project_config` we pass to `construct_full_config`, so this is mostly cosmetic. But it remains in `threemf_config`, which is still read by `apply_overrides_for_slot` (lines 327-379). If a future code path ever consumes it from `threemf_config` directly, it sees stale data.
 
@@ -162,9 +174,9 @@ The GUI explicitly `config.erase("extruder_ams_count")` after extracting it (`ve
 
 **Fix:**
 
-- [ ] **Erase `extruder_ams_count` from `threemf_config`** immediately after `Model::read_from_file` populates it, with a code comment citing the GUI line. One-line change.
+- [x] **Erase `extruder_ams_count` from `threemf_config`** immediately after `Model::read_from_file` populates it, with a code comment citing the GUI line. One-line change.
 
-- [ ] **Commit:**
+- [x] **Commit:**
 ```
 Erase extruder_ams_count from threemf_config to match GUI cleanup
 ```
@@ -173,7 +185,7 @@ Erase extruder_ams_count from threemf_config to match GUI cleanup
 
 ## Session Log — 2026-05-04 (post-plan)
 
-Three GUI-parity issues were diagnosed and fixed in the same session as this plan was written. They aren't from the six gaps above (those are still pending) but are recorded here so future audits don't re-investigate.
+GUI-parity issues diagnosed and fixed in the same session as this plan was written, outside the original six gaps. Recorded here so future audits don't re-investigate.
 
 ### Fixed: `plate_type` not honored on `/slice/v2` (orcaslicer-cli `13e6ff9`)
 
