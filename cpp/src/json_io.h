@@ -30,9 +30,24 @@ struct SliceRequest {
 };
 
 struct SliceResponseEstimate {
+    // Total wall-clock time the printer will spend on this job, including
+    // prepare moves (purge tower, initial homing, etc.).
     double time_seconds = 0.0;
+    // Time spent on prepare moves only (everything before the model
+    // starts printing). Sourced from
+    // ``gcode_result.print_statistics.modes[Normal].prepare_time``.
+    double prepare_seconds = 0.0;
+    // Total grams of filament. Sum across all slots.
     double weight_g = 0.0;
+    // Grams of filament actually deposited on the model (excludes purge
+    // tower / flush). Approximated from the wipe-tower extrusion ratio
+    // since libslic3r doesn't carry a direct "model weight" field.
+    double model_weight_g = 0.0;
+    // Per-slot filament used in metres (TOTAL — includes purge tower).
     std::vector<double> filament_used_m;
+    // Per-slot filament used in metres for the model only (excludes
+    // purge tower extrusions).
+    std::vector<double> model_filament_used_m;
 };
 
 struct SliceResponse {

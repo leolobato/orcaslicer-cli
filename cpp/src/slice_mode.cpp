@@ -201,46 +201,50 @@ int run_slice_mode(const SliceRequest& req) {
 
     emit_progress("composing_config", 20);
 
-    // 3. Compose the final DynamicPrintConfig via the GUI's authoritative
-    //    `PresetBundle::construct_full_config` (PresetBundle.cpp:61). It
-    //    handles defaults → printer → process → filament merge, the
-    //    extruder-variant reshaping (`update_values_to_printer_extruders`)
-    //    and the per-key vector composition for multi-filament setups —
-    //    all logic that lives in the GUI and that we MUST NOT reimplement
-    //    in our wrapper, because any drift surfaces as multi-filament
-    //    crashes the GUI doesn't have (e.g. SIGSEGV in
-    //    `Print::process` because filament_options_with_variant keys end
-    //    up the wrong length).
+    // 3a. Filter the 3MF's project_settings.config to the project-only keys
+    //     the GUI uses. The 3MF on disk carries ~500 keys including
+    //     printer-extruder topology (`extruder_variant_list`,
+    //     `printer_extruder_variant`, `printer_extruder_id`, `extruder_type`,
+    //     `filament_extruder_variant`, `filament_self_index`, …) that
+    //     describe the printer it was authored for, NOT the printer we slice
+    //     onto. The GUI's `PresetBundle::load_config_file_config` keeps only
+    //     the 13 keys in `s_project_options`
+    //     (`vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:37-52`) via
+    //     `this->project_config.apply_only(config, s_project_options)` at
+    //     line 3717, so when `full_fff_config` later does
+    //     `out.apply(this->project_config)` only those 13 keys overlay.
     //
-    //    `construct_full_config` takes `Preset` references; we wrap each
-    //    loaded JSON config in a Preset of the appropriate type. Project
-    //    config is empty here — the 3MF's `different_settings_to_system`
-    //    overrides are applied to `final_cfg` afterwards.
-    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
-    // dereferences `filament_temp_configs[i].option(key)` without a
-    // nullptr check, so each filament Preset's config must have every
-    // key that filament[0]'s config has. The GUI gets this for free —
-    // its filament Presets inherit from `filaments.default_preset()`,
-    // which populates every filament option with a default. Our
-    // `load_preset_json` only loads what's literally in the JSON, so
-    // we pre-overlay each filament_cfg onto a fresh full-defaults copy
-    // before wrapping in a Preset. Same defensive backstop the GUI's
-    // inheritance chain provides.
-    // Pre-populate each filament config with libslic3r's default values
-    // for the *filament-only* options (Preset::filament_options()) before
-    // wrapping in a Preset. The GUI's filament Presets get this for free
-    // via the inheritance chain ending at `filaments.default_preset()`,
-    // which has every filament option populated. Our `load_preset_json`
-    // only loads what's literally in the JSON. Without these defaults,
-    // construct_full_config's per-key merge (PresetBundle.cpp:147-177)
-    // will hit nullptr when filament[0] declares a key that another
-    // slot's sparser JSON omits.
-    //
-    // Filter to filament keys only: applying *all* FullPrintConfig
-    // defaults would inject printer/process keys into the filament
-    // Preset, and `out.apply(filament[0].config)` inside
-    // construct_full_config would then overlay those defaults onto the
-    // already-applied printer and process settings, corrupting them.
+    //     We load the 3MF directly via `Model::read_from_file(LoadConfig)`
+    //     and get the raw project_settings.config without that filtering.
+    //     Blanket-applying it inside `construct_full_config` (line 76)
+    //     overwrites the printer's correctly-sized per-extruder vectors
+    //     with longer ones from the 3MF. `support_different_extruders`
+    //     then trips on the comma-separated `extruder_variant_list` entry
+    //     and routes through the multi-extruder branch of
+    //     `update_values_to_printer_extruders`, which dereferences out of
+    //     bounds and SIGSEGVs. Mirroring the GUI's whitelist removes the
+    //     corruption at the source. Keep in sync if the vendor adds keys.
+    static const std::vector<std::string> s_project_options{
+        "flush_volumes_vector", "flush_volumes_matrix",
+        "filament_colour", "filament_colour_type", "filament_multi_colour",
+        "wipe_tower_x", "wipe_tower_y", "wipe_tower_rotation_angle",
+        "curr_bed_type", "flush_multiplier",
+        "nozzle_volume_type", "filament_map_mode", "filament_map",
+    };
+    Slic3r::DynamicPrintConfig project_config;
+    project_config.apply_only(threemf_config, s_project_options);
+
+    // 3b. Pre-populate each filament config with libslic3r's filament-key
+    //     defaults before wrapping it in a Preset. The GUI's filament
+    //     Presets inherit from `filaments.default_preset()` which has every
+    //     filament option populated; our `load_preset_json` only loads what
+    //     the JSON literally contains, so without this backstop
+    //     `construct_full_config`'s per-key merge (PresetBundle.cpp:147-177)
+    //     dereferences nullptr when filament[0] declares a key that another
+    //     slot's sparser JSON omits. We filter to filament_options() only
+    //     because applying ALL FullPrintConfig defaults would inject
+    //     printer/process keys into the filament Preset and corrupt the
+    //     final merge.
     const auto& full_defaults = Slic3r::FullPrintConfig::defaults();
     Slic3r::DynamicPrintConfig filament_defaults;
     for (const std::string& key : Slic3r::Preset::filament_options()) {
@@ -268,18 +272,15 @@ int run_slice_mode(const SliceRequest& req) {
         fp.config = std::move(filament_cfgs[i]);
         filament_presets.push_back(std::move(fp));
     }
-    // Pass the 3MF's project_settings.config as the `project_config` arg.
-    // This is what the GUI does — it carries the user's saved selections
-    // for project-level fields like `filament_ids`, `filament_colour`,
-    // `flush_volumes_matrix` (sized N×N), `extruder_ams_count`, etc. that
-    // aren't part of any preset and that downstream code (gcode export,
-    // wipe-tower planner) requires to be the right shape. Without it the
-    // matrix stays at its default 4×4 size and a 5-filament print SIGSEGVs
-    // accessing out-of-range slots.
+
+    // 3c. Compose the final DynamicPrintConfig via the GUI's authoritative
+    //     `PresetBundle::construct_full_config` (PresetBundle.cpp:61), passing
+    //     the FILTERED `project_config` (not the raw `threemf_config`) so
+    //     printer-extruder fields stay sourced from the printer preset.
     Slic3r::DynamicPrintConfig final_cfg;
     try {
         final_cfg = Slic3r::PresetBundle::construct_full_config(
-            printer_preset, print_preset, threemf_config,
+            printer_preset, print_preset, project_config,
             filament_presets,
             /*apply_extruder=*/true,
             /*filament_maps_new=*/std::nullopt);
@@ -633,9 +634,30 @@ int run_slice_mode(const SliceRequest& req) {
     response.estimate.weight_g = stats.total_weight;
     response.estimate.time_seconds =
         gcode_result.print_statistics.modes[normal_idx].time;
-    // Single-element filament-used vector for v1; multi-filament splits this
-    // per slot in a later task once we wire per-filament tracking.
-    response.estimate.filament_used_m.push_back(stats.total_used_filament / 1000.0);
+    response.estimate.prepare_seconds =
+        gcode_result.print_statistics.modes[normal_idx].prepare_time;
+    // Model-only weight: total minus the wipe-tower contribution. libslic3r
+    // tracks `total_wipe_tower_filament` in mm; convert to grams using the
+    // overall (mm → g) ratio derived from the totals. This is an approximation
+    // — multi-filament prints with different densities per slot will be
+    // slightly off — but matches what the GUI's slice_info "Model Filament
+    // Weight" field reports for single-density jobs.
+    if (stats.total_used_filament > 0) {
+        const double model_filament_mm =
+            stats.total_used_filament - stats.total_wipe_tower_filament;
+        const double weight_per_mm =
+            stats.total_weight / stats.total_used_filament;
+        response.estimate.model_weight_g = model_filament_mm * weight_per_mm;
+        response.estimate.filament_used_m.push_back(stats.total_used_filament / 1000.0);
+        response.estimate.model_filament_used_m.push_back(model_filament_mm / 1000.0);
+    } else {
+        response.estimate.model_weight_g = 0.0;
+        response.estimate.filament_used_m.push_back(0.0);
+        response.estimate.model_filament_used_m.push_back(0.0);
+    }
+    // Single-element vectors for v1; multi-filament splits these per slot in
+    // a later task once we wire `print.print_statistics().filament_stats`
+    // (per-filament mm) into the response.
 
     // settings_transfer was populated inline during config composition;
     // leave it as-is here.

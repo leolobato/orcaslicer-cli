@@ -39,8 +39,11 @@ void write_slice_response_to_stdout(const SliceResponse& r) {
         out["output_3mf"] = r.output_3mf;
         out["estimate"] = {
             {"time_seconds", r.estimate.time_seconds},
+            {"prepare_seconds", r.estimate.prepare_seconds},
             {"weight_g", r.estimate.weight_g},
+            {"model_weight_g", r.estimate.model_weight_g},
             {"filament_used_m", r.estimate.filament_used_m},
+            {"model_filament_used_m", r.estimate.model_filament_used_m},
         };
         out["settings_transfer"] = r.settings_transfer;
     } else {
