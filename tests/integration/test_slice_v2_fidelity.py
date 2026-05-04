@@ -255,13 +255,12 @@ def test_fixture_04_matches_gui_within_tolerance() -> None:
     declares all 5 — exercises multi-slot materialisation, cross-vendor
     profile resolution, and 5×5 flush-volume matrix sizing.
 
-    `recenter=True` because we don't replicate the GUI's load-time auto-
-    arrange step — the saved 3MF carries object offsets the GUI would have
-    re-centered before slicing; without that, libslic3r aborts with
-    "Coordinate outside allowed range" during skirt/brim. Asking the
-    binary to recenter on the plate produces the same effective starting
-    geometry. Skip the bit-exact start-XY check since recenter math
-    differs subtly from the GUI's auto-arrange.
+    Start-X matches GUI bit-for-bit (~0.004mm); start-Y differs by
+    ~16mm because libslic3r picks the opposite Y endpoint of the bird's
+    bbox to begin the perimeter. Time/weight/layer-count all match
+    within the standard parity tolerances, so the slice is functionally
+    equivalent — the start-point choice is a libslic3r ordering
+    heuristic and not worth pinning bit-for-bit here.
     """
     _slice_and_compare(
         FIXTURE_DIR / "04" / "reference-bird-orca.3mf",
@@ -275,7 +274,6 @@ def test_fixture_04_matches_gui_within_tolerance() -> None:
             "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 3)
             "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 4)
         ],
-        recenter=True,
         require_xy_match=False,
     )
 
@@ -302,6 +300,4 @@ def test_fixture_06_matches_gui_within_tolerance() -> None:
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
         ],
-        recenter=True,
-        require_xy_match=False,
     )

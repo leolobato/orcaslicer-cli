@@ -424,6 +424,17 @@ int run_slice_mode(const SliceRequest& req) {
             return fail("recenter_failed", std::string("recenter: ") + e.what(),
                         response);
         }
+    } else {
+        // Even when not recentering, drop any model that the 3MF saved
+        // hovering above (or buried below) z=0 onto the bed. The GUI
+        // implicitly does this on every load — without it, libslic3r's
+        // skirt/brim generator throws "Coordinate outside allowed range"
+        // when the printable-area polygon is intersected against a model
+        // whose instance offset puts it outside the bed in Z.
+        for (auto* obj : model.objects) {
+            if (!obj) continue;
+            obj->ensure_on_bed(/*allow_negative_z=*/false);
+        }
     }
 
     emit_progress("slicing_construct_print", 28);
