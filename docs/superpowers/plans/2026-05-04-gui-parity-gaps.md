@@ -206,11 +206,27 @@ The two concepts are different:
 2. The "GUI does X that we don't" diagnosis was wrong twice in a row before instrumentation pinned the right answer. Lesson reinforced: **gather evidence at every component boundary before proposing fixes** — a direct curl to `/slice/v2` with explicit `filament_map=[1, 1]` would have flipped the prime tower in 30 seconds and skipped two hours of vendor-source archaeology.
 3. The v2 handlers' validation is now a paper trail for any future client that confuses the two: a 400 + clear message catches the mistake at the API boundary, before it reaches libslic3r.
 
+### Fixed: empty `filament_ids` in gcode CONFIG_BLOCK (orcaslicer-cli `d838b8a`)
+
+**Symptom:** every CLI-sliced output emitted `; filament_ids = ` with an empty value. All seven existing GUI-sliced fixtures emit populated values like `; filament_ids = GFA00;GFA00` (BBL filament tray catalog IDs). 100% reproducible divergence.
+
+**Where it matters:** the gcode CONFIG_BLOCK's `filament_ids` carries the BBL catalog ID (e.g. `GFA00`) per slot. Bambu printers, Bambu Cloud, and the Handy app read it at print start to confirm AMS tray contents match the gcode's expectation, and to drive AMS error recovery.
+
+**Root cause:** `Slic3r::Preset::filament_id` is a separate member, not a config option. The GUI's `PresetBundle` populates it from the JSON's top-level metadata at `vendor/OrcaSlicer/src/libslic3r/PresetBundle.cpp:1112-1114`:
+```cpp
+Preset &preset = collection->load_preset(...);
+if (key_values.find(BBL_JSON_KEY_FILAMENT_ID) != key_values.end())
+    preset.filament_id = key_values[BBL_JSON_KEY_FILAMENT_ID];
+```
+`cfg.load_from_json` returns `key_values` as an out-param with the JSON's metadata fields (`name`, `inherits`, `filament_id`, `setting_id`). Our `load_preset_json` discarded `key_values` and never stamped `filament_id` on the wrapper Preset, so `construct_full_config`'s `filament_ids.emplace_back(preset.filament_id)` (PresetBundle.cpp:124) accumulated empty strings, and the gcode CONFIG_BLOCK emitted them empty.
+
+**Fix:** `load_preset_json` gained an optional `out_key_values` parameter. The filament loader keeps a parallel `filament_key_values` vector and stamps `Preset::filament_id` from `kv["filament_id"]` for each slot before `construct_full_config` runs. Mirrors GUI behaviour 1:1.
+
 ### Implication for the six gaps above
 
-None of the gaps as originally written address the AMS-tray confusion — they're about `slice_mode.cpp`'s preset composition, not the API contract. **Gap 2** ("per-filament-slot overrides go flat, not indexed") still stands, though it's worth re-checking whether the corrupted-`filament_map` symptom was masking any per-slot override misbehavior we'd otherwise have noticed.
-
-The prime-tower auto-disable behaviour now works without further changes — it was a symptom, not a separate gap. Don't add a Gap 7 for it.
+- The AMS-tray-confusion fix and the `filament_id` stamping aren't from the original six — they're API-contract / preset-construction issues found by inspecting outputs against GUI references, not by the `slice_mode.cpp` ↔ `PresetBundle.cpp` audit that produced the plan.
+- **Gap 2** was misdiagnosed in the original plan ("per-filament-slot overrides go flat, not indexed"). Verified against `_fixture/07`: the actual bug was the per-slot name guard rejecting project-local preset variants whose name carries an arbitrary user-typed suffix. Fix landed at `944ccde` via `inherits`-based base resolution. Plan section rewritten in place.
+- The prime-tower auto-disable behaviour now works without further changes — it was a symptom of the corrupted `filament_map`, not a separate gap. Don't add a Gap 7 for it.
 
 ---
 
