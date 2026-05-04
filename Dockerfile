@@ -161,14 +161,20 @@ COPY cpp cpp
 
 # Configure orca-headless using the deps destdir as CMAKE_PREFIX_PATH and
 # building libslic3r in-tree via cpp/CMakeLists.txt's add_subdirectory.
-# Cap parallelism to -j4 like deps-builder. Each libslic3r .cpp compile
-# uses 200–500 MB, so -j12 can spike past OrbStack's 8 GB and cause
-# BuildKit's daemon to die mid-build with an "EOF" rpc error.
+# `-j2` is a deliberate trade-off: each libslic3r .cpp compile peaks at
+# 200-500 MB, and the libslic3r link step alone needs ~3-4 GB resident.
+# At `-j4`, four parallel link tasks plus their compile siblings spike
+# past the host's free RAM (Docker on macOS shares physical memory with
+# everything else), trigger heavy swap, and the build appears hung for
+# 30+ minutes while the OS thrashes. `-j2` keeps peak RSS well under the
+# typical free RAM and finishes faster wall-clock under memory pressure
+# than `-j4` did when thrashing. Trade ~30% extra time for predictable
+# completion.
 RUN cmake -S cpp -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/opt/orca-deps/usr/local \
         -DCMAKE_INSTALL_PREFIX=/opt/orca-headless && \
-    cmake --build build --target orca-headless -j4 && \
+    cmake --build build --target orca-headless -j2 && \
     install -D build/orca-headless /opt/orca-headless/bin/orca-headless
 
 # =============================================================================

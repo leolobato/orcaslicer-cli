@@ -17,6 +17,8 @@ docker compose up                # start (already built)
 
 The API runs via uvicorn at `http://localhost:8070`. There is no local (non-Docker) dev setup — the OrcaSlicer binary and BBL profiles only exist inside the container.
 
+To ship a new image to the remote production host, use `scripts/build-and-ship.sh`. It builds locally with streamed BuildKit progress, watchdogs against an idle hang (5 min default — covers the OrbStack swap-thrash case where the build sits silent for 30+ minutes burning IO), enforces a 45 min hard cap, then `save | gzip | ssh root@10.0.1.9 'gunzip | docker load'`. Sends a macOS notification on completion (success or failure). `deploy-docker.sh` does NOT work for this repo — the C++ link is too heavy for the remote docker host.
+
 ## Testing
 
 ```bash
