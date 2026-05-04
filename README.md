@@ -7,7 +7,7 @@ A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to p
 ### Using the pre-built image (recommended)
 
 ```bash
-docker run -d -p 8000:8000 -v ./data:/data ghcr.io/leolobato/orcaslicer-cli:latest
+docker run -d -p 8070:8070 -v ./data:/data ghcr.io/leolobato/orcaslicer-cli:latest
 ```
 
 Or with Docker Compose, create a `docker-compose.yml`:
@@ -17,7 +17,7 @@ services:
   orcaslicer-cli:
     image: ghcr.io/leolobato/orcaslicer-cli:latest
     ports:
-      - "8000:8000"
+      - "8070:8070"
     volumes:
       - ./data:/data
 ```
@@ -40,7 +40,7 @@ docker compose up --build
 
 ---
 
-The API will be available at `http://localhost:8000`.
+The API will be available at `http://localhost:8070`.
 
 ## Architecture
 
@@ -128,12 +128,12 @@ All profile identifiers use `setting_id` values (e.g. `GM014`, `GP004`, `GFSA00`
 
 ```bash
 # 1. Upload — get a cache token
-TOK=$(curl -s -X POST http://localhost:8000/3mf \
+TOK=$(curl -s -X POST http://localhost:8070/3mf \
   -F "file=@model.3mf" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
 
 # 2. Slice via JSON body
-OUT=$(curl -s -X POST http://localhost:8000/slice/v2 \
+OUT=$(curl -s -X POST http://localhost:8070/slice/v2 \
   -H 'Content-Type: application/json' \
   -d "{
     \"input_token\": \"$TOK\",
@@ -144,7 +144,7 @@ OUT=$(curl -s -X POST http://localhost:8000/slice/v2 \
   }" | python3 -c "import json,sys; print(json.load(sys.stdin)['output_token'])")
 
 # 3. Download the sliced .3mf
-curl -s -o sliced.3mf http://localhost:8000/3mf/$OUT
+curl -s -o sliced.3mf http://localhost:8070/3mf/$OUT
 ```
 
 The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `recenter=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
@@ -175,7 +175,7 @@ Only `name` is required. Any field you provide overrides the inherited value.
 
 ## Web UI
 
-A built-in web interface is available at `http://localhost:8000/web/` for browsing and managing profiles.
+A built-in web interface is available at `http://localhost:8070/web/` for browsing and managing profiles.
 
 - **Browse** all machine, process, and filament profiles with search filtering
 - **Inspect** any profile to see its fully resolved fields or an inheritance diff view showing what each level in the chain overrides

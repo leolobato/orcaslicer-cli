@@ -9,7 +9,7 @@ services:
         #   GIT_COMMIT=$(git rev-parse HEAD) docker compose up --build
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     ports:
-      - "8000:8000"
+      - "8070:8070"
     volumes:
       - ./data:/data
       - ./app:/app/app

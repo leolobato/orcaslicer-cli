@@ -34,7 +34,7 @@ jobs:
       - name: Start container
         run: |
           docker run -d --name orcaslicer-cli \
-            -p 8000:8000 \
+            -p 8070:8070 \
             -v ${{ github.workspace }}/data:/data \
             -v ${{ github.workspace }}/app:/app/app \
             -v ${{ github.workspace }}/tests:/app/tests \
@@ -43,7 +43,7 @@ jobs:
             orcaslicer-cli:ci
           # Wait for /health
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8000/health; then echo; break; fi
+            if curl -sf http://localhost:8070/health; then echo; break; fi
             sleep 2
           done
 
@@ -54,10 +54,10 @@ jobs:
 
       - name: Smoke health + profiles
         run: |
-          curl -sf http://localhost:8000/health
-          curl -sf 'http://localhost:8000/profiles/machines' | python3 -c \
+          curl -sf http://localhost:8070/health
+          curl -sf 'http://localhost:8070/profiles/machines' | python3 -c \
             "import json,sys; d=json.load(sys.stdin); print('machines:', len(d.get('machines', [])))"
-          curl -sf 'http://localhost:8000/profiles/filaments?ams_assignable=true' | python3 -c \
+          curl -sf 'http://localhost:8070/profiles/filaments?ams_assignable=true' | python3 -c \
             "import json,sys; d=json.load(sys.stdin); print('ams filaments:', len(d.get('filaments', [])))"
 
       - name: Container logs on failure

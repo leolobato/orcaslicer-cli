@@ -11,11 +11,11 @@ A REST API that wraps OrcaSlicer's CLI to provide headless 3D print slicing. It 
 This is a Docker-only project. OrcaSlicer is compiled from source in the Docker build.
 
 ```bash
-docker compose up --build        # build and start on port 8000
+docker compose up --build        # build and start on port 8070
 docker compose up                # start (already built)
 ```
 
-The API runs via uvicorn at `http://localhost:8000`. There is no local (non-Docker) dev setup — the OrcaSlicer binary and BBL profiles only exist inside the container.
+The API runs via uvicorn at `http://localhost:8070`. There is no local (non-Docker) dev setup — the OrcaSlicer binary and BBL profiles only exist inside the container.
 
 ## Testing
 

@@ -3,11 +3,11 @@
 # Usage: ./test_api.sh [base_url]
 #
 # Expects the example 3MF files from ../bambu-poc/ to be present.
-# Runs against http://localhost:8000 by default.
+# Runs against http://localhost:8070 by default.
 
 set -euo pipefail
 
-BASE_URL="${1:-http://localhost:8000}"
+BASE_URL="${1:-http://localhost:8070}"
 EXAMPLES_DIR="../bambu-poc"
 PASS=0
 FAIL=0

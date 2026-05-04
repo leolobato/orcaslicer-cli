@@ -237,5 +237,5 @@ COPY conftest.py .
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8070
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8070"]

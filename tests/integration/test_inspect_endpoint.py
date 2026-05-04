@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-API = os.environ.get("ORCASLICER_API", "http://localhost:8000")
+API = os.environ.get("ORCASLICER_API", "http://localhost:8070")
 FIXTURE_DIR = Path(__file__).resolve().parents[2].parent / "_fixture"
 
 
