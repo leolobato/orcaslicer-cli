@@ -261,6 +261,11 @@ def test_fixture_01_matches_gui_within_tolerance() -> None:
       single-filament-actually-used; depends on `filament_map = [1]` not
       [0, 2] AKA the AMS-tray-semantic fix landed earlier).
     - `curr_bed_type = Textured PEI Plate` (project carry-over).
+    - `layer_height = 0.25` (process customized from 0.20mm Standard's
+      0.20 default — proves process-side `different_settings_to_system[0]`
+      override applied).
+    - `filament_map = 1`, `filament_self_index = 1` (single-extruder
+      topology pinned; regression of AMS-tray confusion would shift these).
     """
     _slice_and_compare(
         FIXTURE_DIR / "01" / "reference-benchy-orca-no-filament-custom-settings.3mf",
@@ -270,16 +275,30 @@ def test_fixture_01_matches_gui_within_tolerance() -> None:
         filament_settings_ids=["GFSA00_02"],
         expected_config_block={
             "filament_ids": "GFA00",
+            "filament_type": "PLA",
+            "filament_density": "1.26",
             "enable_prime_tower": "0",
             "curr_bed_type": "Textured PEI Plate",
+            "layer_height": "0.25",
+            "filament_map": "1",
+            "filament_self_index": "1",
+            "first_layer_bed_temperature": "65",
         },
     )
 
 
 def test_fixture_03_matches_gui_within_tolerance() -> None:
-    """Single-filament with FILAMENT-side customizations (filament_max_volumetric_speed,
-    filament_flow_ratio in `different_settings_to_system[1]`). Exercises the
-    `applied` branch of the per-filament name guard."""
+    """Single-filament with FILAMENT-side customizations
+    (`filament_max_volumetric_speed`, `filament_flow_ratio` in
+    `different_settings_to_system[1]`). Exercises the `applied` branch
+    of the per-filament name guard.
+
+    The two customized values are the most important asserts here:
+    the GUI authored 18 (vs default 21) and 0.95 (vs default 0.98),
+    and our binary must apply both via `apply_overrides_for_slot`.
+    A regression that re-introduced the over-strict name guard or
+    silently dropped per-slot overrides would default these back.
+    """
     _slice_and_compare(
         FIXTURE_DIR / "03" / "reference-benchy-with-filament-customizations.3mf",
         FIXTURE_DIR / "03" / "gui-reference-benchy-with-filament-customizations_sliced.3mf",
@@ -289,13 +308,19 @@ def test_fixture_03_matches_gui_within_tolerance() -> None:
         expected_config_block={
             "filament_ids": "GFA00",
             "enable_prime_tower": "0",
+            "filament_max_volumetric_speed": "18",
+            "filament_flow_ratio": "0.95",
+            "curr_bed_type": "Textured PEI Plate",
         },
     )
 
 
 def test_fixture_05_matches_gui_within_tolerance() -> None:
     """Same as fixture 01 but with curr_bed_type = Cool Plate (vs Textured PEI).
-    Verifies bed-type carry-through and bed-temperature lookups."""
+    Verifies bed-type carry-through and bed-temperature lookups —
+    `first_layer_bed_temperature` lookup picks the cool-plate column
+    instead of the PEI column when `curr_bed_type` differs.
+    """
     _slice_and_compare(
         FIXTURE_DIR / "05" / "reference-benchy-cool-plate.3mf",
         FIXTURE_DIR / "05" / "gui-reference-benchy-cool-plate_sliced.3mf",
@@ -306,6 +331,9 @@ def test_fixture_05_matches_gui_within_tolerance() -> None:
             "filament_ids": "GFA00",
             "enable_prime_tower": "0",
             "curr_bed_type": "Cool Plate",
+            # The signal that bed temp lookup respects curr_bed_type:
+            # PEI fixture 01 has 65 here; Cool Plate must be 35.
+            "first_layer_bed_temperature": "35",
         },
     )
 
@@ -350,6 +378,15 @@ def test_fixture_04_matches_gui_within_tolerance() -> None:
     within the standard parity tolerances, so the slice is functionally
     equivalent — the start-point choice is a libslic3r ordering
     heuristic and not worth pinning bit-for-bit here.
+
+    CONFIG_BLOCK asserts lock in the multi-vendor catalog round-trip:
+    `filament_ids` carries each slot's BBL/vendor catalog ID
+    (`GFSNL03` for SUNLU, `GFL05` for Overture, `GFA00` for Bambu),
+    `filament_type` and `filament_density` round-trip per slot, and
+    `filament_map = 1,1,1,1,1` confirms single-extruder topology
+    survives a 5-slot setup (regression of the AMS-tray-semantic bug
+    would change this). `enable_prime_tower = 1` because >1 filament
+    is actually deposited — opposite of the single-filament fixtures.
     """
     _slice_and_compare(
         FIXTURE_DIR / "04" / "reference-bird-orca.3mf",
@@ -364,6 +401,15 @@ def test_fixture_04_matches_gui_within_tolerance() -> None:
             "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 4)
         ],
         require_xy_match=False,
+        expected_config_block={
+            "filament_ids": "GFA00;GFSNL03;GFL05;GFA00;GFA00",
+            "filament_type": "PLA;PLA;PLA;PLA;PLA",
+            "filament_density": "1.26,1.23,1.22,1.26,1.26",
+            "filament_map": "1,1,1,1,1",
+            "enable_prime_tower": "1",
+            "curr_bed_type": "Textured PEI Plate",
+            "print_sequence": "by layer",
+        },
     )
 
 
@@ -376,6 +422,14 @@ def test_fixture_06_matches_gui_within_tolerance() -> None:
     proves slicing works when one of the slot identifiers is a display
     name (not a slug-style setting_id) because user-imports default
     `setting_id` to the profile's `name`.
+
+    CONFIG_BLOCK asserts lock in the user-imported filament path:
+    `filament_ids` carries `S1839475` for slot 2 (the
+    `"P" + md5(name)[:7]`-derived ID our wrapper assigns to user
+    filaments; per CLAUDE.md). Mixed `filament_type =
+    PETG;PLA;PLA+;PLA;PLA` proves per-slot type round-trip across
+    vendors, and `nozzle_temperature = 240,220,...` proves the PETG
+    slot gets its hotter temp while PLA slots stay at 220.
     """
     _slice_and_compare(
         FIXTURE_DIR / "06" / "trax-orca-a1-modified.3mf",
@@ -389,6 +443,15 @@ def test_fixture_06_matches_gui_within_tolerance() -> None:
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
             "GFSA00_02",            # Bambu PLA Basic @BBL A1M
         ],
+        expected_config_block={
+            "filament_ids": "GFG02;GFSNL03;S1839475;GFA00;GFA00",
+            "filament_type": "PETG;PLA;PLA+;PLA;PLA",
+            "nozzle_temperature": "240,220,220,220,220",
+            "nozzle_temperature_initial_layer": "230,220,220,220,220",
+            "filament_map": "1,1,1,1,1",
+            "enable_prime_tower": "0",
+            "curr_bed_type": "Textured PEI Plate",
+        },
     )
 
 
