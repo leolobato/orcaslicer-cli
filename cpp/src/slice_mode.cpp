@@ -268,11 +268,18 @@ int run_slice_mode(const SliceRequest& req) {
         fp.config = std::move(filament_cfgs[i]);
         filament_presets.push_back(std::move(fp));
     }
-    const Slic3r::DynamicPrintConfig empty_project_cfg;
+    // Pass the 3MF's project_settings.config as the `project_config` arg.
+    // This is what the GUI does — it carries the user's saved selections
+    // for project-level fields like `filament_ids`, `filament_colour`,
+    // `flush_volumes_matrix` (sized N×N), `extruder_ams_count`, etc. that
+    // aren't part of any preset and that downstream code (gcode export,
+    // wipe-tower planner) requires to be the right shape. Without it the
+    // matrix stays at its default 4×4 size and a 5-filament print SIGSEGVs
+    // accessing out-of-range slots.
     Slic3r::DynamicPrintConfig final_cfg;
     try {
         final_cfg = Slic3r::PresetBundle::construct_full_config(
-            printer_preset, print_preset, empty_project_cfg,
+            printer_preset, print_preset, threemf_config,
             filament_presets,
             /*apply_extruder=*/true,
             /*filament_maps_new=*/std::nullopt);
