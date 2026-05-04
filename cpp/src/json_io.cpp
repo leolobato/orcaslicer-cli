@@ -29,6 +29,7 @@ SliceRequest parse_slice_request_from_stdin() {
         req.filament_settings_id = j["filament_settings_id"].get<std::vector<std::string>>();
     }
     req.printer_model_id = j.value("printer_model_id", std::string());
+    req.plate_type = j.value("plate_type", std::string());
     return req;
 }
 

@@ -27,6 +27,13 @@ struct SliceRequest {
     // PlateData::printer_model_id so it surfaces in slice_info.config.
     // Empty for non-BBL vendors.
     std::string printer_model_id;
+
+    // Optional: OrcaSlicer ``curr_bed_type`` label (e.g. "Textured PEI Plate").
+    // When non-empty, overrides whatever the input 3MF authored — necessary
+    // because the GUI lets the user re-pick the plate type independently of
+    // the project file. Caller is expected to validate the value against the
+    // target machine's supported list before sending.
+    std::string plate_type;
 };
 
 struct SliceResponseEstimate {

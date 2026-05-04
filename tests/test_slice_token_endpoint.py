@@ -95,6 +95,111 @@ def test_slice_v2_uses_binary(client: TestClient, tmp_path: Path) -> None:
     assert body["settings_transfer"] == {"status": "applied"}
 
 
+def test_slice_v2_forwards_plate_type_as_orca_label(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """``plate_type`` (snake_case) is resolved against the machine and
+    forwarded to the binary as the OrcaSlicer ``curr_bed_type`` label, so
+    the C++ side can stamp it on top of whatever the input 3MF authored."""
+    payload = b"PK\x03\x04 fake input 3mf"
+    up = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
+    token = up.json()["token"]
+
+    fake_paths = {
+        "machine": str(tmp_path / "m.json"),
+        "process": str(tmp_path / "p.json"),
+        "filaments": [str(tmp_path / "f0.json")],
+        "filament_names": ["Mock Filament 0"],
+        "printer_model_id": "",
+    }
+    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
+        Path(fp).write_text("{}")
+
+    captured: dict = {}
+
+    async def fake_slice(self, request):
+        captured.update(request)
+        Path(request["output_3mf"]).write_bytes(b"sliced bytes")
+        return {
+            "status": "ok",
+            "output_3mf": request["output_3mf"],
+            "estimate": {"time_seconds": 1, "weight_g": 0.1, "filament_used_m": []},
+            "settings_transfer": {"status": "applied"},
+        }
+
+    async def fake_materialize(machine_id, process_id, filament_setting_ids):
+        return fake_paths
+
+    def fake_resolve_plate(machine_id, requested, *, plate_type_api_to_orca):
+        # Pretend the machine supports the requested type as-is.
+        return {"resolved": requested, "match": "unchanged"}
+
+    with patch("app.binary_client.BinaryClient.slice", new=fake_slice), \
+         patch("app.main.materialize_profiles_for_binary", new=fake_materialize), \
+         patch("app.main.resolve_plate_type_for_machine", new=fake_resolve_plate):
+        resp = client.post("/slice/v2", json={
+            "input_token": token,
+            "machine_id": "GM014",
+            "process_id": "GP001",
+            "filament_settings_ids": ["GFSA00"],
+            "plate_id": 1,
+            "plate_type": "textured_pei_plate",
+        })
+
+    assert resp.status_code == 200, resp.text
+    assert captured.get("plate_type") == "Textured PEI Plate", (
+        "binary should receive the OrcaSlicer label, not the API value"
+    )
+
+
+def test_slice_v2_omits_plate_type_when_unset(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """Without ``plate_type`` the binary receives an empty string and
+    falls back to the input 3MF's authored ``curr_bed_type``."""
+    payload = b"PK\x03\x04 fake input 3mf"
+    up = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
+    token = up.json()["token"]
+
+    fake_paths = {
+        "machine": str(tmp_path / "m.json"),
+        "process": str(tmp_path / "p.json"),
+        "filaments": [str(tmp_path / "f0.json")],
+        "filament_names": ["Mock Filament 0"],
+        "printer_model_id": "",
+    }
+    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
+        Path(fp).write_text("{}")
+
+    captured: dict = {}
+
+    async def fake_slice(self, request):
+        captured.update(request)
+        Path(request["output_3mf"]).write_bytes(b"sliced bytes")
+        return {
+            "status": "ok",
+            "output_3mf": request["output_3mf"],
+            "estimate": {"time_seconds": 1, "weight_g": 0.1, "filament_used_m": []},
+            "settings_transfer": {},
+        }
+
+    async def fake_materialize(machine_id, process_id, filament_setting_ids):
+        return fake_paths
+
+    with patch("app.binary_client.BinaryClient.slice", new=fake_slice), \
+         patch("app.main.materialize_profiles_for_binary", new=fake_materialize):
+        resp = client.post("/slice/v2", json={
+            "input_token": token,
+            "machine_id": "GM014",
+            "process_id": "GP001",
+            "filament_settings_ids": ["GFSA00"],
+            "plate_id": 1,
+        })
+
+    assert resp.status_code == 200, resp.text
+    assert captured.get("plate_type") == ""
+
+
 def test_slice_stream_v2_emits_progress_and_result(client: TestClient, tmp_path: Path) -> None:
     payload = b"PK\x03\x04 fake input 3mf"
     up = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
@@ -143,3 +248,54 @@ def test_slice_stream_v2_emits_progress_and_result(client: TestClient, tmp_path:
     # The result event payload should include the output_token
     assert "output_token" in text
     assert "download_url" in text
+
+
+def test_slice_stream_v2_forwards_plate_type_as_orca_label(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    payload = b"PK\x03\x04 fake input 3mf"
+    up = client.post("/3mf", files={"file": ("a.3mf", payload, "application/octet-stream")})
+    token = up.json()["token"]
+
+    fake_paths = {
+        "machine": str(tmp_path / "m.json"),
+        "process": str(tmp_path / "p.json"),
+        "filaments": [str(tmp_path / "f0.json")],
+        "filament_names": ["Mock Filament 0"],
+        "printer_model_id": "",
+    }
+    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
+        Path(fp).write_text("{}")
+
+    captured: dict = {}
+
+    async def fake_stream(self, request):
+        captured.update(request)
+        Path(request["output_3mf"]).write_bytes(b"sliced")
+        yield {"type": "result", "payload": {
+            "status": "ok",
+            "output_3mf": request["output_3mf"],
+            "estimate": {"time_seconds": 1, "weight_g": 0.1, "filament_used_m": []},
+            "settings_transfer": {},
+        }}
+
+    async def fake_materialize(machine_id, process_id, filament_setting_ids):
+        return fake_paths
+
+    def fake_resolve_plate(machine_id, requested, *, plate_type_api_to_orca):
+        return {"resolved": requested, "match": "unchanged"}
+
+    with patch("app.binary_client.BinaryClient.slice_stream", new=fake_stream), \
+         patch("app.main.materialize_profiles_for_binary", new=fake_materialize), \
+         patch("app.main.resolve_plate_type_for_machine", new=fake_resolve_plate):
+        resp = client.post("/slice-stream/v2", json={
+            "input_token": token,
+            "machine_id": "GM014",
+            "process_id": "GP001",
+            "filament_settings_ids": ["GFSA00"],
+            "plate_id": 1,
+            "plate_type": "textured_pei_plate",
+        })
+
+    assert resp.status_code == 200
+    assert captured.get("plate_type") == "Textured PEI Plate"

@@ -402,6 +402,24 @@ int run_slice_mode(const SliceRequest& req) {
         }
     }
 
+    // Caller-supplied override (e.g. user re-picked the plate in the GUI):
+    // takes precedence over whatever the input 3MF authored. Mirrors what
+    // ``Plater::on_change_bed_type`` does in the GUI when the dropdown changes.
+    if (!req.plate_type.empty()) {
+        try {
+            Slic3r::ConfigSubstitutionContext ctxt{
+                Slic3r::ForwardCompatibilitySubstitutionRule::Disable};
+            final_cfg.set_deserialize("curr_bed_type", req.plate_type, ctxt);
+            transfer_status["curr_bed_type"] = req.plate_type;
+        } catch (const std::exception& e) {
+            return fail(
+                "invalid_plate_type",
+                std::string("plate_type=\"") + req.plate_type + "\" is not a "
+                    "valid OrcaSlicer bed type for this machine: " + e.what(),
+                response);
+        }
+    }
+
     response.settings_transfer = transfer_status;
 
     // 4. Wire AMS / filament selection metadata onto the final config so

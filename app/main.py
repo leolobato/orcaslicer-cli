@@ -1038,6 +1038,23 @@ class SliceTokenRequest(BaseModel):
     filament_map: list[int] | None = None
     plate_id: int = 1
     recenter: bool = True
+    plate_type: str | None = None
+
+
+def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
+    """Map an API plate_type value (snake_case) to its OrcaSlicer label.
+
+    Returns "" when no override should be applied (caller passed None/empty
+    or the machine doesn't support the request and has no fallback).
+    """
+    if not plate_type:
+        return ""
+    r = resolve_plate_type_for_machine(
+        machine_id,
+        plate_type,
+        plate_type_api_to_orca=PLATE_TYPE_API_TO_ORCA,
+    )
+    return PLATE_TYPE_API_TO_ORCA.get(r["resolved"], "")
 
 
 @app.post("/slice/v2", tags=["Slice"])
@@ -1085,6 +1102,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
+            "plate_type": _resolve_plate_type_label(body.machine_id, body.plate_type),
         })
     except BinaryError as e:
         return JSONResponse(
@@ -1152,6 +1170,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
+            "plate_type": _resolve_plate_type_label(body.machine_id, body.plate_type),
         }):
             if ev["type"] == "result":
                 out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
