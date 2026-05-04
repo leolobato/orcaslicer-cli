@@ -139,35 +139,57 @@ class BinaryClient:
         await proc.stdin.drain()
         proc.stdin.close()
 
+        # Non-JSON stderr lines are the binary's debug output and any abort
+        # message printed before SIGSEGV. Keep the tail so we can surface it
+        # alongside `binary_crashed` errors instead of leaving callers with
+        # only "exit -11" to debug from.
+        stderr_lines: list[str] = []
+
         async def pump_stderr() -> AsyncIterator[dict[str, Any]]:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
                     return
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     continue
                 try:
-                    e = json.loads(line)
+                    e = json.loads(stripped)
                     yield {"type": "progress", "payload": e}
                 except json.JSONDecodeError:
-                    logger.debug("non-JSON stderr line from binary: %r", line)
+                    text = stripped.decode("utf-8", errors="replace")
+                    stderr_lines.append(text)
+                    if len(stderr_lines) > 200:
+                        del stderr_lines[: len(stderr_lines) - 200]
+                    logger.debug("non-JSON stderr line from binary: %r", stripped)
 
         async for ev in pump_stderr():
             yield ev
 
         stdout = await proc.stdout.read()
         rc = await proc.wait()
+        stderr_tail = "\n".join(stderr_lines)[-2000:]
 
         if rc != 0 and not stdout.strip():
-            yield {"type": "error", "payload": {"code": "binary_crashed", "message": f"exit {rc}"}}
+            yield {"type": "error", "payload": {
+                "code": "binary_crashed",
+                "message": f"exit {rc}",
+                "stderr_tail": stderr_tail,
+            }}
             return
         try:
             response = json.loads(stdout)
         except json.JSONDecodeError as e:
-            yield {"type": "error", "payload": {"code": "binary_bad_response", "message": str(e)}}
+            yield {"type": "error", "payload": {
+                "code": "binary_bad_response",
+                "message": str(e),
+                "stderr_tail": stderr_tail,
+            }}
             return
         if response.get("status") != "ok":
-            yield {"type": "error", "payload": response}
+            payload = dict(response)
+            if stderr_tail and "stderr_tail" not in payload:
+                payload["stderr_tail"] = stderr_tail
+            yield {"type": "error", "payload": payload}
             return
         yield {"type": "result", "payload": response}
