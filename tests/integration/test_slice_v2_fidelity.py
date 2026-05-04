@@ -221,6 +221,34 @@ def test_fixture_05_matches_gui_within_tolerance() -> None:
     )
 
 
+_CUSTOM_FILAMENT_NAME = "SUNLU PLA +2.0 GEN2 @Bambu Lab A1 mini 0.4 nozzle"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stage_user_custom_filaments() -> None:
+    """Drop fixture-bundled user filament profiles into the on-host data dir.
+
+    The container mounts the repo's `data/` at `/data` (the API's
+    `USER_PROFILES_DIR`), so writing here is the same workflow a real
+    operator uses — copy the `.json` into `data/filament/base/` and let
+    the API's profile loader pick it up. We POST `/profiles/reload` to
+    force a re-scan without restarting the container.
+
+    The staged file is left in place after the test run; profile
+    re-imports are idempotent and the file is gitignored.
+    """
+    src = FIXTURE_DIR / "06" / f"{_CUSTOM_FILAMENT_NAME}.json"
+    if not src.exists():
+        return  # fixture 06 not present; tests that need it will skip/fail explicitly
+    repo_root = Path(__file__).resolve().parents[2]
+    dest = repo_root / "data" / "filament" / "base" / src.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(src.read_bytes())
+    req = urllib.request.Request(f"{API}/profiles/reload", method="POST")
+    with urllib.request.urlopen(req, timeout=30.0) as r:
+        assert r.status == 200, f"reload returned {r.status}"
+
+
 def test_fixture_04_matches_gui_within_tolerance() -> None:
     """5 filament slots spanning 3 vendors (Bambu, SUNLU, Overture). Geometry
     is bound to a single slot via `extruder` metadata, but the project
@@ -246,6 +274,33 @@ def test_fixture_04_matches_gui_within_tolerance() -> None:
             "GFSL05_05",   # Overture Matte PLA @BBL A1M
             "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 3)
             "GFSA00_02",   # Bambu PLA Basic @BBL A1M (slot 4)
+        ],
+        recenter=True,
+        require_xy_match=False,
+    )
+
+
+def test_fixture_06_matches_gui_within_tolerance() -> None:
+    """Trax model authored on a different printer, then switched to the A1
+    mini in the GUI and centered on the build plate. Slot 2 references a
+    user-imported filament profile (`SUNLU PLA +2.0 GEN2 @Bambu Lab A1
+    mini 0.4 nozzle`) staged into `data/filament/base/` by the autouse
+    fixture above — exercises the user-profile load path end-to-end and
+    proves slicing works when one of the slot identifiers is a display
+    name (not a slug-style setting_id) because user-imports default
+    `setting_id` to the profile's `name`.
+    """
+    _slice_and_compare(
+        FIXTURE_DIR / "06" / "trax-orca-a1-modified.3mf",
+        FIXTURE_DIR / "06" / "gui-trax-orca-a1-modified_sliced.3mf",
+        machine_id="GM020",
+        process_id="GP000",
+        filament_settings_ids=[
+            "GFSG02_06",            # Bambu PETG HF @BBL A1M
+            "GFSNLS03_07",          # SUNLU PLA+ @BBL A1M
+            _CUSTOM_FILAMENT_NAME,  # user-imported SUNLU PLA +2.0 GEN2
+            "GFSA00_02",            # Bambu PLA Basic @BBL A1M
+            "GFSA00_02",            # Bambu PLA Basic @BBL A1M
         ],
         recenter=True,
         require_xy_match=False,
