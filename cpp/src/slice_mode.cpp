@@ -371,12 +371,15 @@ int run_slice_mode(const SliceRequest& req) {
     //    pipeline our old code emulated piecemeal.
     Slic3r::DynamicPrintConfig final_cfg;
     try {
-        final_cfg = bundle.full_fff_config(
+        // full_config is the public wrapper that dispatches to full_fff_config
+        // for FFF printers (PresetBundle.cpp:3013-3018). full_fff_config itself
+        // is private. Same call signature; same behavior for our case.
+        final_cfg = bundle.full_config(
             /*apply_extruder=*/true,
-            /*filament_maps_new=*/std::nullopt);
+            /*filament_maps=*/std::nullopt);
     } catch (const std::exception& e) {
         return fail("compose_failed",
-                    std::string("full_fff_config: ") + e.what(), response);
+                    std::string("full_config: ") + e.what(), response);
     }
 
     // 9. Build the settings_transfer response. The bundle's edited
