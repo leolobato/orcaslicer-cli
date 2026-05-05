@@ -60,16 +60,23 @@ FILE_JSON="$(curl -sS -m 10 -H "X-API-Key: $TOKEN" \
     exit 1
 }
 
-# Build the PUT body in Python (handles JSON escaping cleanly).
-PAYLOAD="$(python3 -c "
-import json, sys
-meta = json.loads('''$META_JSON''')
-file_d = json.loads('''$FILE_JSON''')
+# Build the PUT body in Python. Pass the API responses through env vars
+# rather than shell interpolation — the StackFileContent contains literal
+# `\n` characters that break Python triple-quoted-string parsing.
+PAYLOAD="$(META_JSON="$META_JSON" FILE_JSON="$FILE_JSON" python3 -c "
+import json, os
+meta = json.loads(os.environ['META_JSON'])
+file_d = json.loads(os.environ['FILE_JSON'])
 print(json.dumps({
     'stackFileContent': file_d.get('StackFileContent', ''),
     'env': meta.get('Env') or [],
     'prune': False,
-    'pullImage': True,
+    # pullImage=false because our images live only on the host (build-and-ship.sh
+    # uses `docker save | ssh | docker load`, no registry). With pullImage=true
+    # Portainer tries to pull orcaslicer-cli:latest from Docker Hub and fails.
+    # The container still recreates against the new local image because
+    # `docker load` already replaced :latest before we got here.
+    'pullImage': False,
 }))
 ")"
 
