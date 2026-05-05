@@ -5,6 +5,8 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
@@ -88,9 +90,77 @@ void emit_machines(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
         nlohmann::json e;
         e["setting_id"]      = preset.setting_id;
         e["name"]            = preset.name;
-        e["vendor"]          = preset.vendor ? preset.vendor->name : std::string{};
+        // Use VendorProfile::id (directory name like "BBL") not ::name
+        // (display "Bambulab") to match the API contract Python emitted.
+        e["vendor"]          = preset.vendor ? preset.vendor->id : std::string{};
         e["nozzle_diameter"] = opt_first_string(preset.config, "nozzle_diameter");
         e["printer_model"]   = preset.config.opt_string("printer_model");
+        out.push_back(std::move(e));
+    }
+}
+
+// Build a name → setting_id index for the loaded printers. The raw
+// ``compatible_printers`` field on each filament/process holds printer
+// preset NAMES (e.g. "Bambu Lab A1 mini 0.4 nozzle"); the API exposes
+// stable setting_ids. Names not found here are dropped — Python's
+// listing functions do the same (``_select_profile_key_by_name``).
+std::unordered_map<std::string, std::string>
+build_printer_name_to_setting_id(const Slic3r::PresetBundle& bundle) {
+    std::unordered_map<std::string, std::string> out;
+    for (const auto& p : bundle.printers) {
+        if (!p.setting_id.empty())
+            out.emplace(p.name, p.setting_id);
+    }
+    return out;
+}
+
+nlohmann::json compat_printer_setting_ids(
+    const Slic3r::DynamicPrintConfig& cfg,
+    const std::unordered_map<std::string, std::string>& name_to_id) {
+    nlohmann::json arr = nlohmann::json::array();
+    const auto* opt = cfg.option<Slic3r::ConfigOptionStrings>(
+        "compatible_printers");
+    if (!opt) return arr;
+    std::unordered_set<std::string> seen;
+    for (const auto& name : opt->values) {
+        const auto it = name_to_id.find(name);
+        if (it == name_to_id.end() || it->second.empty()) continue;
+        if (seen.insert(it->second).second)
+            arr.push_back(it->second);
+    }
+    return arr;
+}
+
+void emit_processes(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
+    const auto name_to_id = build_printer_name_to_setting_id(bundle);
+    for (const auto& preset : bundle.prints) {
+        nlohmann::json e;
+        e["setting_id"]          = preset.setting_id;
+        e["name"]                = preset.name;
+        e["vendor"]              = preset.vendor ? preset.vendor->id : std::string{};
+        e["compatible_printers"] = compat_printer_setting_ids(preset.config, name_to_id);
+        e["layer_height"]        = opt_first_string(preset.config, "layer_height");
+        out.push_back(std::move(e));
+    }
+}
+
+void emit_filaments(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
+    const auto name_to_id = build_printer_name_to_setting_id(bundle);
+    for (const auto& preset : bundle.filaments) {
+        nlohmann::json e;
+        e["setting_id"]          = preset.setting_id;
+        e["filament_id"]         = preset.filament_id;
+        e["name"]                = preset.name;
+        e["vendor"]              = preset.vendor ? preset.vendor->id : std::string{};
+        e["compatible_printers"] = compat_printer_setting_ids(preset.config, name_to_id);
+        e["filament_type"]       = opt_first_string(preset.config, "filament_type");
+        // AMS assignability matches Python's
+        // ``_is_ams_assignable_filament``: instantiated (already
+        // filtered by load_vendor_configs_from_json), with non-empty
+        // setting_id AND filament_id. User-imported filaments without
+        // a generated filament_id are non-assignable.
+        e["ams_assignable"] =
+            !preset.setting_id.empty() && !preset.filament_id.empty();
         out.push_back(std::move(e));
     }
 }
@@ -157,7 +227,9 @@ int run_dump_profiles_mode(const DumpProfilesRequest& req) {
     manifest["machines"]  = nlohmann::json::array();
     emit_machines(bundle, manifest["machines"]);
     manifest["processes"] = nlohmann::json::array();
+    emit_processes(bundle, manifest["processes"]);
     manifest["filaments"] = nlohmann::json::array();
+    emit_filaments(bundle, manifest["filaments"]);
 
     std::ofstream ofs(req.out_path);
     if (!ofs) return fail("io_error",
