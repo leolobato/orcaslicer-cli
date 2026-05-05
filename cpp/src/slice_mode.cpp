@@ -146,6 +146,29 @@ size_t load_chain_dir_into(
     if (dir_path.empty() || !fs::is_directory(dir_path)) {
         throw std::runtime_error("chain dir is not a directory: " + dir_path);
     }
+
+    // For TYPE_FILAMENT collections, full_fff_config's per-slot vector
+    // merge loop (PresetBundle.cpp:3201-3236) iterates every key in
+    // `filaments.default_preset().config` and dereferences each slot's
+    // `filament_temp_configs[i].option(key)` to build a per-slot value
+    // array. If a slot's config is missing any of those keys, the resulting
+    // null pointer in `opt_vec_dst->set(filament_opts)` segfaults.
+    //
+    // Vendor filament JSONs commonly omit a few options (e.g.
+    // `filament_self_index`, `pellet_flow_coefficient`) — in the GUI those
+    // get filled in elsewhere, but `PresetCollection::load_preset` doesn't
+    // touch the config. Pre-fill missing filament keys from
+    // FullPrintConfig defaults (filtered to Preset::filament_options) so
+    // every loaded filament has the full key set the merge loop expects.
+    Slic3r::DynamicPrintConfig filament_defaults;
+    if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
+        const auto& full_defaults = Slic3r::FullPrintConfig::defaults();
+        for (const std::string& key : Slic3r::Preset::filament_options()) {
+            const Slic3r::ConfigOption* opt = full_defaults.option(key);
+            if (opt != nullptr) filament_defaults.set_key_value(key, opt->clone());
+        }
+    }
+
     size_t loaded = 0;
     for (const auto& entry : fs::directory_iterator(dir_path)) {
         if (!entry.is_regular_file()) continue;
@@ -160,6 +183,15 @@ size_t load_chain_dir_into(
         cfg.load_from_json(
             path, ctx, /*load_inherits_to_config=*/true, kv, reason);
 
+        // Layer JSON over filament defaults so missing keys get safe
+        // values rather than null pointers in the multi-filament merge.
+        if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
+            Slic3r::DynamicPrintConfig merged;
+            merged.apply(filament_defaults);
+            merged.apply(cfg);
+            cfg = std::move(merged);
+        }
+
         const std::string name =
             (kv.count("name") && !kv["name"].empty())
                 ? kv["name"]
@@ -172,20 +204,10 @@ size_t load_chain_dir_into(
         if (auto it = kv.find("setting_id"); it != kv.end()) {
             preset.setting_id = it->second;
         }
-        // PresetCollection::load_preset (Preset.cpp:2291-2316) does NOT
-        // call Preset::normalize. For FILAMENT collections we run it
-        // explicitly to pad per-filament-vector keys to filament_diameter's
-        // length so that full_fff_config's per-slot merge
-        // (PresetBundle.cpp:3217-3220) doesn't nullptr-deref on sparse
-        // user-imported filament JSONs.
-        //
-        // Do NOT call Preset::normalize on PRINTER or PROCESS presets:
-        // its single_extruder_multi_material branch (Preset.cpp:373-379)
-        // calls config.set_num_filaments(1) on those configs when
-        // filament_diameter is absent, which truncates per-filament-vector
-        // keys (filament_extruder_variant, filament_self_index, etc.) on
-        // a multi-filament slice and SIGSEGVs in full_fff_config's
-        // per-slot vector-merge loop.
+        // Preset::normalize for FILAMENT only (printer/process get
+        // corrupted by its single_extruder_multi_material branch — see
+        // Preset.cpp:373-379, set_num_filaments(1) truncates printer
+        // per-filament-vector keys on a multi-filament slice).
         if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
             Slic3r::Preset::normalize(preset.config);
         }
