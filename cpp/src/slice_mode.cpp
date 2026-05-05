@@ -467,6 +467,7 @@ int run_slice_mode(const SliceRequest& req) {
         return fail("compose_failed",
                     std::string("full_config: ") + e.what(), response);
     }
+    emit_progress("config_composed", 21);
 
     // 9. Apply the 3MF's process- and printer-slot customizations on top
     //    of the bundle's full_config output. The bundle's
@@ -493,6 +494,7 @@ int run_slice_mode(const SliceRequest& req) {
             final_cfg, threemf_config, fp->values[0],
             /*exclude_filament_keys=*/true,
             /*excluded_keys=*/{});
+        emit_progress("process_overrides_applied", 22);
 
         // Per-filament slots (indices 1..N): apply only when the slot's
         // name guard from step 5 said "applied" (project-local variant
@@ -536,6 +538,8 @@ int run_slice_mode(const SliceRequest& req) {
             }
         }
 
+        emit_progress("filament_overrides_applied", 23);
+
         // Printer slot (last): no name guard — machine is fixed by the
         // request. Apply with the topology blocklist to avoid SIGSEGVs
         // from per-extruder vector mismatches.
@@ -545,6 +549,7 @@ int run_slice_mode(const SliceRequest& req) {
                 /*exclude_filament_keys=*/false,
                 /*excluded_keys=*/s_printer_slot_blocklist);
         }
+        emit_progress("printer_overrides_applied", 24);
     }
 
     // 10. Build the settings_transfer response. Process and printer keys
