@@ -485,8 +485,14 @@ int run_slice_mode(const SliceRequest& req) {
     Slic3r::DynamicPrintConfig final_cfg;
     try {
         // full_config is the public wrapper that dispatches to full_fff_config
-        // for FFF printers (PresetBundle.cpp:3013-3018). full_fff_config itself
-        // is private. Same call signature; same behavior for our case.
+        // for FFF printers (PresetBundle.cpp:3013-3018). full_fff_config
+        // itself is private. apply_extruder=true matches the pre-refactor
+        // construct_full_config call site (commit 3e73395) and produces a
+        // final_cfg that's ready for Print::apply without further reshape.
+        // The GUI uses false (Plater.cpp:7660,7664) because Print::apply
+        // there does the per-extruder reshape using filament_self_index;
+        // we use true to bypass that step, matching the headless path the
+        // pre-refactor binary already exercised under the fidelity suite.
         final_cfg = bundle.full_config(
             /*apply_extruder=*/true,
             /*filament_maps=*/std::nullopt);
@@ -664,6 +670,11 @@ int run_slice_mode(const SliceRequest& req) {
     Slic3r::Print print;
     print.restart();
     print.is_BBL_printer() = true;
+    // GUI parity: PartPlate::set_pos_and_size always calls
+    // m_print->set_plate_origin(origin) before slicing
+    // (PartPlate.cpp:2264, 2369). Print::m_origin is otherwise an
+    // uninitialized Eigen Vec3d. Single-plate setup → origin (0,0,0).
+    print.set_plate_origin(Slic3r::Vec3d::Zero());
 
     emit_progress("slicing_apply", 30);
     try {
