@@ -86,4 +86,18 @@ void write_use_set_response_to_stdout(const UseSetResponse& r) {
     std::cout << out.dump() << std::endl;
 }
 
+DumpProfilesRequest parse_dump_profiles_request_from_stdin() {
+    std::stringstream ss;
+    ss << std::cin.rdbuf();
+    json j = json::parse(ss.str());
+    DumpProfilesRequest req;
+    req.profiles_dir = j.value("profiles_dir", std::string{});
+    req.user_dir     = j.value("user_dir",     std::string{});
+    req.out_path     = j.value("out_path",     std::string{});
+    if (req.profiles_dir.empty() || req.out_path.empty())
+        throw std::runtime_error(
+            "dump-profiles: profiles_dir and out_path are required");
+    return req;
+}
+
 }  // namespace orca_headless

@@ -100,10 +100,23 @@ struct UseSetResponse {
     nlohmann::json error_details = nlohmann::json::object();
 };
 
+// Stand up a libslic3r ``PresetBundle`` over PROFILES_DIR (system) and
+// USER_PROFILES_DIR (user-imported), then emit a JSON manifest of all
+// (machines, processes, filaments) at ``out_path``. Used by the FastAPI
+// service at startup and from ``/profiles/reload`` to populate the in-
+// memory profile caches without Python having to walk ``inherits``.
+struct DumpProfilesRequest {
+    std::string profiles_dir;   // /opt/orcaslicer/profiles (system root)
+    std::string user_dir;       // /data (USER_PROFILES_DIR; may be empty)
+    std::string out_path;       // /tmp/profiles-manifest.json
+};
+
 SliceRequest parse_slice_request_from_stdin();
 void write_slice_response_to_stdout(const SliceResponse& r);
 
 UseSetRequest parse_use_set_request_from_stdin();
 void write_use_set_response_to_stdout(const UseSetResponse& r);
+
+DumpProfilesRequest parse_dump_profiles_request_from_stdin();
 
 }  // namespace orca_headless
