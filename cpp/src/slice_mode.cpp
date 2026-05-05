@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <boost/log/trivial.hpp>
 #include <nlohmann/json.hpp>
 
 namespace orca_headless {
@@ -762,6 +763,53 @@ int run_slice_mode(const SliceRequest& req) {
     } catch (const std::exception& e) {
         return fail("apply_failed",
                     std::string("Print::apply: ") + e.what(), response);
+    }
+
+    // Run the GUI's pre-slice validation gate. Mirrors the GUI's
+    // `BackgroundSlicingProcess::start_internal` path which calls
+    // `Print::validate()` before `Print::process()`.
+    //
+    // Why we MUST call it:
+    // - validate() invokes `sequential_print_clearance_valid()`
+    //   (vendor/OrcaSlicer/src/libslic3r/Print.cpp:1222) when
+    //   `print_sequence == ByObject && objects.size() > 1`, which
+    //   sets `ModelInstance::arrange_order = k+1` per instance
+    //   (Print.cpp:881). Without that side effect, GCode export's
+    //   `sort_object_instances_by_model_order` (GCode.cpp:2324-2363)
+    //   uses the default `arrange_order = 0` for every instance and
+    //   `std::lower_bound` deduplicates them — only ONE instance
+    //   reaches the iteration vector, so a multi-object by_object
+    //   slice emits gcode for one object even though both PrintObjects
+    //   are present and listed in slice_info.config (verified against
+    //   `_fixture/07`: GUI emits 8m/25g across both bulbasaurs, ours
+    //   was emitting 4m/13g for one).
+    // - Also catches real errors the user should see upfront rather
+    //   than mid-slice: object exceeds build volume height, sequential
+    //   print collision, wipe-tower compatibility, layer-height vs
+    //   nozzle-diameter, organic-support config, spiral-mode mixed
+    //   regions, etc. (Print.cpp:1186-end).
+    //
+    // `warning` MUST be non-null: validate() dereferences it
+    // unconditionally in some branches (e.g. Print.cpp:1351 for
+    // wipe-tower nozzle-diameter mismatch).
+    emit_progress("slicing_validate", 31);
+    {
+        Slic3r::StringObjectException validate_warning;
+        Slic3r::StringObjectException validate_err;
+        try {
+            validate_err = print.validate(&validate_warning, nullptr, nullptr);
+        } catch (const std::exception& e) {
+            return fail("validate_failed",
+                        std::string("Print::validate: ") + e.what(),
+                        response);
+        }
+        if (!validate_err.string.empty()) {
+            return fail("validate_failed", validate_err.string, response);
+        }
+        if (!validate_warning.string.empty()) {
+            BOOST_LOG_TRIVIAL(info)
+                << "Print::validate warning: " << validate_warning.string;
+        }
     }
 
     emit_progress("slicing_callback", 32);
