@@ -811,6 +811,66 @@ def load_all_profiles() -> dict[str, int]:
     }
 
 
+def iter_inheritance_chain(
+    name: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Walk a profile's inheritance chain leaf→root.
+
+    Returns a list of ``(display_name, raw_profile)`` tuples. Element 0 is
+    the leaf, last element is the root. Raw profiles preserve their
+    ``inherits`` field — the binary uses ``PresetBundle::load_preset`` plus
+    ``select_preset_by_name`` to stitch the chain via libslic3r's own logic
+    rather than us pre-flattening it.
+
+    Used by ``materialize_profiles_for_binary`` to ship every link in the
+    chain to the binary so a real ``PresetBundle`` can resolve inheritance
+    headlessly. Mirrors ``resolve_profile_by_name``'s parent-lookup rules
+    (same-vendor first, then ``OrcaFilamentLibrary`` fallback).
+
+    Raises ``ProfileNotFoundError`` if the leaf or any parent link cannot
+    be resolved.
+    """
+    profile_key = name if name in _raw_profiles else _select_profile_key_by_name(name)
+    if profile_key is None:
+        raise ProfileNotFoundError(
+            f"Profile '{name}' not found while walking inheritance chain"
+        )
+
+    chain: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    current_key: str | None = profile_key
+    while current_key is not None:
+        if current_key in seen:
+            raise ProfileNotFoundError(
+                f"Inheritance cycle detected at '{_display_name(current_key)}'"
+            )
+        seen.add(current_key)
+
+        raw = _raw_profiles.get(current_key)
+        if raw is None:
+            raise ProfileNotFoundError(
+                f"Profile '{current_key}' missing from index — try POST /profiles/reload"
+            )
+        chain.append((_display_name(current_key), raw))
+
+        parent_name = raw.get("inherits")
+        if not parent_name:
+            break
+        parent_key = _resolve_parent_key(
+            str(parent_name).strip(),
+            category=_type_map.get(current_key, ""),
+            preferred_vendor=_vendor_map.get(current_key, ""),
+        )
+        if parent_key is None:
+            raise ProfileNotFoundError(
+                f"Profile '{_display_name(current_key)}' inherits from "
+                f"'{parent_name}', which is not loaded."
+            )
+        current_key = parent_key
+
+    return chain
+
+
 def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
     """Resolve a single profile's inheritance chain, with memoization.
 

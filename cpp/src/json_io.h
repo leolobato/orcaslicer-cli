@@ -9,18 +9,32 @@ namespace orca_headless {
 struct SliceRequest {
     std::string input_3mf;
     std::string output_3mf;
-    std::string machine_profile;
-    std::string process_profile;
-    std::vector<std::string> filament_profiles;
+
+    // Per-category directories holding one JSON per chain link (leaf +
+    // every ancestor) in the inheritance closure. The binary loads each
+    // via ``PresetCollection::load_preset`` so a real ``PresetBundle``
+    // can resolve ``get_selected_preset_parent`` /
+    // ``dirty_options_without_option_list`` natively. Python pre-resolves
+    // each link's flat config so each loaded preset is standalone.
+    std::string machine_chain_dir;
+    std::string process_chain_dir;
+    std::string filament_chain_dir;  // shared across slots, dedup'd by name
+
+    // Leaf preset names — what the bundle's ``select_preset_by_name``
+    // (machine, process) and ``filament_presets`` (per slot) reference.
+    std::string machine_leaf_name;
+    std::string process_leaf_name;
+
     int plate_id = 1;
     bool recenter = true;
 
     // Optional: explicit AMS slot per filament index. Empty = no override.
     std::vector<int> filament_map;
 
-    // Optional: explicit selected filament names per slot, used by the
-    // project-overrides pass to decide whether per-filament customizations
-    // from the 3MF apply (name match) or get discarded (filament swapped).
+    // Selected filament leaf names per slot — populates
+    // ``bundle.filament_presets``. Doubles as the name-guard target for
+    // 3MF per-slot overrides (when the user swaps to a different filament
+    // than the one the 3MF authored, the customizations are discarded).
     std::vector<std::string> filament_settings_id;
 
     // Optional: BBL printer model_id (e.g. "N1" for A1 mini). Stamped onto

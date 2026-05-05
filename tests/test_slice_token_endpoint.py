@@ -55,15 +55,17 @@ def test_slice_v2_uses_binary(client: TestClient, tmp_path: Path) -> None:
     }
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock Filament 0"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock Filament 0"],
         "printer_model_id": "",
     }
     # Touch the files so any read-checks pass
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     async def fake_slice(self, request):
         # Verify the binary received the cached input path
@@ -106,14 +108,16 @@ def test_slice_v2_forwards_plate_type_as_orca_label(
     token = up.json()["token"]
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock Filament 0"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock Filament 0"],
         "printer_model_id": "",
     }
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     captured: dict = {}
 
@@ -162,14 +166,16 @@ def test_slice_v2_omits_plate_type_when_unset(
     token = up.json()["token"]
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock Filament 0"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock Filament 0"],
         "printer_model_id": "",
     }
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     captured: dict = {}
 
@@ -206,14 +212,16 @@ def test_slice_stream_v2_emits_progress_and_result(client: TestClient, tmp_path:
     token = up.json()["token"]
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock Filament 0"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock Filament 0"],
         "printer_model_id": "",
     }
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     async def fake_stream(self, request):
         # Pretend the binary writes the output 3MF before yielding the result event.
@@ -295,14 +303,16 @@ def test_slice_v2_accepts_in_range_filament_map(
     token = up.json()["token"]
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock"],
         "printer_model_id": "",
     }
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     fake_machine = {"name": "A1 mini", "nozzle_diameter": ["0.4"]}
 
@@ -343,14 +353,16 @@ def test_slice_stream_v2_forwards_plate_type_as_orca_label(
     token = up.json()["token"]
 
     fake_paths = {
-        "machine": str(tmp_path / "m.json"),
-        "process": str(tmp_path / "p.json"),
-        "filaments": [str(tmp_path / "f0.json")],
-        "filament_names": ["Mock Filament 0"],
+        "machine_chain_dir": str(tmp_path / "machine"),
+        "process_chain_dir": str(tmp_path / "process"),
+        "filament_chain_dir": str(tmp_path / "filaments"),
+        "machine_leaf_name": "Mock Machine",
+        "process_leaf_name": "Mock Process",
+        "filament_leaf_names": ["Mock Filament 0"],
         "printer_model_id": "",
     }
-    for fp in [fake_paths["machine"], fake_paths["process"]] + fake_paths["filaments"]:
-        Path(fp).write_text("{}")
+    for d in (fake_paths["machine_chain_dir"], fake_paths["process_chain_dir"], fake_paths["filament_chain_dir"]):
+        Path(d).mkdir(parents=True, exist_ok=True)
 
     captured: dict = {}
 

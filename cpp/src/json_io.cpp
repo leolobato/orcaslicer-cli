@@ -13,12 +13,14 @@ SliceRequest parse_slice_request_from_stdin() {
     json j = json::parse(ss.str());
 
     SliceRequest req;
-    req.input_3mf        = j.at("input_3mf").get<std::string>();
-    req.output_3mf       = j.at("output_3mf").get<std::string>();
-    req.machine_profile  = j.at("machine_profile").get<std::string>();
-    req.process_profile  = j.at("process_profile").get<std::string>();
-    req.filament_profiles = j.at("filament_profiles").get<std::vector<std::string>>();
-    req.plate_id         = j.value("plate_id", 1);
+    req.input_3mf          = j.at("input_3mf").get<std::string>();
+    req.output_3mf         = j.at("output_3mf").get<std::string>();
+    req.machine_chain_dir  = j.at("machine_chain_dir").get<std::string>();
+    req.process_chain_dir  = j.at("process_chain_dir").get<std::string>();
+    req.filament_chain_dir = j.at("filament_chain_dir").get<std::string>();
+    req.machine_leaf_name  = j.at("machine_leaf_name").get<std::string>();
+    req.process_leaf_name  = j.at("process_leaf_name").get<std::string>();
+    req.plate_id           = j.value("plate_id", 1);
     if (j.contains("options")) {
         req.recenter = j["options"].value("recenter", true);
     }
