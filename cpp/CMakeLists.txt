@@ -39,6 +39,7 @@ add_executable(orca-headless
     src/progress.cpp
     src/slice_mode.cpp
     src/use_set_mode.cpp
+    src/dump_profiles_mode.cpp
     src/nanosvg_impl.cpp
 )
 
