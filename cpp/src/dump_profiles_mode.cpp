@@ -95,6 +95,29 @@ int run_dump_profiles_mode(const DumpProfilesRequest& req) {
         return fail("system_load_failed", e.what());
     }
 
+    // Absorb user-imported presets (filaments authored via
+    // /profiles/filaments/import, or any per-user machine/process JSON
+    // dropped under USER_PROFILES_DIR). PresetCollection::load_presets
+    // recurses into <dir>/<subdir>/base/ automatically — matches the
+    // existing layout written by ``materialize_filament_import``.
+    if (!req.user_dir.empty() &&
+        boost::filesystem::exists(req.user_dir)) {
+        Slic3r::PresetsConfigSubstitutions subs;
+        const auto rule =
+            Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent;
+        try {
+            const boost::filesystem::path user(req.user_dir);
+            if (boost::filesystem::exists(user / "machine"))
+                bundle.printers.load_presets(req.user_dir, "machine", subs, rule);
+            if (boost::filesystem::exists(user / "process"))
+                bundle.prints.load_presets(req.user_dir, "process", subs, rule);
+            if (boost::filesystem::exists(user / "filament"))
+                bundle.filaments.load_presets(req.user_dir, "filament", subs, rule);
+        } catch (const std::exception& e) {
+            return fail("user_load_failed", e.what());
+        }
+    }
+
     nlohmann::json manifest;
     manifest["machines"]  = nlohmann::json::array();
     manifest["processes"] = nlohmann::json::array();
