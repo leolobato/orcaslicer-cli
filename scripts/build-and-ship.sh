@@ -114,3 +114,22 @@ if ! docker save "$IMAGE" | gzip | ssh -o ServerAliveInterval=15 "$REMOTE" 'gunz
 fi
 ship_elapsed=$(( $(date +%s) - ship_start ))
 notify "orcaslicer-cli build" "Built + shipped to $REMOTE in $((($(date +%s) - start_ts) / 60))m (ship: ${ship_elapsed}s)." "Glass"
+
+# 4. Trigger Portainer to recreate the bambu-gateway stack so the running
+#    container flips to the just-shipped image. Without this, `docker load`
+#    only stages the new image; the running container stays on the old one
+#    until manually recreated. Skipped automatically when no Portainer
+#    token is configured (prints a notice to stderr and exits 0).
+#
+# Pass `SKIP_REDEPLOY=1` to opt out (e.g. when shipping a debug build you
+# don't want auto-flipped to live).
+if [ "${SKIP_REDEPLOY:-0}" != "1" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -x "$SCRIPT_DIR/portainer-redeploy.sh" ]; then
+        if "$SCRIPT_DIR/portainer-redeploy.sh"; then
+            notify "orcaslicer-cli build" "Stack redeployed on $REMOTE — new container live." "Glass"
+        else
+            notify "orcaslicer-cli build" "Image shipped but Portainer redeploy failed — recreate manually." "Basso"
+        fi
+    fi
+fi
