@@ -60,6 +60,41 @@ private:
     std::string             prev_data_dir_;
 };
 
+// Scalar-or-first-of-vector serialization for keys the GUI stores as
+// vectors-with-one-element on simple printers (``nozzle_diameter`` on
+// single-nozzle machines) but as scalars on processes (``layer_height``).
+// Mirrors the list-or-string handling Python does in
+// ``app/profiles.py::get_machine_profiles``.
+std::string opt_first_string(
+    const Slic3r::DynamicPrintConfig& cfg, const char* key) {
+    const auto* opt = cfg.option(key);
+    if (!opt) return "";
+    if (opt->is_vector()) {
+        if (opt->is_nil()) return "";
+        const auto s = opt->serialize();
+        const auto sep = s.find_first_of(",;");
+        return sep == std::string::npos ? s : s.substr(0, sep);
+    }
+    return opt->serialize();
+}
+
+void emit_machines(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
+    for (const auto& preset : bundle.printers) {
+        // ``load_vendor_configs_from_json`` only loads instantiated
+        // presets into the collection — non-instantiated parents stay
+        // in the bundle's internal ``m_config_maps``. So every entry
+        // here is what the API would have surfaced via
+        // ``instantiation == "true"``.
+        nlohmann::json e;
+        e["setting_id"]      = preset.setting_id;
+        e["name"]            = preset.name;
+        e["vendor"]          = preset.vendor ? preset.vendor->name : std::string{};
+        e["nozzle_diameter"] = opt_first_string(preset.config, "nozzle_diameter");
+        e["printer_model"]   = preset.config.opt_string("printer_model");
+        out.push_back(std::move(e));
+    }
+}
+
 }  // namespace
 
 int run_dump_profiles_mode(const DumpProfilesRequest& req) {
@@ -120,6 +155,7 @@ int run_dump_profiles_mode(const DumpProfilesRequest& req) {
 
     nlohmann::json manifest;
     manifest["machines"]  = nlohmann::json::array();
+    emit_machines(bundle, manifest["machines"]);
     manifest["processes"] = nlohmann::json::array();
     manifest["filaments"] = nlohmann::json::array();
 
