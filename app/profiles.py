@@ -711,8 +711,13 @@ def _load_vendor_profiles(vendor_dir: str, index: dict) -> tuple[
     return profiles, type_map
 
 
-def load_all_profiles() -> dict[str, int]:
-    """Read all vendor profile JSONs into memory.
+def load_all_profiles_legacy() -> dict[str, int]:
+    """Read all vendor profile JSONs into memory (legacy disk-walking path).
+
+    Kept temporarily for fallback / debugging while Sub-phase B's manifest
+    path bakes. Production callers should ``await load_all_profiles()``
+    which delegates to ``app.manifest`` and the binary's ``dump-profiles``
+    subcommand. Sub-phase C will delete this body.
 
     Returns a summary dict with profile counts by category plus user count.
     """
@@ -809,6 +814,22 @@ def load_all_profiles() -> dict[str, int]:
         "filaments": counts.get("filament", 0),
         "user": user_count,
     }
+
+
+async def load_all_profiles() -> dict[str, int]:
+    """Populate the in-memory profile caches.
+
+    Sub-phase B keeps the legacy disk walk for full-data slicing
+    (``_raw_profiles`` carries inherits-resolvable JSON content) AND
+    overlays the binary's manifest at ``raw["_manifest"]`` so listing
+    endpoints serve the bundle's already-resolved shape. Sub-phase C
+    will emit full resolved presets from the binary and drop the walk.
+    """
+    from . import manifest as manifest_mod  # break circular import
+    summary = load_all_profiles_legacy()
+    m = await manifest_mod.run_dump_profiles()
+    manifest_mod.annotate_profile_cache(m)
+    return summary
 
 
 def iter_inheritance_chain(
@@ -1885,33 +1906,21 @@ def get_profile_detail(category: str, slug: str) -> dict[str, Any]:
 
 
 def get_machine_profiles() -> list[dict[str, Any]]:
-    """Return resolved leaf machine profiles."""
+    """Return all instantiable machine profiles.
+
+    Reads pre-built manifest entries populated by ``app.manifest`` at
+    startup or after ``/profiles/reload``. The binary already filtered
+    out non-instantiated parents and resolved every field we care about,
+    so this function is a thin pass-through.
+    """
     results = []
     for profile_key, raw in _raw_profiles.items():
         if _type_map.get(profile_key) != "machine":
             continue
-        if raw.get("instantiation") != "true":
+        m = raw.get("_manifest")
+        if not m:
             continue
-        try:
-            resolved = resolve_profile_by_name(profile_key)
-        except ProfileNotFoundError as exc:
-            logger.warning(
-                "Skipping %s '%s' from listing: %s",
-                "machine", profile_key, exc,
-            )
-            continue
-        if resolved is None:
-            continue
-        nozzle = resolved.get("nozzle_diameter", ["0.4"])
-        if isinstance(nozzle, list):
-            nozzle = nozzle[0] if nozzle else "0.4"
-        results.append({
-            "setting_id": _slug_for_profile(profile_key),
-            "name": resolved.get("name", _display_name(profile_key)),
-            "vendor": _vendor_map.get(profile_key, ""),
-            "nozzle_diameter": nozzle,
-            "printer_model": resolved.get("printer_model", ""),
-        })
+        results.append(m)
     results.sort(key=lambda x: x["name"])
     return results
 
@@ -1919,55 +1928,22 @@ def get_machine_profiles() -> list[dict[str, Any]]:
 def get_process_profiles(
     machine_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return resolved leaf process profiles, optionally filtered by machine."""
-    machine_names: set[str] | None = None
-    if machine_id:
-        machine_names = _machine_names_for_slug(machine_id)
-        if not machine_names:
-            raise ProfileNotFoundError(
-                f"Machine with id '{machine_id}' not found"
-            )
+    """Return process profiles, optionally filtered by machine setting_id."""
+    if machine_id and not _setting_id_index.get(machine_id):
+        raise ProfileNotFoundError(
+            f"Machine with id '{machine_id}' not found"
+        )
 
     results = []
     for profile_key, raw in _raw_profiles.items():
         if _type_map.get(profile_key) != "process":
             continue
-        if raw.get("instantiation") != "true":
+        m = raw.get("_manifest")
+        if not m:
             continue
-        try:
-            resolved = resolve_profile_by_name(profile_key)
-        except ProfileNotFoundError as exc:
-            logger.warning(
-                "Skipping %s '%s' from listing: %s",
-                "process", profile_key, exc,
-            )
+        if machine_id and machine_id not in m.get("compatible_printers", []):
             continue
-        if resolved is None:
-            continue
-
-        if machine_names:
-            compat = resolved.get("compatible_printers", [])
-            if not any(m in compat for m in machine_names):
-                continue
-
-        # Map compatible_printers names to vendor-prefixed slugs
-        compat_slugs = []
-        for cp_name in resolved.get("compatible_printers", []):
-            cp_key = _select_profile_key_by_name(cp_name, category="machine")
-            if cp_key:
-                compat_slugs.append(_slug_for_profile(cp_key))
-
-        layer_height = resolved.get("layer_height", "")
-        if isinstance(layer_height, list):
-            layer_height = layer_height[0] if layer_height else ""
-
-        results.append({
-            "setting_id": _slug_for_profile(profile_key),
-            "name": resolved.get("name", _display_name(profile_key)),
-            "vendor": _vendor_map.get(profile_key, ""),
-            "compatible_printers": compat_slugs,
-            "layer_height": layer_height,
-        })
+        results.append(m)
     results.sort(key=lambda x: x["name"])
     return results
 
@@ -1976,67 +1952,23 @@ def get_filament_profiles(
     machine_id: str | None = None,
     ams_assignable_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return resolved leaf filament profiles, optionally filtered by machine."""
-    machine_names: set[str] | None = None
-    if machine_id:
-        machine_names = _machine_names_for_slug(machine_id)
-        if not machine_names:
-            raise ProfileNotFoundError(
-                f"Machine with id '{machine_id}' not found"
-            )
+    """Return filament profiles, optionally filtered by machine + AMS-assignability."""
+    if machine_id and not _setting_id_index.get(machine_id):
+        raise ProfileNotFoundError(
+            f"Machine with id '{machine_id}' not found"
+        )
 
     results = []
     for profile_key, raw in _raw_profiles.items():
         if _type_map.get(profile_key) != "filament":
             continue
-        if raw.get("instantiation") != "true":
+        m = raw.get("_manifest")
+        if not m:
             continue
-        try:
-            resolved = resolve_profile_by_name(profile_key)
-        except ProfileNotFoundError as exc:
-            logger.warning(
-                "Skipping %s '%s' from listing: %s",
-                "filament", profile_key, exc,
-            )
+        if ams_assignable_only and not m.get("ams_assignable"):
             continue
-        if resolved is None:
+        if machine_id and machine_id not in m.get("compatible_printers", []):
             continue
-        setting_id = _slug_for_profile(profile_key)
-        ams_assignable = _is_ams_assignable_filament(
-            raw,
-            resolved,
-            setting_id=setting_id,
-        )
-        if ams_assignable_only and not ams_assignable:
-            continue
-
-        if machine_names:
-            compat = resolved.get("compatible_printers", [])
-            if not any(m in compat for m in machine_names):
-                continue
-
-        # Map compatible_printers names to vendor-prefixed slugs
-        compat_slugs = []
-        for cp_name in resolved.get("compatible_printers", []):
-            cp_key = _select_profile_key_by_name(cp_name, category="machine")
-            if cp_key:
-                compat_slugs.append(_slug_for_profile(cp_key))
-
-        filament_type = resolved.get("filament_type", [""])[0] if isinstance(
-            resolved.get("filament_type"), list
-        ) else resolved.get("filament_type", "")
-        filament_id = _extract_filament_id(resolved)
-        if not filament_id:
-            filament_id = _extract_filament_id(raw)
-
-        results.append({
-            "setting_id": setting_id,
-            "filament_id": filament_id,
-            "name": resolved.get("name", _display_name(profile_key)),
-            "vendor": _vendor_map.get(profile_key, ""),
-            "compatible_printers": compat_slugs,
-            "filament_type": filament_type,
-            "ams_assignable": ams_assignable,
-        })
+        results.append(m)
     results.sort(key=lambda x: x["name"])
     return results

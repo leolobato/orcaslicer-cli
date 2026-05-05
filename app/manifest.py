@@ -75,22 +75,19 @@ async def run_dump_profiles() -> dict[str, list[dict[str, Any]]]:
         out_path.unlink(missing_ok=True)
 
 
-def populate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
-    """Replace the module-level profile caches in ``app.profiles`` with manifest data.
+def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
+    """Stamp each manifest entry onto the matching ``_raw_profiles`` entry.
 
-    Caches populated: ``_raw_profiles``, ``_type_map``, ``_vendor_map``,
-    ``_name_index``, ``_setting_id_index``. Each entry stores the manifest
-    dict at ``raw["_manifest"]`` so listing functions can serve the API
-    response directly without re-resolving anything.
+    The legacy disk-walking loader populates ``_raw_profiles`` with full
+    JSON content (config keys, ``inherits``, etc.) — slicing depends on
+    that for inheritance resolution. The bundle's manifest carries the
+    *resolved* listing-API shape. Stamp it as ``raw["_manifest"]`` so
+    the listing endpoints serve the bundle's data without re-walking
+    Python's chain, while the slicer continues to read ``raw`` directly.
+
+    Sub-phase C will collapse the two by having the binary emit full
+    resolved presets too, dropping the legacy walk.
     """
-    profiles._raw_profiles.clear()
-    profiles._type_map.clear()
-    profiles._vendor_map.clear()
-    profiles._name_index.clear()
-    profiles._setting_id_index.clear()
-    if hasattr(profiles, "_resolved_cache"):
-        profiles._resolved_cache.clear()
-
     for category, entries in (
         ("machine",  manifest["machines"]),
         ("process",  manifest["processes"]),
@@ -102,16 +99,18 @@ def populate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
             if not name:
                 continue
             profile_key = profiles._profile_key(vendor, name)
-            # Synthesize a minimal raw dict matching the legacy shape:
-            # listing functions look at ``instantiation``/``setting_id``
-            # directly. The full manifest entry lives under ``_manifest``
-            # for direct serialization in the listing path.
-            raw: dict[str, Any] = {
-                "name":          name,
-                "instantiation": "true",
-                "setting_id":    entry.get("setting_id", ""),
-                "_manifest":     entry,
-            }
-            if "filament_id" in entry:
-                raw["filament_id"] = entry["filament_id"]
-            profiles._index_profile(profile_key, raw, category, vendor)
+            raw = profiles._raw_profiles.get(profile_key)
+            if raw is None:
+                # Bundle saw a preset the legacy walk didn't (e.g. an
+                # OrcaFilamentLibrary variant). Synthesize a minimal raw
+                # so the listing path still surfaces it; slicing won't
+                # be able to resolve it but listing endpoints will.
+                raw = {
+                    "name":          name,
+                    "instantiation": "true",
+                    "setting_id":    entry.get("setting_id", ""),
+                }
+                if "filament_id" in entry:
+                    raw["filament_id"] = entry["filament_id"]
+                profiles._index_profile(profile_key, raw, category, vendor)
+            raw["_manifest"] = entry

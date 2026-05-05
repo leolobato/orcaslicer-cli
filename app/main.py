@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI):
         max_files=cfg.CACHE_MAX_FILES,
     )
     app.state.inspect_cache = InspectCache()
-    load_all_profiles()
+    await load_all_profiles()
     yield
 
 
@@ -521,7 +521,7 @@ async def import_process_profile(request: Request, replace: bool = False):
         except OSError:
             logger.warning("Failed to remove legacy file %s", existing_path)
 
-    load_all_profiles()
+    await load_all_profiles()
 
     # Derive response fields from the resolved chain for consistency
     # with the filament endpoint and to surface the canonical name even
@@ -561,7 +561,7 @@ async def delete_process_profile(setting_id: str):
         )
 
     os.remove(file_path)
-    load_all_profiles()
+    await load_all_profiles()
 
     return ProcessProfileDeleteResponse(
         setting_id=setting_id,
@@ -619,7 +619,7 @@ async def import_filament_profile(request: Request, replace: bool = False):
         except OSError:
             logger.warning("Failed to remove legacy file %s", existing_path)
 
-    load_all_profiles()
+    await load_all_profiles()
 
     # Derive response fields from the resolved chain so thin imports
     # report parent-inherited values (e.g. `filament_type` from parent).
@@ -664,7 +664,7 @@ async def delete_filament_profile(setting_id: str):
         )
 
     os.remove(file_path)
-    load_all_profiles()
+    await load_all_profiles()
 
     return FilamentProfileDeleteResponse(
         setting_id=setting_id,
@@ -675,7 +675,7 @@ async def delete_filament_profile(setting_id: str):
 @app.post("/profiles/reload", response_model=ReloadResponse, tags=["Profiles"])
 async def reload_profiles():
     """Hot-reload all profiles (vendor + user) from disk."""
-    summary = load_all_profiles()
+    summary = await load_all_profiles()
     return ReloadResponse(**summary)
 
 
