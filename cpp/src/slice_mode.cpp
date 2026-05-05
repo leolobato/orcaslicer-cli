@@ -53,6 +53,82 @@ static const std::set<std::string> s_dirty_diff_ignore{
     "printer_settings_id",
 };
 
+// Printer-slot blocklist for 3MF override application: keys whose values
+// describe per-extruder topology (vector layouts indexed by extruder
+// count). The 3MF's ``different_settings_to_system[printer_slot]`` may
+// declare them when the authoring printer had a different topology
+// (e.g. P-series multi-extruder values exported into a project sliced
+// for an A1 mini), and overlaying them onto our resolved machine config
+// recreates the SIGSEGV class — ``update_values_to_printer_extruders``
+// dereferences out of bounds when the size doesn't match the active
+// machine's extruder count.
+static const std::set<std::string> s_printer_slot_blocklist{
+    "extruder_variant_list",
+    "printer_extruder_variant",
+    "printer_extruder_id",
+    "extruder_type",
+    "nozzle_volume_type",
+    "filament_extruder_variant",
+    "filament_self_index",
+    "extruder_ams_count",
+};
+
+// Split a semicolon-delimited key list (the format
+// ``different_settings_to_system`` slots use).
+std::vector<std::string> split_semicolons(const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i == s.size() || s[i] == ';') {
+            if (i > start) out.emplace_back(s, start, i - start);
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+// Overlay the keys named in ``key_list`` from ``src`` onto ``dst``.
+// Used to apply 3MF process- and printer-slot customizations onto the
+// final config — the bundle's ``load_project_embedded_presets`` only
+// handles filament variants. Without this pass, project-customized
+// process keys (``layer_height``, ``bridge_speed``, etc.) revert to
+// the system preset's defaults and the slice diverges meaningfully
+// from the GUI.
+//
+// Returns the list of keys actually transferred.
+std::vector<std::string> apply_threemf_slot_overrides(
+    Slic3r::DynamicPrintConfig& dst,
+    const Slic3r::DynamicPrintConfig& src,
+    const std::string& key_list,
+    bool exclude_filament_keys,
+    const std::set<std::string>& excluded_keys) {
+    auto starts_with = [](const std::string& s, const char* prefix) {
+        const size_t n = std::strlen(prefix);
+        return s.size() >= n && std::memcmp(s.data(), prefix, n) == 0;
+    };
+    auto ends_with = [](const std::string& s, const char* suffix) {
+        const size_t n = std::strlen(suffix);
+        return s.size() >= n &&
+            std::memcmp(s.data() + s.size() - n, suffix, n) == 0;
+    };
+    std::vector<std::string> transferred;
+    for (const auto& key : split_semicolons(key_list)) {
+        if (key == "compatible_printers" || key == "compatible_prints") continue;
+        if (exclude_filament_keys &&
+            (starts_with(key, "filament_") || ends_with(key, "_filament"))) {
+            continue;
+        }
+        if (excluded_keys.count(key) != 0) continue;
+        const Slic3r::ConfigOption* src_opt = src.option(key);
+        if (src_opt == nullptr) continue;
+        Slic3r::ConfigOption* dst_opt = dst.option(key, /*create=*/false);
+        if (dst_opt == nullptr) continue;
+        dst_opt->set(src_opt);
+        transferred.push_back(key);
+    }
+    return transferred;
+}
+
 // Load every ``.json`` file from ``dir_path`` into ``coll`` via
 // ``PresetCollection::load_preset``. Each link in the inheritance closure
 // (leaf + ancestors) is its own JSON; the bundle's parent lookup then
@@ -129,20 +205,6 @@ int fail(const std::string& code, const std::string& message,
     r.error_message = message;
     write_slice_response_to_stdout(r);
     return 1;
-}
-
-// Diff a collection's edited preset against its parent. Returns the list
-// of keys whose values differ — the same data the GUI stamps into the
-// 3MF's ``different_settings_to_system`` fingerprint
-// (PresetBundle.cpp:3083 for prints; equivalent paths for filaments and
-// printers).
-std::vector<std::string> diff_edited_against_parent(
-    Slic3r::PresetCollection& coll) {
-    const Slic3r::Preset& edited = coll.get_edited_preset();
-    const Slic3r::Preset* parent = coll.get_selected_preset_parent();
-    if (parent == nullptr) return {};
-    return coll.dirty_options_without_option_list(
-        &edited, parent, s_dirty_diff_ignore, /*deep_compare=*/false);
 }
 
 }  // namespace
@@ -382,27 +444,58 @@ int run_slice_mode(const SliceRequest& req) {
                     std::string("full_config: ") + e.what(), response);
     }
 
-    // 9. Build the settings_transfer response. The bundle's edited
-    //    preset → parent diff is the same data the GUI stamps into the
-    //    3MF's `different_settings_to_system` fingerprint.
+    // 9. Apply the 3MF's process- and printer-slot customizations on top
+    //    of the bundle's full_config output. The bundle's
+    //    ``load_project_embedded_presets`` only handles filament variants
+    //    (it absorbs project-local Preset objects from the 3MF). Process
+    //    and printer customizations live in the 3MF's project_settings.config
+    //    body — ``threemf_config`` here — and the
+    //    ``different_settings_to_system`` fingerprint lists which keys
+    //    were customized. Layout: ``[process, filament_0, …, filament_{N-1}, printer]``.
+    //
+    //    Without this pass, project-customized process keys (e.g.
+    //    layer_height, bridge_speed, default_acceleration) revert to the
+    //    system preset's defaults and the slice diverges meaningfully
+    //    from the GUI (verified on fixture 01: GUI's layer_height = 0.25
+    //    customization was lost, slice ran 53% slower with default 0.20).
+    std::vector<std::string> process_override_keys;
+    std::vector<std::string> printer_override_keys;
+    if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "different_settings_to_system", false);
+        fp != nullptr && !fp->values.empty()) {
+        // Process slot (index 0): exclude filament-like keys (they belong
+        // to filament slots even when listed under process).
+        process_override_keys = apply_threemf_slot_overrides(
+            final_cfg, threemf_config, fp->values[0],
+            /*exclude_filament_keys=*/true,
+            /*excluded_keys=*/{});
+
+        // Printer slot (last): no name guard — machine is fixed by the
+        // request. Apply with the topology blocklist to avoid SIGSEGVs
+        // from per-extruder vector mismatches.
+        if (fp->values.size() >= 2) {
+            printer_override_keys = apply_threemf_slot_overrides(
+                final_cfg, threemf_config, fp->values.back(),
+                /*exclude_filament_keys=*/false,
+                /*excluded_keys=*/s_printer_slot_blocklist);
+        }
+    }
+
+    // 10. Build the settings_transfer response. Process and printer keys
+    //     come from the override pass above; filament_slots was populated
+    //     during step 5 (project-local variant detection).
     nlohmann::json transfer_status = nlohmann::json::object();
     {
-        std::vector<std::string> process_keys =
-            diff_edited_against_parent(bundle.prints);
-        std::vector<std::string> printer_keys =
-            diff_edited_against_parent(bundle.printers);
         const bool any_filament_applied = std::any_of(
             filament_slot_status.begin(), filament_slot_status.end(),
             [](const nlohmann::json& e) { return e["status"] == "applied"; });
         const bool any =
-            !process_keys.empty() || !printer_keys.empty() || any_filament_applied;
-        // "no_3mf_settings" was the legacy signal for "input had no
-        // different_settings_to_system fingerprint at all". The bundle
-        // path always produces a diff (even if empty), so we no longer
-        // emit that status — collapse to applied/no_customizations.
+            !process_override_keys.empty() ||
+            !printer_override_keys.empty() ||
+            any_filament_applied;
         transfer_status["status"] = any ? "applied" : "no_customizations";
-        transfer_status["process_keys"] = process_keys;
-        transfer_status["printer_keys"] = printer_keys;
+        transfer_status["process_keys"] = process_override_keys;
+        transfer_status["printer_keys"] = printer_override_keys;
         transfer_status["filament_slots"] = filament_slot_status;
     }
 
