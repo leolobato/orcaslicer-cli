@@ -147,27 +147,33 @@ size_t load_chain_dir_into(
         throw std::runtime_error("chain dir is not a directory: " + dir_path);
     }
 
-    // For TYPE_FILAMENT collections, full_fff_config's per-slot vector
-    // merge loop (PresetBundle.cpp:3201-3236) iterates every key in
-    // `filaments.default_preset().config` and dereferences each slot's
-    // `filament_temp_configs[i].option(key)` to build a per-slot value
-    // array. If a slot's config is missing any of those keys, the resulting
-    // null pointer in `opt_vec_dst->set(filament_opts)` segfaults.
+    // Mirrors the GUI's per-subfile load sequence at
+    // PresetBundle.cpp:4077-4103 (parse_subfile, called from
+    // load_vendor_configs_from_json):
     //
-    // Vendor filament JSONs commonly omit a few options (e.g.
-    // `filament_self_index`, `pellet_flow_coefficient`) — in the GUI those
-    // get filled in elsewhere, but `PresetCollection::load_preset` doesn't
-    // touch the config. Pre-fill missing filament keys from
-    // FullPrintConfig defaults (filtered to Preset::filament_options) so
-    // every loaded filament has the full key set the merge loop expects.
-    Slic3r::DynamicPrintConfig filament_defaults;
-    if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
-        const auto& full_defaults = Slic3r::FullPrintConfig::defaults();
-        for (const std::string& key : Slic3r::Preset::filament_options()) {
-            const Slic3r::ConfigOption* opt = full_defaults.option(key);
-            if (opt != nullptr) filament_defaults.set_key_value(key, opt->clone());
-        }
-    }
+    //   config = *default_config;           // parent's full config OR
+    //                                       // collection's default_preset
+    //   config.apply(config_src);           // overlay this file's deltas
+    //   extend_default_config_length(...);  // resize per-variant vectors
+    //   Preset::normalize(config);          // pad per-filament vectors
+    //
+    // Our chain JSONs are pre-flattened in Python (resolve_profile_by_name
+    // does the recursive merge), so we don't walk the chain in C++ — but
+    // we still need the GUI's "fill missing keys from defaults" step.
+    // Otherwise multi-filament slicing SIGSEGVs in full_fff_config's
+    // per-slot vector merge (PresetBundle.cpp:3201-3236), which iterates
+    // every key in `filaments.default_preset().config` and dereferences
+    // each slot's `filament_temp_configs[i].option(key)` — null pointer
+    // for any missing key crashes `opt_vec_dst->set(...)`. Vendor JSONs
+    // commonly omit options like `filament_self_index` and
+    // `pellet_flow_coefficient`; the GUI fills them via the parent-chain
+    // copy at parse_subfile:4077.
+    //
+    // Use the collection's own default_preset as the "fill" source —
+    // that's what parse_subfile does at line 4075 (`default_preset()`)
+    // for non-printer types. Printer uses default_preset_for(config_src)
+    // but for our case (no SLA) the result is the same default preset.
+    const Slic3r::DynamicPrintConfig& defaults = coll.default_preset().config;
 
     size_t loaded = 0;
     for (const auto& entry : fs::directory_iterator(dir_path)) {
@@ -176,21 +182,21 @@ size_t load_chain_dir_into(
         const std::string path = entry.path().string();
 
         std::map<std::string, std::string> kv;
-        Slic3r::DynamicPrintConfig cfg;
+        Slic3r::DynamicPrintConfig config_src;
         Slic3r::ConfigSubstitutionContext ctx(
             Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
         std::string reason;
-        cfg.load_from_json(
+        config_src.load_from_json(
             path, ctx, /*load_inherits_to_config=*/true, kv, reason);
 
-        // Layer JSON over filament defaults so missing keys get safe
-        // values rather than null pointers in the multi-filament merge.
-        if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
-            Slic3r::DynamicPrintConfig merged;
-            merged.apply(filament_defaults);
-            merged.apply(cfg);
-            cfg = std::move(merged);
-        }
+        // Step 1+2: layer JSON over defaults (parse_subfile:4077-4078).
+        Slic3r::DynamicPrintConfig cfg;
+        cfg.apply(defaults);
+        cfg.apply(config_src);
+
+        // Step 3: resize per-variant vectors (parse_subfile:4079).
+        Slic3r::extend_default_config_length(
+            cfg, /*set_nil_to_default=*/true, defaults);
 
         const std::string name =
             (kv.count("name") && !kv["name"].empty())
@@ -204,13 +210,12 @@ size_t load_chain_dir_into(
         if (auto it = kv.find("setting_id"); it != kv.end()) {
             preset.setting_id = it->second;
         }
-        // Preset::normalize for FILAMENT only (printer/process get
-        // corrupted by its single_extruder_multi_material branch — see
-        // Preset.cpp:373-379, set_num_filaments(1) truncates printer
-        // per-filament-vector keys on a multi-filament slice).
-        if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
-            Slic3r::Preset::normalize(preset.config);
-        }
+        // Step 4: Preset::normalize (parse_subfile:4103).
+        // Safe on all three preset types — its set_num_filaments call
+        // (Preset.cpp:379) is gated on filament_diameter being present,
+        // which only filament configs have. Printer/process configs make
+        // it a no-op.
+        Slic3r::Preset::normalize(preset.config);
         ++loaded;
     }
     return loaded;
