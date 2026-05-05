@@ -173,16 +173,22 @@ size_t load_chain_dir_into(
             preset.setting_id = it->second;
         }
         // PresetCollection::load_preset (Preset.cpp:2291-2316) does NOT
-        // call Preset::normalize — it stores the config verbatim. The
-        // GUI's load path normalizes elsewhere (e.g.
-        // load_project_embedded_presets at PresetCollection.cpp:1572 for
-        // project-local variants). For our chain JSONs we have to do it
-        // explicitly: pads per-filament-vector keys to filament_diameter's
+        // call Preset::normalize. For FILAMENT collections we run it
+        // explicitly to pad per-filament-vector keys to filament_diameter's
         // length so that full_fff_config's per-slot merge
-        // (PresetBundle.cpp:3217-3220) doesn't nullptr-deref when a
-        // user-imported filament JSON omits a key the leaf system
-        // filament would have via inheritance.
-        Slic3r::Preset::normalize(preset.config);
+        // (PresetBundle.cpp:3217-3220) doesn't nullptr-deref on sparse
+        // user-imported filament JSONs.
+        //
+        // Do NOT call Preset::normalize on PRINTER or PROCESS presets:
+        // its single_extruder_multi_material branch (Preset.cpp:373-379)
+        // calls config.set_num_filaments(1) on those configs when
+        // filament_diameter is absent, which truncates per-filament-vector
+        // keys (filament_extruder_variant, filament_self_index, etc.) on
+        // a multi-filament slice and SIGSEGVs in full_fff_config's
+        // per-slot vector-merge loop.
+        if (coll.type() == Slic3r::Preset::TYPE_FILAMENT) {
+            Slic3r::Preset::normalize(preset.config);
+        }
         ++loaded;
     }
     return loaded;
@@ -355,6 +361,18 @@ int run_slice_mode(const SliceRequest& req) {
     //    base mismatches and we keep the user's choice; the variant's
     //    customizations are reported as "filament_changed" / discarded
     //    in the settings_transfer response.
+    //    Per-slot status semantics (mirrors the OLD apply_overrides_for_slot
+    //    name guard, deleted in d730c52 and partially restored here):
+    //      "no_customizations"  — 3MF didn't author this slot or named a
+    //                             filament we can't resolve; nothing to apply.
+    //      "applied"            — user's pick matches the 3MF's author choice
+    //                             (either by exact name or via project-local
+    //                             variant inheriting from user's pick); the
+    //                             per-filament-slot 3MF override pass below
+    //                             will overlay the customized keys.
+    //      "filament_changed"   — user swapped to a different filament base;
+    //                             3MF customizations don't apply to the new
+    //                             filament, report the discarded key list.
     nlohmann::json filament_slot_status = nlohmann::json::array();
     {
         const auto* threemf_names =
@@ -372,41 +390,36 @@ int run_slice_mode(const SliceRequest& req) {
             entry["transferred"] = nlohmann::json::array();
             entry["discarded"] = nlohmann::json::array();
 
-            if (original.empty() || original == selected) {
+            if (original.empty()) {
                 entry["status"] = "no_customizations";
                 filament_slot_status.push_back(entry);
                 continue;
             }
+            // Exact name match — user picked the same filament the 3MF
+            // authored with. Per-slot customizations apply directly.
+            if (original == selected) {
+                entry["status"] = "applied";
+                filament_slot_status.push_back(entry);
+                continue;
+            }
+            // Names differ. Could be a project-local variant
+            // ("Bambu PLA Basic @BBL A1M(my-project.3mf)") whose
+            // inherits points at the user's pick — in which case we
+            // route the variant into bundle.filament_presets[i] so its
+            // pre-stitched config (parent + deltas, applied during
+            // load_project_embedded_presets) is what full_config reads.
             const Slic3r::Preset* variant =
                 bundle.filaments.find_preset(original, false, true);
-            if (variant == nullptr) {
-                // 3MF named a filament that doesn't exist anywhere
-                // (catalog or project-local) — caller already saw this
-                // via /slice/v2's unknown_presets warning. Fall through
-                // to user's choice.
-                entry["status"] = "no_customizations";
+            if (variant != nullptr && variant->inherits() == selected) {
+                bundle.filament_presets[i] = original;
+                entry["status"] = "applied";
                 filament_slot_status.push_back(entry);
                 continue;
             }
-            // A project-local variant inherits from the system preset it
-            // was forked from. If that matches the user's slot pick,
-            // the variant carries deltas the user implicitly accepted by
-            // not changing the slot.
-            if (variant->inherits() == selected) {
-                bundle.filament_presets[i] = original;
-                // Capture what was overlaid: the variant's deltas vs its
-                // parent (the system preset).
-                const Slic3r::Preset* parent =
-                    bundle.filaments.find_preset(variant->inherits(), false, true);
-                if (parent != nullptr) {
-                    auto changed = bundle.filaments.dirty_options_without_option_list(
-                        variant, parent, s_dirty_diff_ignore, false);
-                    entry["transferred"] = changed;
-                }
-                entry["status"] = "applied";
-            } else {
-                // User swapped to a different base — variant's deltas
-                // don't apply; report what was discarded.
+            // Genuine filament swap: customizations don't apply. Report
+            // the discarded keys (the variant's deltas vs its base) so
+            // the client can surface what was dropped.
+            if (variant != nullptr) {
                 const Slic3r::Preset* variant_parent =
                     bundle.filaments.find_preset(variant->inherits(), false, true);
                 if (variant_parent != nullptr) {
@@ -414,8 +427,8 @@ int run_slice_mode(const SliceRequest& req) {
                         variant, variant_parent, s_dirty_diff_ignore, false);
                     entry["discarded"] = discarded;
                 }
-                entry["status"] = "filament_changed";
             }
+            entry["status"] = "filament_changed";
             filament_slot_status.push_back(entry);
         }
     }
