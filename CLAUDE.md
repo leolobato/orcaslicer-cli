@@ -61,6 +61,10 @@ USER_PROFILES_DIR = /data
 LOG_LEVEL         = INFO
 ```
 
+## Working principle
+
+**Don't want clean fixes. Want GUI parity.** Go through the C++ methods instead of reimplementing existing paths. Reuse over reimplement. When something looks like it could be simplified by deleting code or porting logic into the wrapper, FIRST check whether libslic3r / OrcaSlicer GUI already does it — and call that path. Every parallel implementation is a drift surface (verified pattern: deleting `apply_overrides_for_slot` thinking `load_project_embedded_presets` covered it lost fixture 01's process customizations and produced +53% time drift; deleting `Print::validate()` lost fixture 07's per-instance `arrange_order` side effect and broke multi-object by_object output). When in doubt, read the GUI source at `../OrcaSlicer/src/` and call its function directly.
+
 ## Key Details
 
 - The OrcaSlicer source is available at ../OrcaSlicer. We should use the GUI behavior as reference for our CLI wrapper and the source code should be explored whenever needed.

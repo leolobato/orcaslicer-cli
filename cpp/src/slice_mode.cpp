@@ -172,6 +172,17 @@ size_t load_chain_dir_into(
         if (auto it = kv.find("setting_id"); it != kv.end()) {
             preset.setting_id = it->second;
         }
+        // PresetCollection::load_preset (Preset.cpp:2291-2316) does NOT
+        // call Preset::normalize — it stores the config verbatim. The
+        // GUI's load path normalizes elsewhere (e.g.
+        // load_project_embedded_presets at PresetCollection.cpp:1572 for
+        // project-local variants). For our chain JSONs we have to do it
+        // explicitly: pads per-filament-vector keys to filament_diameter's
+        // length so that full_fff_config's per-slot merge
+        // (PresetBundle.cpp:3217-3220) doesn't nullptr-deref when a
+        // user-imported filament JSON omits a key the leaf system
+        // filament would have via inheritance.
+        Slic3r::Preset::normalize(preset.config);
         ++loaded;
     }
     return loaded;
@@ -469,6 +480,48 @@ int run_slice_mode(const SliceRequest& req) {
             final_cfg, threemf_config, fp->values[0],
             /*exclude_filament_keys=*/true,
             /*excluded_keys=*/{});
+
+        // Per-filament slots (indices 1..N): apply only when the slot's
+        // name guard from step 5 said "applied" (project-local variant
+        // matched user's pick, or no project-local but the 3MF and user
+        // agree on the filament). For "filament_changed" slots, the
+        // 3MF's customization referenced a different filament's defaults
+        // and we leave it discarded. For "no_customizations", the apply
+        // is idempotent (vector already matches threemf_config) but we
+        // skip it for clarity.
+        //
+        // Most multi-filament 3MFs ALSO embed a project-local preset for
+        // each customized slot, which load_project_embedded_presets
+        // already stitched into the bundle. For those, this overlay is
+        // idempotent (same values). For 3MFs that list per-slot
+        // customizations in the fingerprint without an embedded preset
+        // (rare; the GUI only writes the fingerprint when it also
+        // creates a project-local preset), this overlay is what carries
+        // the override through.
+        const size_t num_filament_slots =
+            fp->values.size() >= 2 ? fp->values.size() - 2 : 0;
+        for (size_t i = 0; i < num_filament_slots && i < filament_slot_status.size(); ++i) {
+            if (filament_slot_status[i]["status"] != "applied") continue;
+            const std::string& key_list = fp->values[i + 1];
+            if (key_list.empty()) continue;
+            auto transferred = apply_threemf_slot_overrides(
+                final_cfg, threemf_config, key_list,
+                /*exclude_filament_keys=*/false,
+                /*excluded_keys=*/{});
+            // Merge into the slot status — step 5 may have already
+            // captured the variant's deltas via dirty_options; union
+            // them with what we overlaid here so the response reflects
+            // the full set of keys that landed.
+            std::set<std::string> seen;
+            for (const auto& k : filament_slot_status[i]["transferred"]) {
+                seen.insert(k.get<std::string>());
+            }
+            for (const auto& k : transferred) {
+                if (seen.insert(k).second) {
+                    filament_slot_status[i]["transferred"].push_back(k);
+                }
+            }
+        }
 
         // Printer slot (last): no name guard — machine is fixed by the
         // request. Apply with the topology blocklist to avoid SIGSEGVs
