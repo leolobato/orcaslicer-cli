@@ -6,7 +6,6 @@
 #include <iostream>
 #include <random>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
@@ -16,6 +15,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 
 // Use ``boost::filesystem`` (libslic3r's choice) directly to avoid
 // colliding with the ``namespace fs = boost::filesystem;`` alias the
@@ -62,22 +62,36 @@ private:
     std::string             prev_data_dir_;
 };
 
-// Scalar-or-first-of-vector serialization for keys the GUI stores as
+// Scalar-or-first-of-vector for keys the GUI stores as
 // vectors-with-one-element on simple printers (``nozzle_diameter`` on
 // single-nozzle machines) but as scalars on processes (``layer_height``).
 // Mirrors the list-or-string handling Python does in
 // ``app/profiles.py::get_machine_profiles``.
+//
+// We do NOT call ``ConfigOption::serialize()`` for vector strings —
+// that returns the cstyle-escaped form (``"PETG Basic"`` with literal
+// quotes for entries containing spaces). The snapshot stores raw values
+// without escaping, so we read typed vectors directly.
 std::string opt_first_string(
     const Slic3r::DynamicPrintConfig& cfg, const char* key) {
     const auto* opt = cfg.option(key);
     if (!opt) return "";
-    if (opt->is_vector()) {
-        if (opt->is_nil()) return "";
-        const auto s = opt->serialize();
-        const auto sep = s.find_first_of(",;");
-        return sep == std::string::npos ? s : s.substr(0, sep);
-    }
-    return opt->serialize();
+    if (const auto* sv = dynamic_cast<const Slic3r::ConfigOptionStrings*>(opt))
+        return sv->values.empty() ? std::string{} : sv->values.front();
+    if (const auto* fv = dynamic_cast<const Slic3r::ConfigOptionFloats*>(opt))
+        return fv->values.empty() ? std::string{} : Slic3r::float_to_string_decimal_point(fv->values.front());
+    if (const auto* iv = dynamic_cast<const Slic3r::ConfigOptionInts*>(opt))
+        return iv->values.empty() ? std::string{} : std::to_string(iv->values.front());
+    if (const auto* pv = dynamic_cast<const Slic3r::ConfigOptionPercents*>(opt))
+        return pv->values.empty() ? std::string{} : Slic3r::float_to_string_decimal_point(pv->values.front());
+    // Scalar fallback (e.g. ConfigOptionFloat for layer_height) —
+    // ``serialize()`` doesn't quote non-string scalars.
+    if (!opt->is_vector()) return opt->serialize();
+    // Unknown vector type: best-effort first-value extract from the
+    // serialized form, splitting on comma/semicolon.
+    const auto s = opt->serialize();
+    const auto sep = s.find_first_of(",;");
+    return sep == std::string::npos ? s : s.substr(0, sep);
 }
 
 void emit_machines(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
@@ -99,34 +113,36 @@ void emit_machines(const Slic3r::PresetBundle& bundle, nlohmann::json& out) {
     }
 }
 
-// Build a name → setting_id index for the loaded printers. The raw
-// ``compatible_printers`` field on each filament/process holds printer
-// preset NAMES (e.g. "Bambu Lab A1 mini 0.4 nozzle"); the API exposes
-// stable setting_ids. Names not found here are dropped — Python's
-// listing functions do the same (``_select_profile_key_by_name``).
+// Build a name → setting_id index for ALL loaded printers. Python's
+// ``_select_profile_key_by_name`` resolves any registered printer name,
+// regardless of whether the printer's setting_id is empty; the resulting
+// emit then contains an empty string for those rows. Match that
+// byte-for-byte by including all printers in the lookup.
 std::unordered_map<std::string, std::string>
 build_printer_name_to_setting_id(const Slic3r::PresetBundle& bundle) {
     std::unordered_map<std::string, std::string> out;
-    for (const auto& p : bundle.printers) {
-        if (!p.setting_id.empty())
-            out.emplace(p.name, p.setting_id);
-    }
+    for (const auto& p : bundle.printers)
+        out.emplace(p.name, p.setting_id);
     return out;
 }
 
 nlohmann::json compat_printer_setting_ids(
     const Slic3r::DynamicPrintConfig& cfg,
     const std::unordered_map<std::string, std::string>& name_to_id) {
+    // Output order + duplicates mirror the raw config exactly: when two
+    // distinct printer NAMES map to the same setting_id (vendors reuse
+    // low-numbered ids), Python's loop appended both, and the API
+    // contract today is "preserve duplicates". Match that.
+    // Empty setting_ids are also preserved (snapshot has [""]) — those
+    // are printers loaded with no metadata id yet.
     nlohmann::json arr = nlohmann::json::array();
     const auto* opt = cfg.option<Slic3r::ConfigOptionStrings>(
         "compatible_printers");
     if (!opt) return arr;
-    std::unordered_set<std::string> seen;
     for (const auto& name : opt->values) {
         const auto it = name_to_id.find(name);
-        if (it == name_to_id.end() || it->second.empty()) continue;
-        if (seen.insert(it->second).second)
-            arr.push_back(it->second);
+        if (it == name_to_id.end()) continue;  // skip unresolvable names
+        arr.push_back(it->second);
     }
     return arr;
 }
