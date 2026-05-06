@@ -71,21 +71,19 @@ const char* config_option_gui_type_name(Slic3r::ConfigOptionDef::GUIType g) {
 }
 
 // Returns true when this option belongs to the process domain. We exclude:
-//   - options without a category (libslic3r registers many internal /
-//     extruder-side options with no GUI surface)
 //   - filament-domain options (key starts with "filament_" or ends with
 //     "_filament", or category is "Filament"). These belong to the
 //     filament editor, not the process editor.
 //   - machine-domain options (category is "Machine limits", or key is
 //     a known printer-only key). The process editor doesn't expose them.
 //
-// The category-based filter alone is mostly correct because Tab.cpp's
-// TabPrint::build() only references options with TabPrint-side categories
-// (Quality / Strength / Speed / Support / Multimaterial / Others /
-// Advanced). The key-prefix filter belt-and-suspenders that.
+// We intentionally do NOT filter on empty category: ~60 legitimate process
+// options (spiral_mode, enable_prime_tower, travel_speed, skirt_loops,
+// resolution, print_sequence, gcode_label_objects, timelapse_type, etc.)
+// have no category set in print_config_def but are exposed by TabPrint.
+// Filtering them out caused a 60-key drift vs the Tab.cpp regex harvest.
 bool is_process_domain_option(const std::string& key,
                               const Slic3r::ConfigOptionDef& def) {
-    if (def.category.empty()) return false;
     auto starts_with = [](const std::string& s, const char* p) {
         const size_t n = std::strlen(p);
         return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
@@ -106,8 +104,34 @@ bool is_process_domain_option(const std::string& key,
 // This is the same path the GUI uses to render initial values, so vector
 // and percent options come out in the canonical config-string form
 // (matches what Python's project_settings.config produces).
+//
+// Guard: some internal coEnums options (e.g. default_nozzle_volume_type)
+// construct their ConfigOptionEnumsGeneric default_value via the
+// initializer_list ctor, which leaves the VALUE's keys_map == nullptr even
+// when def.enum_keys_map is set. Calling serialize() on those dereferences
+// the null keys_map pointer → SIGSEGV. Detect by dynamic_casting to the
+// concrete type and checking its keys_map directly.
 std::string serialize_default(const Slic3r::ConfigOptionDef& def) {
     if (!def.default_value) return "";
+    if (def.type == Slic3r::coEnums) {
+        // ConfigOptionEnumsGenericTempl<false> — non-nullable
+        {
+            const auto* ev = dynamic_cast<const Slic3r::ConfigOptionEnumsGeneric*>(
+                def.default_value.get());
+            if (ev && ev->keys_map == nullptr) return "";
+        }
+        // ConfigOptionEnumsGenericTempl<true> — nullable variant
+        {
+            const auto* ev = dynamic_cast<const Slic3r::ConfigOptionEnumsGenericNullable*>(
+                def.default_value.get());
+            if (ev && ev->keys_map == nullptr) return "";
+        }
+    }
+    if (def.type == Slic3r::coEnum) {
+        const auto* ev = dynamic_cast<const Slic3r::ConfigOptionEnumGeneric*>(
+            def.default_value.get());
+        if (ev && ev->keys_map == nullptr) return "";
+    }
     return def.default_value->serialize();
 }
 
