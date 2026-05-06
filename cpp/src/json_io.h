@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,18 @@ struct SliceRequest {
     // the project file. Caller is expected to validate the value against the
     // target machine's supported list before sending.
     std::string plate_type;
+
+    // Optional client-side process-domain customisations applied AFTER
+    // the 3MF's own different_settings_to_system[0] overlay. Highest
+    // priority — these win over both the system process profile and the
+    // 3MF's customisations.
+    //
+    // Keys must be process-domain options (filament_*/__filament keys
+    // are silently dropped by the overlay). String values match the
+    // OrcaSlicer config-string convention used in project_settings.config.
+    //
+    // Reported back via ``settings_transfer.process_overrides_applied``.
+    std::map<std::string, std::string> process_overrides;
 };
 
 struct SliceResponseEstimate {

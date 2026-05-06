@@ -32,6 +32,15 @@ SliceRequest parse_slice_request_from_stdin() {
     }
     req.printer_model_id = j.value("printer_model_id", std::string());
     req.plate_type = j.value("plate_type", std::string());
+    if (j.contains("process_overrides") && j["process_overrides"].is_object()) {
+        for (const auto& [k, v] : j["process_overrides"].items()) {
+            if (v.is_string()) {
+                req.process_overrides.emplace(k, v.get<std::string>());
+            }
+            // Non-string values are silently dropped — the contract
+            // requires stringified config values (matches project_settings.config).
+        }
+    }
     return req;
 }
 
