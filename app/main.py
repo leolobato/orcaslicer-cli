@@ -135,6 +135,15 @@ async def lifespan(app: FastAPI):
     )
     app.state.inspect_cache = InspectCache()
     await load_all_profiles()
+    # Load process-option metadata catalogue + allowlist-filtered layout.
+    # Sources: orca-headless dump-options + cpp/src/generated/process_pages.json
+    # + app/process_allowlist.json. See docs/.../process-parameter-editor-design.md.
+    from app import options as options_module
+    binary_for_options = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    try:
+        await options_module.load_options_cache(binary_client=binary_for_options)
+    except Exception:
+        logger.exception("failed to load options cache; /options/* endpoints will 503")
     yield
 
 
@@ -672,10 +681,54 @@ async def delete_filament_profile(setting_id: str):
     )
 
 
+@app.get("/options/process", tags=["Options"])
+async def get_process_options() -> dict[str, Any]:
+    """Per-option metadata catalogue for process-domain options.
+
+    Sourced from libslic3r's print_config_def via orca-headless dump-options.
+    Unfiltered — every process-domain option is included so iOS/web can render
+    labels for keys that are modified on a project but not in the allowlist
+    (those are shown read-only in the Modified view).
+    """
+    from app import options as options_module
+    payload = options_module.get_metadata()
+    if not payload.get("options"):
+        return JSONResponse(status_code=503, content={
+            "code": "options_not_loaded",
+            "message": "options metadata cache empty; check startup logs",
+        })
+    return payload
+
+
+@app.get("/options/process/layout", tags=["Options"])
+async def get_process_options_layout() -> dict[str, Any]:
+    """Page → optgroup → option layout for the process editor's All view.
+
+    Filtered server-side by app/process_allowlist.json — only allowlisted
+    keys survive, empty optgroups and pages are dropped. Layout sourced
+    from cpp/src/generated/process_pages.json (extracted at build time
+    from Tab.cpp::TabPrint::build()).
+    """
+    from app import options as options_module
+    payload = options_module.get_layout()
+    if not payload.get("pages"):
+        return JSONResponse(status_code=503, content={
+            "code": "options_layout_not_loaded",
+            "message": "options layout cache empty; check startup logs",
+        })
+    return payload
+
+
 @app.post("/profiles/reload", response_model=ReloadResponse, tags=["Profiles"])
 async def reload_profiles():
     """Hot-reload all profiles (vendor + user) from disk."""
     summary = await load_all_profiles()
+    from app import options as options_module
+    try:
+        await options_module.load_options_cache(
+            binary_client=BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY))
+    except Exception:
+        logger.exception("options cache reload failed")
     return ReloadResponse(**summary)
 
 
