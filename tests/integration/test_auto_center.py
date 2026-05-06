@@ -167,10 +167,11 @@ def test_fixture_08_without_auto_center_goes_out_of_bounds() -> None:
     mini extrudes past the right edge. This proves the positive test's
     pass condition is meaningful (i.e. it would otherwise fail).
 
-    Marked xfail because the slicer happily produces an off-bed gcode
-    today — we have no validation step that rejects it. If a future
-    change adds out-of-bounds rejection, this xfail becomes xpass and
-    we'll update accordingly.
+    The slicer happily produces off-bed gcode today — there is no
+    validation step that rejects out-of-bounds toolpaths. If a future
+    change adds rejection, this test will need to be updated (or
+    removed), since there will no longer be an out-of-bounds gcode to
+    assert against.
     """
     input_path = FIXTURE_DIR / "08" / "reference-launcher-p2s-on-a1m.3mf"
     assert input_path.exists(), f"missing fixture: {input_path}"
