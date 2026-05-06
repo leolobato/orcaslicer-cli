@@ -5,7 +5,6 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <set>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -53,6 +52,21 @@ const char* config_option_mode_name(Slic3r::ConfigOptionMode m) {
         case Slic3r::comAdvanced: return "advanced";
         case Slic3r::comDevelop:  return "develop";
         default:                  return "unknown";
+    }
+}
+
+const char* config_option_gui_type_name(Slic3r::ConfigOptionDef::GUIType g) {
+    using G = Slic3r::ConfigOptionDef::GUIType;
+    switch (g) {
+        case G::undefined:    return "";
+        case G::i_enum_open:  return "i_enum_open";
+        case G::f_enum_open:  return "f_enum_open";
+        case G::color:        return "color";
+        case G::select_open:  return "select_open";
+        case G::slider:       return "slider";
+        case G::legend:       return "legend";
+        case G::one_string:   return "one_string";
+        default:              return "";
     }
 }
 
@@ -144,7 +158,7 @@ void emit_options(nlohmann::json& out) {
             e["enum_labels"] = nullptr;
 
         e["mode"]     = config_option_mode_name(def.mode);
-        e["gui_type"] = def.gui_type;
+        e["gui_type"] = config_option_gui_type_name(def.gui_type);
         e["nullable"] = def.nullable;
         e["readonly"] = def.readonly;
         out.push_back(std::move(e));
