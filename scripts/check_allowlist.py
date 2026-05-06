@@ -67,6 +67,16 @@ def _generate_catalogue(binary_path: str, dest: Path) -> None:
         raise RuntimeError(f"dump-options error envelope: {envelope}")
 
 
+def _is_filament_domain(key: str) -> bool:
+    """Return True for keys that belong to the filament editor, not the process editor.
+
+    dump-options intentionally excludes these (see dump_options_mode.cpp::is_process_domain_option).
+    Tab.cpp's TabPrint lists them as multi-material slot selectors, so they appear in
+    process_pages.json but will never be present in the dump-options catalogue.
+    """
+    return key.startswith("filament_") or key.endswith("_filament")
+
+
 def check_drift(
     layout_path: Path, allowlist_path: Path, catalogue_path: Path,
 ) -> list[str]:
@@ -91,7 +101,12 @@ def check_drift(
         )
 
     # Mode 3: process_pages.json references a key not in dump-options.
+    # Filament-domain keys (filament_* / *_filament) are intentionally excluded
+    # by dump-options — they belong to the filament editor, not the process editor;
+    # Tab.cpp lists them as multi-material slot selectors. Drop them silently.
     for k in sorted(layout - cat):
+        if _is_filament_domain(k):
+            continue
         errors.append(
             f"process_pages.json (Tab.cpp references) {k!r} but it is "
             f"not in dump-options — Tab.cpp may carry a stale reference"

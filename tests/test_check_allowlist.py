@@ -79,3 +79,17 @@ def test_layout_key_missing_from_catalogue(tmp_path: Path) -> None:
     errors = check_drift(layout, allow, cat)
     assert any("stale_key" in e for e in errors)
     assert any("Tab.cpp references" in e for e in errors)
+
+
+def test_layout_filament_keys_are_not_drift(tmp_path: Path) -> None:
+    """Multi-material filament-slot selectors in Tab.cpp's process page
+    are intentionally excluded by dump-options; drift checker must not
+    flag them as stale Tab.cpp references."""
+    layout = tmp_path / "process_pages.json"
+    allow = tmp_path / "allowlist.json"
+    cat = tmp_path / "options.json"
+    _write_layout(layout, [["layer_height", "wall_filament", "support_filament"]])
+    _write_allowlist(allow, ["layer_height"])
+    _write_catalogue(cat, ["layer_height"])
+    errors = check_drift(layout, allow, cat)
+    assert errors == [], errors
