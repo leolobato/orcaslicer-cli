@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the response shape changes in a way that should invalidate
 # any in-memory cache the endpoint layer keeps.
-INSPECT_SCHEMA_VERSION = 3
+INSPECT_SCHEMA_VERSION = 4
 
 
 def _read_project_settings(zf: zipfile.ZipFile) -> dict[str, Any]:
@@ -374,6 +374,51 @@ def _parse_filaments(
     return out
 
 
+def _extract_process_modifications(
+    project_settings: dict | None,
+) -> dict:
+    """Build the ``process_modifications`` block exposed by /inspect.
+
+    Reads ``different_settings_to_system[0]`` from the 3MF's project settings
+    (slot 0 is process per OrcaSlicer's PresetBundle::load_3mf_* layout)
+    and pairs the modified keys with their current values.
+    """
+    if not project_settings:
+        return {"process_setting_id": "", "modified_keys": [], "values": {}}
+
+    process_setting_id = str(project_settings.get("print_settings_id", "") or "")
+    diff_list = project_settings.get("different_settings_to_system") or []
+    if not isinstance(diff_list, list) or not diff_list:
+        return {
+            "process_setting_id": process_setting_id,
+            "modified_keys": [],
+            "values": {},
+        }
+
+    raw = diff_list[0]
+    if not isinstance(raw, str) or not raw:
+        return {
+            "process_setting_id": process_setting_id,
+            "modified_keys": [],
+            "values": {},
+        }
+    keys = [k for k in raw.split(";") if k]
+    values = {
+        k: project_settings[k]
+        for k in keys
+        if k in project_settings and isinstance(project_settings[k], (str, int, float, bool))
+    }
+    # Stringify non-strings so the API contract is stable
+    # (project_settings.config encodes everything as strings, but a 3MF
+    # produced by some tools may carry typed values).
+    values = {k: str(v) for k, v in values.items()}
+    return {
+        "process_setting_id": process_setting_id,
+        "modified_keys": keys,
+        "values": values,
+    }
+
+
 def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
     """Inspect a 3MF byte blob and return a structured summary.
 
@@ -395,6 +440,11 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         "printer_settings_id": "",
         "print_settings_id": "",
         "layer_height": "",
+        "process_modifications": {
+            "process_setting_id": "",
+            "modified_keys": [],
+            "values": {},
+        },
     }
 
     try:
@@ -433,6 +483,7 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
         out["printer_settings_id"] = project_settings.get("printer_settings_id", "")
         out["print_settings_id"] = project_settings.get("print_settings_id", "")
         out["layer_height"] = project_settings.get("layer_height", "")
+        out["process_modifications"] = _extract_process_modifications(project_settings)
 
         # Back-compat: global estimate = plate 1's estimate (without first_layer_time)
         plate_1_data = per_plate_slice_info.get(1, {})
