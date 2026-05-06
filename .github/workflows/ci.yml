@@ -40,6 +40,9 @@ jobs:
             -v ${{ github.workspace }}/tests:/app/tests \
             -v ${{ github.workspace }}/conftest.py:/app/conftest.py \
             -v ${{ github.workspace }}/pytest.ini:/app/pytest.ini \
+            -v ${{ github.workspace }}/scripts:/app/scripts:ro \
+            -v ${{ github.workspace }}/cpp/src/generated:/app/cpp/src/generated:ro \
+            -v ${{ github.workspace }}/vendor:/app/vendor:ro \
             orcaslicer-cli:ci
           # Wait for /health
           for i in $(seq 1 30); do
@@ -51,6 +54,12 @@ jobs:
         run: |
           docker exec orcaslicer-cli pytest tests/ -q \
             --ignore=tests/integration
+
+      - name: Check Tab.cpp layout extraction is fresh
+        run: docker exec orcaslicer-cli python scripts/extract_tab_layout.py --check
+
+      - name: Check process allowlist drift
+        run: docker exec orcaslicer-cli python scripts/check_allowlist.py
 
       - name: Smoke health + profiles
         run: |
