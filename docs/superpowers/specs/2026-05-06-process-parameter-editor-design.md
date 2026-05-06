@@ -206,47 +206,65 @@ Cached in the existing `InspectCache` alongside the rest of the inspect payload 
 
 ## Slice override path
 
-### New form field on `/slice/v2` and `/slice-stream/v2`
+### New body field on `/slice/v2` and `/slice-stream/v2`
 
-```
-process_overrides: '{"layer_height": "0.16", "wall_loops": "3"}'
+`SliceTokenRequest` (the JSON body of both endpoints) gains an optional field:
+
+```python
+process_overrides: dict[str, str] | None = None
 ```
 
-Optional. JSON object, **string values** (matches OrcaSlicer's config convention — every value in `project_settings.config` is stringified, including booleans, ints, and vectors). Absent or empty `{}` behaves exactly like today.
+Example payload fragment: `"process_overrides": {"layer_height": "0.16", "wall_loops": "3"}`. **String values** (matches OrcaSlicer's config convention — every value in `project_settings.config` is stringified, including booleans, ints, and vectors). Absent / `null` / empty `{}` behaves exactly like today.
+
+The field is plumbed through `BinaryClient.slice()` into the binary's stdin JSON request (extending `cpp/src/json_io.h::SliceRequest` with a `std::map<std::string, std::string> process_overrides;` member).
 
 ### Overlay order
 
-`app/slicer.py` already overlays the 3MF customisations on top of the resolved system process profile. The new field adds one more overlay **after** the 3MF overlay so that client edits win:
+The transfer overlay lives in C++, not Python — `cpp/src/slice_mode.cpp::apply_threemf_slot_overrides` runs after the bundle resolves the system process profile. The new field adds one more overlay **after** the 3MF overlay so that client edits win:
 
 ```
-resolved system process profile
-   └── overlay 3MF customizations (different_settings_to_system[0],
-   │                               filament_* keys excluded)
+PresetBundle resolves system process profile (C++)
+   └── apply_threemf_slot_overrides(process_dst, project_src,
+   │       different_settings_to_system[0], exclude_filament=true)
    │
-   └── overlay process_overrides   ◀── new
+   └── apply_client_process_overrides(process_dst, req.process_overrides) ◀── new
    │
-   └── written as temp JSON, fed to orca-slicer CLI
+   └── slicer continues with final config
 ```
 
 Rationale: the iOS user sees `layer_height=0.16` in the Modified view (sourced from the 3MF), edits it to `0.20`, slices. The user expects `0.20`. Client overrides are the highest-priority layer.
 
-The existing filament-key exclusion and `_CLAMP_RULES` validation apply identically to the new layer — same code path, one more dict merged in.
+The existing filament-key exclusion (`filament_*` / `*_filament` keys never enter the process overlay) applies identically to the new layer. Same C++ code path, one more pass of `dst_opt->set(src_opt)` per override key.
 
 ### Validation
 
 - **Server-side allowlist enforcement: NO.** Per Q5b/Q6, the allowlist is a UI concept. The server accepts any valid process-domain key in `process_overrides`.
-- **Server-side range/type validation: minimal.** Per Q5a, validation is "match the GUI" — and the GUI does field-level clamping with `min/max/enum_values` from `ConfigOptionDef`. iOS replicates that clamp using metadata from `/options/process` before submitting. The server still runs `_CLAMP_RULES` as a final safety net (same as for 3MF customisations today).
+- **Server-side range/type validation: minimal.** Per Q5a, validation is "match the GUI" — and the GUI does field-level clamping with `min/max/enum_values` from `ConfigOptionDef`. iOS replicates that clamp using metadata from `/options/process` before submitting. libslic3r's own `Preset::normalize` and slice-time validators continue to backstop bad values (same as for 3MF customisations today, which run through the same overlay path).
 - **Cross-field validation: explicitly out of scope for v1.** GUI cross-field rules (e.g. layer_height ≤ 0.75 × nozzle_diameter, support fields disabled when `enable_support=false`) live as scattered C++ callbacks in `Tab.cpp`. Replicating them is a much larger surface and not required for the editor to be useful. OrcaSlicer's slice-time validation still catches the worst combinations.
 
 ### Response surface
 
-Add one new response header:
+`/slice/v2` and `/slice-stream/v2` return JSON with a `settings_transfer` dict (sourced from the binary's `SliceResponse::settings_transfer`). Add one new top-level key inside that dict:
 
-- **`X-Process-Overrides-Applied`** — JSON array of `{key, value, previous}` where `previous` is the value before the override (i.e. the 3MF-customised value if the 3MF touched the key, otherwise the resolved system default).
+```json
+{
+  "settings_transfer": {
+    "...existing keys...": "...",
+    "process_overrides_applied": [
+      {"key": "layer_height", "value": "0.20", "previous": "0.16"},
+      {"key": "wall_loops",   "value": "3",    "previous": "2"}
+    ]
+  }
+}
+```
 
-Existing headers (`X-Settings-Transfer-Status`, `X-Settings-Transferred`, `X-Filament-Settings-Transferred`, `X-Machine-Settings-Transferred`) are unchanged. This keeps `X-Settings-Transferred` strictly about 3MF-sourced transfers and gives the client overrides their own dedicated channel.
+Each entry's `previous` is the value the key held *before* the client override was applied — i.e. the 3MF-customised value if the 3MF touched the key, otherwise the resolved system default. Read from `dst.option(key)` immediately before calling `dst_opt->set(src_opt)` in the C++ overlay.
 
-Same-key collisions between 3MF customisation and client override produce two entries — one in `X-Settings-Transferred` (the 3MF transfer ran) and one in `X-Process-Overrides-Applied` with `previous` set to the 3MF value. The reader can reconstruct the full chain.
+Existing `settings_transfer` keys (the per-process / per-filament / printer-slot transfer reports) are unchanged. This keeps the existing fields strictly about 3MF-sourced transfers and gives the client overrides their own dedicated channel.
+
+Same-key collisions between 3MF customisation and client override produce two entries — one in the existing process-transfer report (the 3MF transfer ran first) and one in `process_overrides_applied` with `previous` set to the 3MF value. The reader can reconstruct the full chain.
+
+(The legacy `/slice` endpoint's response headers — `X-Settings-Transferred` etc. — are left as-is; this feature targets the `/slice/v2` JSON shape.)
 
 ## Allowlist storage and curation
 
@@ -309,9 +327,11 @@ The script runs in CI on every PR.
 | `scripts/check_allowlist.py` | new | drift checks, run in CI |
 | `app/process_allowlist.json` | new | curated set of editable process keys |
 | `app/options.py` | new | metadata + layout loader, served by new endpoints |
-| `app/main.py` | modified | mount `/options/process`, `/options/process/layout`; extend `/3mf/{token}/inspect`; accept `process_overrides` form field on slice endpoints |
-| `app/slicer.py` | modified | apply `process_overrides` overlay after 3MF transfer; emit `X-Process-Overrides-Applied` header |
+| `app/main.py` | modified | mount `/options/process`, `/options/process/layout`; extend `/3mf/{token}/inspect`; add `process_overrides` field to `SliceTokenRequest` and forward it to the binary |
+| `cpp/src/json_io.{h,cpp}` | modified | extend `SliceRequest` with `process_overrides`; parse from stdin |
+| `cpp/src/slice_mode.cpp` | modified | apply `process_overrides` overlay after the 3MF overlay; emit `process_overrides_applied` into `settings_transfer` |
 | `app/binary_client.py` | modified | add `BinaryClient.dump_options()` shelling out to `orca-headless dump-options` |
+| `app/inspect.py` | modified | add `process_modifications` block to the inspect payload |
 
 ## Versioning
 
