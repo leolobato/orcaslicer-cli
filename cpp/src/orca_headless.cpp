@@ -15,6 +15,7 @@
 #include "slice_mode.h"
 #include "use_set_mode.h"
 #include "dump_profiles_mode.h"
+#include "dump_options_mode.h"
 
 // libslic3r writes diagnostic messages through boost::log. The default
 // install scribbles to whichever sink boost picks (often stdout in this
@@ -42,7 +43,8 @@ static int print_usage(const char* prog) {
         "  --version            Print version and exit\n"
         "  slice                Read JSON request on stdin, slice, write JSON to stdout\n"
         "  use-set              Read JSON request on stdin, scan 3MF for used filaments\n"
-        "  dump-profiles        Read JSON {profiles_dir,user_dir,out_path} on stdin, emit profile manifest\n",
+        "  dump-profiles        Read JSON {profiles_dir,user_dir,out_path} on stdin, emit profile manifest\n"
+        "  dump-options         Read JSON {out_path} on stdin, emit option metadata catalogue\n",
         prog);
     return 2;
 }
@@ -73,6 +75,15 @@ int main(int argc, char** argv) {
         try {
             auto req = orca_headless::parse_dump_profiles_request_from_stdin();
             return orca_headless::run_dump_profiles_mode(req);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "fatal: %s\n", e.what());
+            return 1;
+        }
+    }
+    if (std::strcmp(argv[1], "dump-options") == 0) {
+        try {
+            auto req = orca_headless::parse_dump_options_request_from_stdin();
+            return orca_headless::run_dump_options_mode(req);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "fatal: %s\n", e.what());
             return 1;
