@@ -140,14 +140,14 @@ OUT=$(curl -s -X POST http://localhost:8070/slice/v2 \
     \"machine_id\": \"GM014\",
     \"process_id\": \"GP004\",
     \"filament_settings_ids\": [\"GFSA00\"],
-    \"recenter\": false
+    \"auto_center\": false
   }" | python3 -c "import json,sys; print(json.load(sys.stdin)['output_token'])")
 
 # 3. Download the sliced .3mf
 curl -s -o sliced.3mf http://localhost:8070/3mf/$OUT
 ```
 
-The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `recenter=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
+The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `auto_center=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
 
 ### Custom filament import
 

@@ -89,7 +89,7 @@ slice_v2_test() {
     http_code=$(curl -s -o "$raw_file" -w "%{http_code}" \
         -X POST "$BASE_URL/slice/v2" \
         -H 'Content-Type: application/json' \
-        -d "{\"input_token\":\"$tok\",\"machine_id\":\"$machine\",\"process_id\":\"$process\",\"filament_settings_ids\":$filaments,\"recenter\":false}")
+        -d "{\"input_token\":\"$tok\",\"machine_id\":\"$machine\",\"process_id\":\"$process\",\"filament_settings_ids\":$filaments,\"auto_center\":false}")
     check "$label slice/v2 returns 200 (got $http_code)" "$([ "$http_code" = "200" ] && echo true || echo false)"
 
     if [ "$http_code" = "200" ]; then

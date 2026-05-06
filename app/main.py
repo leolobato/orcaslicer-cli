@@ -1038,7 +1038,7 @@ class SliceTokenRequest(BaseModel):
     filament_settings_ids: list[str]
     filament_map: list[int] | None = None
     plate_id: int = 1
-    recenter: bool = True
+    auto_center: bool = True
     plate_type: str | None = None
 
 
@@ -1153,7 +1153,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "machine_leaf_name": paths["machine_leaf_name"],
             "process_leaf_name": paths["process_leaf_name"],
             "plate_id": body.plate_id,
-            "options": {"recenter": body.recenter},
+            "options": {"auto_center": body.auto_center},
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
@@ -1241,7 +1241,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "machine_leaf_name": paths["machine_leaf_name"],
             "process_leaf_name": paths["process_leaf_name"],
             "plate_id": body.plate_id,
-            "options": {"recenter": body.recenter},
+            "options": {"auto_center": body.auto_center},
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),

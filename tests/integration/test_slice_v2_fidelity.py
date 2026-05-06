@@ -175,7 +175,7 @@ def _slice_and_compare(
     machine_id: str,
     process_id: str,
     filament_settings_ids: list[str],
-    recenter: bool = False,
+    auto_center: bool = False,
     time_tol: float = 0.02,
     weight_tol: float = 0.015,
     first_layer_time_tol: float = 0.01,
@@ -200,7 +200,7 @@ def _slice_and_compare(
         "machine_id": machine_id,
         "process_id": process_id,
         "filament_settings_ids": filament_settings_ids,
-        "recenter": recenter,
+        "auto_center": auto_center,
     }
     if plate_type is not None:
         slice_body["plate_type"] = plate_type
