@@ -221,14 +221,17 @@ size_t load_chain_dir_into(
     return loaded;
 }
 
-// Center the combined instance bounding box on the build plate. Mirrors
-// `Model::center_instances_around_point`, which is how the GUI's "Center"
-// toolbar command reseats objects.
+// Anchor the combined instance bounding box at the build plate centre
+// using libslic3r's `Model::center_instances_around_point` — the same
+// primitive the GUI calls during project import (Plater.cpp:6594) and
+// in its autocenter background hook. (The GUI's Center toolbar itself
+// goes through `Selection::center()` + `GLCanvas3D::do_move()`, a
+// selection-state path that's unreachable from headless.)
 //
-// This is a headless-only entry point: the GUI assumes a human visually
-// adjusts after a printer change, so it has no equivalent runtime flag.
-// A headless wrapper has no human-in-the-loop step, so we expose the
-// same libslic3r primitive as a request option.
+// Headless-only entry point: the GUI assumes a human visually adjusts
+// placement after a printer change, so it has no equivalent runtime
+// flag. A headless wrapper has no human-in-the-loop step, so we expose
+// the libslic3r primitive directly as a request option.
 void auto_center_on_plate(Slic3r::Model& model,
                           const Slic3r::DynamicPrintConfig& cfg) {
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
