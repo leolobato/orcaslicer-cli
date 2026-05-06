@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -137,7 +138,6 @@ class BinaryClient:
         parsed catalogue (``{"options": [...]}``); raises ``BinaryError``
         on a non-OK envelope or subprocess failure.
         """
-        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             out_path = tf.name
         try:
