@@ -22,7 +22,7 @@ SliceRequest parse_slice_request_from_stdin() {
     req.process_leaf_name  = j.at("process_leaf_name").get<std::string>();
     req.plate_id           = j.value("plate_id", 1);
     if (j.contains("options")) {
-        req.recenter = j["options"].value("recenter", true);
+        req.auto_center = j["options"].value("auto_center", true);
     }
     if (j.contains("filament_map") && j["filament_map"].is_array()) {
         req.filament_map = j["filament_map"].get<std::vector<int>>();

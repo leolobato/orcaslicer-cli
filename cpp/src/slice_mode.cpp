@@ -222,10 +222,15 @@ size_t load_chain_dir_into(
 }
 
 // Center the combined instance bounding box on the build plate. Mirrors
-// `Model::center_instances_around_point`, which is how the GUI's "fit to
-// plate" path reseats objects.
-void recenter_on_plate(Slic3r::Model& model,
-                       const Slic3r::DynamicPrintConfig& cfg) {
+// `Model::center_instances_around_point`, which is how the GUI's "Center"
+// toolbar command reseats objects.
+//
+// This is a headless-only entry point: the GUI assumes a human visually
+// adjusts after a printer change, so it has no equivalent runtime flag.
+// A headless wrapper has no human-in-the-loop step, so we expose the
+// same libslic3r primitive as a request option.
+void auto_center_on_plate(Slic3r::Model& model,
+                          const Slic3r::DynamicPrintConfig& cfg) {
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
     if (!area || area->values.size() < 3) return;
     double min_x = area->values[0].x(), max_x = min_x;
@@ -642,14 +647,15 @@ int run_slice_mode(const SliceRequest& req) {
         opt->values = req.filament_settings_id;
     }
 
-    // 11. Recenter / drop-to-bed (GUI does this on every load).
-    if (req.recenter) {
-        emit_progress("recentering", 25);
+    // 11. Auto-center / drop-to-bed. Headless-only knob; GUI relies on
+    //     visual adjustment after a printer change.
+    if (req.auto_center) {
+        emit_progress("auto_centering", 25);
         try {
-            recenter_on_plate(model, final_cfg);
+            auto_center_on_plate(model, final_cfg);
         } catch (const std::exception& e) {
-            return fail("recenter_failed", std::string("recenter: ") + e.what(),
-                        response);
+            return fail("auto_center_failed",
+                        std::string("auto_center: ") + e.what(), response);
         }
     } else {
         // Drop any model the 3MF saved hovering above (or buried below) z=0

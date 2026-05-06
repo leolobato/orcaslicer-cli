@@ -26,7 +26,7 @@ struct SliceRequest {
     std::string process_leaf_name;
 
     int plate_id = 1;
-    bool recenter = true;
+    bool auto_center = true;
 
     // Optional: explicit AMS slot per filament index. Empty = no override.
     std::vector<int> filament_map;
