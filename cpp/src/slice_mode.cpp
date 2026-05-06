@@ -526,6 +526,7 @@ int run_slice_mode(const SliceRequest& req) {
     //    customization was lost, slice ran 53% slower with default 0.20).
     std::vector<std::string> process_override_keys;
     std::vector<std::string> printer_override_keys;
+    nlohmann::json process_overrides_report = nlohmann::json::array();
     if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
             "different_settings_to_system", false);
         fp != nullptr && !fp->values.empty()) {
@@ -593,6 +594,59 @@ int run_slice_mode(const SliceRequest& req) {
         emit_progress("printer_overrides_applied", 24);
     }
 
+    // 9b. Apply the client-supplied process_overrides on top of the
+    //     resolved process config. Highest-priority overlay: these win
+    //     over both the system process profile and the 3MF's authored
+    //     customisations. Reuses ``final_cfg`` (same destination as the
+    //     3MF overlay above) so downstream Print build sees the merged
+    //     result.
+    //
+    // The "previous" snapshot is read BEFORE deserialize() so the response
+    // can report what the value was immediately before the client override
+    // took effect (3MF-customised value if the 3MF touched the key,
+    // otherwise the resolved system default).
+    if (!req.process_overrides.empty()) {
+        for (const auto& [key, value_str] : req.process_overrides) {
+            // Filter out filament-domain keys defensively (the iOS UI
+            // shouldn't send them, but the same guard the 3MF overlay
+            // applies belongs here too).
+            auto starts_with_ = [](const std::string& s, const char* p) {
+                const size_t n = std::strlen(p);
+                return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
+            };
+            auto ends_with_ = [](const std::string& s, const char* p) {
+                const size_t n = std::strlen(p);
+                return s.size() >= n &&
+                    std::memcmp(s.data() + s.size() - n, p, n) == 0;
+            };
+            if (starts_with_(key, "filament_") || ends_with_(key, "_filament"))
+                continue;
+
+            Slic3r::ConfigOption* dst_opt = final_cfg.option(key, /*create=*/false);
+            if (dst_opt == nullptr) continue;  // unknown key — silently drop
+
+            // Snapshot the value before we overwrite it.
+            std::string previous = dst_opt->serialize();
+
+            // Deserialize the string into the option's typed slot. The
+            // base ConfigOption interface (Config.hpp) declares
+            //   bool deserialize(const std::string& str, bool append=false)
+            // — no substitution context. Vector / percent / enum
+            // encoding round-trip via each subclass's override.
+            if (!dst_opt->deserialize(value_str)) {
+                // Bad value for this option type — drop and move on.
+                continue;
+            }
+
+            nlohmann::json entry;
+            entry["key"]      = key;
+            entry["value"]    = value_str;
+            entry["previous"] = previous;
+            process_overrides_report.push_back(std::move(entry));
+        }
+        emit_progress("client_overrides_applied", 23);
+    }
+
     // 10. Build the settings_transfer response. Process and printer keys
     //     come from the override pass above; filament_slots was populated
     //     during step 5 (project-local variant detection).
@@ -609,6 +663,7 @@ int run_slice_mode(const SliceRequest& req) {
         transfer_status["process_keys"] = process_override_keys;
         transfer_status["printer_keys"] = printer_override_keys;
         transfer_status["filament_slots"] = filament_slot_status;
+        transfer_status["process_overrides_applied"] = process_overrides_report;
     }
 
     // curr_bed_type lives in the 3MF's project_settings.config but isn't
