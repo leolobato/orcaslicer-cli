@@ -1093,6 +1093,12 @@ class SliceTokenRequest(BaseModel):
     plate_id: int = 1
     auto_center: bool = True
     plate_type: str | None = None
+    # Stringified process-domain values overlaid AFTER the 3MF's transfer.
+    # iOS / web sends e.g. {"layer_height": "0.16", "wall_loops": "3"}.
+    # Server is permissive — the C++ side filters filament-domain keys
+    # and silently drops unknown keys. See
+    # docs/superpowers/specs/2026-05-06-process-parameter-editor-design.md.
+    process_overrides: dict[str, str] | None = None
 
 
 def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
@@ -1211,6 +1217,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
             "plate_type": _resolve_plate_type_label(body.machine_id, body.plate_type),
+            "process_overrides": body.process_overrides or {},
         })
     except BinaryError as e:
         return JSONResponse(
@@ -1299,6 +1306,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
             "plate_type": _resolve_plate_type_label(body.machine_id, body.plate_type),
+            "process_overrides": body.process_overrides or {},
         }):
             if ev["type"] == "result":
                 out_token, out_sha, out_size, _ = cache.put(output_path.read_bytes())
