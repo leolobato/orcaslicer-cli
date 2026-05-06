@@ -36,6 +36,12 @@ FIXTURE_DIR = Path(__file__).resolve().parents[2].parent / "_fixture"
 A1M_BED_X = 180.0
 A1M_BED_Y = 180.0
 
+# Toolpath tolerance: allow ~5mm for skirt/brim overhang past the
+# nominal bed edge, and ~20mm of negative X/Y for the wipe purge
+# line that A1 mini emits in front-left before printing.
+BED_TOLERANCE = 5.0
+WIPE_MARGIN = 20.0
+
 
 def _container_reachable() -> bool:
     try:
@@ -137,7 +143,7 @@ def test_fixture_08_auto_center_keeps_p2s_project_in_a1m_bounds() -> None:
         "input_token": token,
         "machine_id": "GM020",  # Bambu Lab A1 mini 0.4 nozzle
         "process_id": "GP000",  # 0.20mm Standard
-        "filament_settings_ids": ["GFSA00_02"],  # Bambu PLA Basic @BBL A1M
+        "filament_settings_ids": ["GFSA00_02", "GFSA00_02"],  # 2 slots, Bambu PLA Basic @BBL A1M
         "auto_center": True,
     })
     assert "output_token" in slice_resp, (
@@ -147,18 +153,24 @@ def test_fixture_08_auto_center_keeps_p2s_project_in_a1m_bounds() -> None:
     out_bytes = _get_bytes(f"{API}/3mf/{slice_resp['output_token']}")
     min_x, max_x, min_y, max_y = _toolpath_xy_extents(out_bytes)
 
-    # Strict bounds: every toolpath move stays within the printable area.
-    # A small (~1mm) safety margin for purge/skirt is acceptable below 0
-    # in the original GUI behaviour, but for this test we expect strict
-    # in-bounds since auto_center anchors the model at the bed centre.
-    assert 0.0 <= min_x, f"toolpath min X = {min_x} < 0 (off the front-left)"
-    assert max_x <= A1M_BED_X, (
-        f"toolpath max X = {max_x} > {A1M_BED_X} (off the right edge — "
-        f"auto_center did not reseat the model)"
+    # Practical bounds. A1 mini's wipe/purge sequence routinely emits
+    # G1 X<0 in front-left of the bed (~X=-13 observed in practice);
+    # skirt around an in-bounds model extends ~1mm past its nominal
+    # outer edge. Use tolerances that distinguish "essentially in
+    # bounds" from "model way off the bed" (without auto_center, max X
+    # observed ~207 — 27mm past the edge — vs ~181 with).
+    assert min_x >= -WIPE_MARGIN, (
+        f"toolpath min X = {min_x} < -{WIPE_MARGIN} (further left than "
+        f"A1 mini's wipe purge line)"
     )
-    assert 0.0 <= min_y, f"toolpath min Y = {min_y} < 0"
-    assert max_y <= A1M_BED_Y, (
-        f"toolpath max Y = {max_y} > {A1M_BED_Y}"
+    assert max_x <= A1M_BED_X + BED_TOLERANCE, (
+        f"toolpath max X = {max_x} > {A1M_BED_X + BED_TOLERANCE} "
+        f"(model extends past the right edge — auto_center did not "
+        f"reseat the project)"
+    )
+    assert min_y >= -WIPE_MARGIN, f"toolpath min Y = {min_y} < -{WIPE_MARGIN}"
+    assert max_y <= A1M_BED_Y + BED_TOLERANCE, (
+        f"toolpath max Y = {max_y} > {A1M_BED_Y + BED_TOLERANCE}"
     )
 
 
@@ -183,7 +195,7 @@ def test_fixture_08_without_auto_center_goes_out_of_bounds() -> None:
         "input_token": token,
         "machine_id": "GM020",
         "process_id": "GP000",
-        "filament_settings_ids": ["GFSA00_02"],
+        "filament_settings_ids": ["GFSA00_02", "GFSA00_02"],  # 2 slots, Bambu PLA Basic @BBL A1M
         "auto_center": False,
     })
     # The slice may still return 200 even with off-bed instances (no
@@ -193,9 +205,14 @@ def test_fixture_08_without_auto_center_goes_out_of_bounds() -> None:
         f"slice failed unexpectedly: {slice_resp!r}"
     )
     out_bytes = _get_bytes(f"{API}/3mf/{slice_resp['output_token']}")
-    _, max_x, _, _ = _toolpath_xy_extents(out_bytes)
-    assert max_x > A1M_BED_X, (
-        f"expected toolpath to exceed bed (max X > {A1M_BED_X}), got "
-        f"max X = {max_x}. Either the fixture changed or auto_center "
-        f"is leaking through to the False case."
+    _, max_x, _, max_y = _toolpath_xy_extents(out_bytes)
+    # Sharper threshold than (A1M_BED_X + BED_TOLERANCE): the authored
+    # P2S layout puts the model edge well past the A1 mini bed (max X
+    # ~207 observed). Anything within tolerance would mean auto_center
+    # leaked through to the False case.
+    assert max_x > A1M_BED_X + BED_TOLERANCE, (
+        f"expected toolpath to clearly exceed bed (max X > "
+        f"{A1M_BED_X + BED_TOLERANCE}), got max X = {max_x}. Either the "
+        f"fixture changed or auto_center is leaking through to the "
+        f"False case."
     )
