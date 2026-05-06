@@ -644,7 +644,7 @@ int run_slice_mode(const SliceRequest& req) {
             entry["previous"] = previous;
             process_overrides_report.push_back(std::move(entry));
         }
-        emit_progress("client_overrides_applied", 23);
+        emit_progress("client_overrides_applied", 25);
     }
 
     // 10. Build the settings_transfer response. Process and printer keys
@@ -658,7 +658,8 @@ int run_slice_mode(const SliceRequest& req) {
         const bool any =
             !process_override_keys.empty() ||
             !printer_override_keys.empty() ||
-            any_filament_applied;
+            any_filament_applied ||
+            !process_overrides_report.empty();
         transfer_status["status"] = any ? "applied" : "no_customizations";
         transfer_status["process_keys"] = process_override_keys;
         transfer_status["printer_keys"] = printer_override_keys;
@@ -708,7 +709,7 @@ int run_slice_mode(const SliceRequest& req) {
     // 11. Auto-center / drop-to-bed. Headless-only knob; GUI relies on
     //     visual adjustment after a printer change.
     if (req.auto_center) {
-        emit_progress("auto_centering", 25);
+        emit_progress("auto_centering", 26);
         try {
             auto_center_on_plate(model, final_cfg);
         } catch (const std::exception& e) {
