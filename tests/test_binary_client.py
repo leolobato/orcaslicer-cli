@@ -91,3 +91,52 @@ async def test_slice_stream_yields_progress_then_result(client: BinaryClient) ->
     types = [e["type"] for e in events]
     assert types == ["progress", "progress", "progress", "result"]
     assert events[-1]["payload"]["status"] == "ok"
+
+
+async def test_dump_options_returns_catalogue(client: BinaryClient, tmp_path) -> None:
+    """The wrapper writes its own out_path, reads back the file."""
+    catalogue = {"options": [{"key": "layer_height", "label": "Layer height"}]}
+    fake_envelope = {
+        "status": "ok",
+        "code": "done",
+        "message": "",
+        "details": {"out_path": "ignored", "count": 1},
+    }
+
+    captured: dict = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        proc = AsyncMock()
+        # Wrapper writes the request to stdin; we ignore its content
+        # because the wrapper sets out_path to a tempfile it created.
+        async def communicate(input: bytes):
+            req = json.loads(input)
+            Path(req["out_path"]).write_text(json.dumps(catalogue))
+            return (json.dumps(fake_envelope).encode(), b"")
+        proc.communicate = communicate
+        proc.returncode = 0
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        result = await client.dump_options(timeout_s=10.0)
+
+    assert result == catalogue
+    assert "dump-options" in captured["args"]
+
+
+async def test_dump_options_raises_on_error_envelope(client: BinaryClient) -> None:
+    err = {"status": "error", "code": "io_error", "message": "no path"}
+
+    async def fake_exec(*args, **kwargs):
+        proc = AsyncMock()
+        async def communicate(input: bytes):
+            return (json.dumps(err).encode(), b"")
+        proc.communicate = communicate
+        proc.returncode = 1
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", fake_exec):
+        with pytest.raises(BinaryError) as exc:
+            await client.dump_options(timeout_s=10.0)
+    assert exc.value.code == "io_error"
