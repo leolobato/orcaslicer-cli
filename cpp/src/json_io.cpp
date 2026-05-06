@@ -100,4 +100,15 @@ DumpProfilesRequest parse_dump_profiles_request_from_stdin() {
     return req;
 }
 
+DumpOptionsRequest parse_dump_options_request_from_stdin() {
+    std::stringstream ss;
+    ss << std::cin.rdbuf();
+    json j = json::parse(ss.str());
+    DumpOptionsRequest req;
+    req.out_path = j.value("out_path", std::string{});
+    if (req.out_path.empty())
+        throw std::runtime_error("dump-options: out_path is required");
+    return req;
+}
+
 }  // namespace orca_headless

@@ -111,6 +111,15 @@ struct DumpProfilesRequest {
     std::string out_path;       // /tmp/profiles-manifest.json
 };
 
+// Walks libslic3r's static ``print_config_def`` registry and writes a JSON
+// catalogue of every process-domain option's metadata (label, type,
+// min/max, enum values, tooltip, mode, gui_type) to ``out_path``. No
+// PresetBundle, no profiles_dir — the registry is statically initialised
+// inside libslic3r on link.
+struct DumpOptionsRequest {
+    std::string out_path;       // /tmp/options-manifest.json
+};
+
 SliceRequest parse_slice_request_from_stdin();
 void write_slice_response_to_stdout(const SliceResponse& r);
 
@@ -118,5 +127,6 @@ UseSetRequest parse_use_set_request_from_stdin();
 void write_use_set_response_to_stdout(const UseSetResponse& r);
 
 DumpProfilesRequest parse_dump_profiles_request_from_stdin();
+DumpOptionsRequest parse_dump_options_request_from_stdin();
 
 }  // namespace orca_headless
