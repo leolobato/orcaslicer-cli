@@ -1,11 +1,69 @@
 #include "json_io.h"
 
+#include <cerrno>
+#include <cstdio>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <unistd.h>
 
 using nlohmann::json;
 
 namespace orca_headless {
+
+namespace {
+// Saved real stdout fd. -1 until ``redirect_libslic3r_stdout_pollution`` runs
+// successfully. Response writers fall back to ``std::cout`` when -1.
+int g_real_stdout_fd = -1;
+
+// Best-effort raw write to the saved real stdout fd. Loops over partial
+// writes / EINTR until either the buffer is fully written or write fails.
+// Used by ``write_envelope_line`` below; never throws.
+void write_all_or_drop(int fd, const char* buf, size_t len) {
+    while (len > 0) {
+        ssize_t n = ::write(fd, buf, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return;  // pipe broken or fd bad — drop silently, caller already best-effort
+        }
+        buf += n;
+        len -= static_cast<size_t>(n);
+    }
+}
+}  // namespace
+
+void write_envelope_line(const json& out) {
+    std::string s = out.dump();
+    s.push_back('\n');
+    if (g_real_stdout_fd >= 0) {
+        write_all_or_drop(g_real_stdout_fd, s.data(), s.size());
+    } else {
+        std::cout << s << std::flush;
+    }
+}
+
+int redirect_libslic3r_stdout_pollution() {
+    if (g_real_stdout_fd >= 0) return g_real_stdout_fd;  // idempotent
+    int saved = ::dup(STDOUT_FILENO);
+    if (saved < 0) {
+        std::fprintf(stderr,
+            "warn: dup(STDOUT) failed (errno=%d); libslic3r stdout pollution may corrupt JSON protocol\n",
+            errno);
+        return -1;
+    }
+    if (::dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+        std::fprintf(stderr,
+            "warn: dup2(STDERR, STDOUT) failed (errno=%d); libslic3r stdout pollution may corrupt JSON protocol\n",
+            errno);
+        ::close(saved);
+        return -1;
+    }
+    g_real_stdout_fd = saved;
+    return saved;
+}
+
+int real_stdout_fd() { return g_real_stdout_fd; }
+
 
 SliceRequest parse_slice_request_from_stdin() {
     std::stringstream ss;
@@ -54,7 +112,7 @@ void write_slice_response_to_stdout(const SliceResponse& r) {
         out["message"] = r.error_message;
         out["details"] = r.error_details;
     }
-    std::cout << out.dump() << std::endl;
+    write_envelope_line(out);
 }
 
 UseSetRequest parse_use_set_request_from_stdin() {
@@ -83,7 +141,7 @@ void write_use_set_response_to_stdout(const UseSetResponse& r) {
         out["message"] = r.error_message;
         out["details"] = r.error_details;
     }
-    std::cout << out.dump() << std::endl;
+    write_envelope_line(out);
 }
 
 DumpProfilesRequest parse_dump_profiles_request_from_stdin() {

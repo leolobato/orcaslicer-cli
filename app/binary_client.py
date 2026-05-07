@@ -170,11 +170,22 @@ class BinaryClient:
         rc = await proc.wait()
         stderr_tail = "\n".join(stderr_lines)[-2000:]
 
+        # Capture the raw stdout for diagnostics regardless of outcome —
+        # the streaming path used to discard it on error, leaving callers
+        # with only the JSONDecodeError text and no way to see what the
+        # binary actually wrote (or didn't write). Surfaced via
+        # ``details.stdout_head`` / ``details.stdout_len`` so callers that
+        # consume structured fields can read it; the message itself stays
+        # clean.
+        stdout_head = stdout[:1000].decode("utf-8", errors="replace")
+        stdout_len = len(stdout)
+
         if rc != 0 and not stdout.strip():
             yield {"type": "error", "payload": {
                 "code": "binary_crashed",
                 "message": f"exit {rc}",
                 "stderr_tail": stderr_tail,
+                "details": {"stdout_head": stdout_head, "stdout_len": stdout_len},
             }}
             return
         try:
@@ -184,6 +195,7 @@ class BinaryClient:
                 "code": "binary_bad_response",
                 "message": str(e),
                 "stderr_tail": stderr_tail,
+                "details": {"stdout_head": stdout_head, "stdout_len": stdout_len},
             }}
             return
         if response.get("status") != "ok":
