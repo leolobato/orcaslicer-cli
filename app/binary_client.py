@@ -133,10 +133,14 @@ class BinaryClient:
     async def dump_options(self, *, timeout_s: float = 30.0) -> dict[str, Any]:
         """Invoke ``orca-headless dump-options`` and return the catalogue dict.
 
-        The binary writes the JSON catalogue to a temp file we create here,
-        and only emits the success/error envelope on stdout. Returns the
-        parsed catalogue (``{"options": [...]}``); raises ``BinaryError``
-        on a non-OK envelope or subprocess failure.
+        The binary writes the JSON catalogue to a temp file we create here.
+        Unlike ``slice`` and ``use-set``, the ``dump-options`` subcommand
+        emits its success/error envelope on **stderr** (the C++ side wires
+        the dump command through a different logger sink). We therefore
+        try stdout first and fall back to stderr — robust against the
+        binary moving the envelope back to stdout in a future build.
+        Returns the parsed catalogue (``{"options": [...]}``); raises
+        ``BinaryError`` on a non-OK envelope or subprocess failure.
         """
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             out_path = tf.name
@@ -164,21 +168,25 @@ class BinaryClient:
 
             stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
-            if proc.returncode != 0 and not stdout.strip():
+            if proc.returncode != 0 and not stdout.strip() and not stderr.strip():
                 raise BinaryError(
                     code="binary_crashed",
-                    message=f"dump-options exited {proc.returncode} with no stdout",
+                    message=f"dump-options exited {proc.returncode} with no output",
                     details={},
                     stderr_tail=stderr_text[-2000:],
                 )
 
+            envelope_source = stdout if stdout.strip() else stderr
             try:
-                envelope = json.loads(stdout)
+                envelope = json.loads(envelope_source)
             except json.JSONDecodeError as e:
                 raise BinaryError(
                     code="binary_bad_response",
-                    message=f"could not parse stdout as JSON: {e}",
-                    details={"stdout_head": stdout[:500].decode("utf-8", errors="replace")},
+                    message=f"could not parse envelope as JSON: {e}",
+                    details={
+                        "stdout_head": stdout[:500].decode("utf-8", errors="replace"),
+                        "stderr_head": stderr[:500].decode("utf-8", errors="replace"),
+                    },
                     stderr_tail=stderr_text[-2000:],
                 )
 

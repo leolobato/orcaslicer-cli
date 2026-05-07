@@ -140,3 +140,36 @@ async def test_dump_options_raises_on_error_envelope(client: BinaryClient) -> No
         with pytest.raises(BinaryError) as exc:
             await client.dump_options(timeout_s=10.0)
     assert exc.value.code == "io_error"
+
+
+async def test_dump_options_falls_back_to_stderr_envelope(
+    client: BinaryClient, tmp_path,
+) -> None:
+    """Production binary emits the dump-options envelope on stderr, not stdout.
+
+    The wrapper accepts the envelope from either stream so a future binary
+    fix that moves it back to stdout doesn't regress.
+    """
+    catalogue = {"options": [{"key": "layer_height", "label": "Layer height"}]}
+    fake_envelope = {
+        "status": "ok",
+        "code": "done",
+        "message": "",
+        "details": {"count": 1},
+    }
+
+    async def fake_exec(*args, **kwargs):
+        proc = AsyncMock()
+        async def communicate(input: bytes):
+            req = json.loads(input)
+            Path(req["out_path"]).write_text(json.dumps(catalogue))
+            # stdout empty, envelope on stderr — matches the live binary.
+            return (b"", json.dumps(fake_envelope).encode())
+        proc.communicate = communicate
+        proc.returncode = 0
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", fake_exec):
+        result = await client.dump_options(timeout_s=10.0)
+
+    assert result == catalogue
