@@ -86,6 +86,38 @@ class StrictResolveProfileByNameTests(unittest.TestCase):
         self.assertEqual(resolved["nozzle_temperature"], ["230"])
         self.assertEqual(resolved["name"], "Child")
 
+    def test_strips_manifest_annotation_from_resolved_chain(self) -> None:
+        # `manifest.annotate_profile_cache` stamps `_manifest` onto raw
+        # profile entries so the listing API can serve the binary's
+        # resolved shape without re-walking. The resolved/merged dict
+        # used by the slicer must not carry it: `_write_chain_link`
+        # writes those dicts to disk for `orca-headless`, and libslic3r
+        # logs `invalid json type for _manifest` for every link
+        # (Config.cpp:1004).
+        parent_key = self._index_profile(
+            "User",
+            {"name": "Parent", "filament_type": ["PLA"], "filament_id": "X1"},
+            "filament",
+        )
+        child_key = self._index_profile(
+            "User",
+            {"name": "Child", "inherits": "Parent", "nozzle_temperature": ["230"]},
+            "filament",
+        )
+        profiles._raw_profiles[parent_key]["_manifest"] = {"setting_id": "GFA00"}
+        profiles._raw_profiles[child_key]["_manifest"] = {"setting_id": "GFA00_CHILD"}
+
+        resolved_child = profiles.resolve_profile_by_name(child_key)
+        resolved_parent = profiles.resolve_profile_by_name(parent_key)
+
+        self.assertIsNotNone(resolved_child)
+        self.assertIsNotNone(resolved_parent)
+        self.assertNotIn("_manifest", resolved_child)
+        self.assertNotIn("_manifest", resolved_parent)
+        # Raw entries are unchanged — listing API still reads `_manifest` from them.
+        self.assertIn("_manifest", profiles._raw_profiles[parent_key])
+        self.assertIn("_manifest", profiles._raw_profiles[child_key])
+
 
 class ListingIterationTolerantWrapTests(unittest.TestCase):
     """Listing-side iteration in profiles.py skips broken chains with a log."""
