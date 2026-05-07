@@ -107,6 +107,7 @@ from .slicer import (
     ModelTooBigError,
     SlicingError,
     materialize_profiles_for_binary,
+    pad_filament_settings_for_sparse_3mf,
 )
 
 
@@ -1118,18 +1119,23 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             content={"code": "invalid_filament_map", "message": fm_err},
         )
 
-    unknown_presets = validate_3mf_preset_references(input_path.read_bytes())
+    input_bytes = input_path.read_bytes()
+    unknown_presets = validate_3mf_preset_references(input_bytes)
     if unknown_presets:
         logger.warning(
             "slice/v2: 3MF references %d preset(s) not in catalog: %s",
             len(unknown_presets), unknown_presets,
         )
 
+    padded_filament_ids = pad_filament_settings_for_sparse_3mf(
+        body.filament_settings_ids, input_bytes,
+    )
+
     try:
         paths = await materialize_profiles_for_binary(
             machine_id=body.machine_id,
             process_id=body.process_id,
-            filament_setting_ids=body.filament_settings_ids,
+            filament_setting_ids=padded_filament_ids,
         )
     except IncompatibleFilamentError as e:
         return JSONResponse(
@@ -1206,18 +1212,23 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             content={"code": "invalid_filament_map", "message": fm_err},
         )
 
-    unknown_presets = validate_3mf_preset_references(input_path.read_bytes())
+    input_bytes = input_path.read_bytes()
+    unknown_presets = validate_3mf_preset_references(input_bytes)
     if unknown_presets:
         logger.warning(
             "slice-stream/v2: 3MF references %d preset(s) not in catalog: %s",
             len(unknown_presets), unknown_presets,
         )
 
+    padded_filament_ids = pad_filament_settings_for_sparse_3mf(
+        body.filament_settings_ids, input_bytes,
+    )
+
     try:
         paths = await materialize_profiles_for_binary(
             machine_id=body.machine_id,
             process_id=body.process_id,
-            filament_setting_ids=body.filament_settings_ids,
+            filament_setting_ids=padded_filament_ids,
         )
     except IncompatibleFilamentError as e:
         return JSONResponse(

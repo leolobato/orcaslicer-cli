@@ -67,6 +67,72 @@ VALID_BRIM_TYPES = frozenset({
 })
 
 
+def pad_filament_settings_for_sparse_3mf(
+    filament_settings_ids: list[str],
+    input_3mf_bytes: bytes,
+) -> list[str]:
+    """Pad ``filament_settings_ids`` to ``max(authored_slot) + 1``.
+
+    The Python wrapper (and bambu-gateway upstream) currently builds
+    ``filament_settings_ids`` positionally — one entry per authored
+    filament in the 3MF, indexed 0..N-1. For sliced 3MFs that authored
+    filaments on sparse AMS slots (e.g. only slot 1 used), this produces
+    a too-short array: libslic3r's
+    ``DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filaments``
+    (PrintConfig.cpp:9180) walks ``filament_count = filament_maps.size()``
+    and looks up each ``f_index`` against the printer's variant table —
+    when the array is shorter than ``max(slot)+1`` the lookup fails with
+    ``could not found extruder_type … filament_index N`` and the slice
+    falls over.
+
+    Pad to ``max(slot)+1``, placing the caller's ``filament_settings_ids[i]``
+    at the i-th authored slot. Empty slots are filled with the first
+    caller-supplied id — a no-op as far as the toolpath is concerned
+    since unused slots aren't referenced by gcode, but the array still
+    needs a valid id at every position so the binary's preset bundle can
+    instantiate every slot.
+
+    Returns ``filament_settings_ids`` unchanged when:
+    - the inspector can't read the 3MF (best-effort, never raises),
+    - the 3MF authors no filaments (caller knows better than us),
+    - authored slots are dense from 0 (already correct shape),
+    - the inspector's filament count doesn't match the caller's array
+      length (we can't safely re-map without an authoritative pairing).
+    """
+    if not filament_settings_ids:
+        return filament_settings_ids
+    try:
+        info = parse_inspect_data(input_3mf_bytes)
+    except Exception:
+        return filament_settings_ids
+
+    authored = info.get("filaments") or []
+    if not authored:
+        return filament_settings_ids
+    if len(authored) != len(filament_settings_ids):
+        logger.warning(
+            "pad_filament_settings: caller sent %d filament ids but 3MF authors "
+            "%d — leaving array as-is (cannot pair without trusted slot info)",
+            len(filament_settings_ids), len(authored),
+        )
+        return filament_settings_ids
+
+    slots = [int(f.get("slot", i)) for i, f in enumerate(authored)]
+    needed = max(slots) + 1
+    if needed <= len(filament_settings_ids):
+        return filament_settings_ids
+
+    padded = [filament_settings_ids[0]] * needed
+    for caller_idx, slot in enumerate(slots):
+        if 0 <= slot < needed:
+            padded[slot] = filament_settings_ids[caller_idx]
+    logger.info(
+        "pad_filament_settings: padded %d→%d for sparse 3MF slots %s",
+        len(filament_settings_ids), needed, slots,
+    )
+    return padded
+
+
 class ModelTooBigError(Exception):
     pass
 
