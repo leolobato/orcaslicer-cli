@@ -142,4 +142,39 @@ void write_use_set_response_to_stdout(const UseSetResponse& r);
 DumpProfilesRequest parse_dump_profiles_request_from_stdin();
 DumpOptionsRequest parse_dump_options_request_from_stdin();
 
+// Save the real stdout fd and redirect fd 1 to stderr at process start.
+//
+// Vendored libslic3r calls raw ``printf`` from at least
+// ``Support/TreeSupportCommon.hpp:597`` (``tree_supports_show_error``,
+// commented "todo Remove! ONLY FOR PUBLIC BETA"), which writes to fd 1
+// directly and bypasses our boost::log → stderr sink. Any such write
+// corrupts the JSON protocol that the Python gateway reads off stdout —
+// observed for re-slices of sliced 3MFs, where 7 lines of "Error: Not
+// precalculated Placeable areas requested" landed before the response
+// envelope, and ``json.loads`` failed at column 0.
+//
+// Calling ``redirect_libslic3r_stdout_pollution`` once at startup:
+//   - duplicates fd 1 into a saved fd, accessible via ``real_stdout_fd``
+//   - dup2's fd 2 (stderr) over fd 1, so any further ``printf``,
+//     ``puts``, ``std::cout``, etc. lands on stderr instead of corrupting
+//     the JSON pipe.
+//
+// Response writers (and the fatal-envelope emitter) then write directly
+// to ``real_stdout_fd`` via ``write(2)`` rather than through ``std::cout``.
+//
+// Idempotent + safe to call before any libslic3r code runs. Returns the
+// saved fd or -1 on dup failure (in which case ``std::cout`` is used as
+// a degraded fallback).
+int redirect_libslic3r_stdout_pollution();
+int real_stdout_fd();
+
+// Serialize a JSON object to the saved real stdout fd as one line. Used
+// by all binary subcommands (slice, use-set, dump-profiles) — anything
+// that writes a JSON envelope to the gateway must go through this so the
+// libslic3r-stdout-pollution redirect still works. Falls back to
+// ``std::cout`` (now pointed at stderr) if the redirect failed at
+// startup, so the envelope at least lands somewhere visible rather than
+// disappearing.
+void write_envelope_line(const nlohmann::json& out);
+
 }  // namespace orca_headless

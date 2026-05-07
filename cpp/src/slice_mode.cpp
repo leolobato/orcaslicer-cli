@@ -931,23 +931,37 @@ int run_slice_mode(const SliceRequest& req) {
     emit_progress("done", 100);
 
     // 16. Populate the success response from print + GCodeProcessorResult.
+    //
+    // Every double on the wire is filtered through ``finite_or_zero``:
+    // ``nlohmann::json::dump()`` throws ``type_error.316`` on NaN/inf,
+    // which would propagate up to ``main()``'s ``catch(std::exception)``
+    // and leave the gateway with empty stdout / a JSONDecodeError instead
+    // of the real failure. Guard the doubles at the wire boundary rather
+    // than chasing every upstream producer.
+    auto finite_or_zero = [](double v) {
+        return std::isfinite(v) ? v : 0.0;
+    };
+
     const auto& stats = print.print_statistics();
     const size_t normal_idx =
         static_cast<size_t>(Slic3r::PrintEstimatedStatistics::ETimeMode::Normal);
     response.status = "ok";
-    response.estimate.weight_g = stats.total_weight;
-    response.estimate.time_seconds =
-        gcode_result.print_statistics.modes[normal_idx].time;
-    response.estimate.prepare_seconds =
-        gcode_result.print_statistics.modes[normal_idx].prepare_time;
+    response.estimate.weight_g = finite_or_zero(stats.total_weight);
+    response.estimate.time_seconds = finite_or_zero(
+        gcode_result.print_statistics.modes[normal_idx].time);
+    response.estimate.prepare_seconds = finite_or_zero(
+        gcode_result.print_statistics.modes[normal_idx].prepare_time);
     if (stats.total_used_filament > 0) {
         const double model_filament_mm =
             stats.total_used_filament - stats.total_wipe_tower_filament;
         const double weight_per_mm =
             stats.total_weight / stats.total_used_filament;
-        response.estimate.model_weight_g = model_filament_mm * weight_per_mm;
-        response.estimate.filament_used_m.push_back(stats.total_used_filament / 1000.0);
-        response.estimate.model_filament_used_m.push_back(model_filament_mm / 1000.0);
+        response.estimate.model_weight_g = finite_or_zero(
+            model_filament_mm * weight_per_mm);
+        response.estimate.filament_used_m.push_back(
+            finite_or_zero(stats.total_used_filament / 1000.0));
+        response.estimate.model_filament_used_m.push_back(
+            finite_or_zero(model_filament_mm / 1000.0));
     } else {
         response.estimate.model_weight_g = 0.0;
         response.estimate.filament_used_m.push_back(0.0);

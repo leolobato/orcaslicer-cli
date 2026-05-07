@@ -936,6 +936,15 @@ def resolve_profile_by_name(name: str) -> dict[str, Any] | None:
     else:
         merged = dict(profile)
 
+    # `_manifest` is a Python-side annotation stamped onto `_raw_profiles`
+    # by `manifest.annotate_profile_cache` so the listing endpoints can
+    # serve the binary's resolved shape without re-walking. It must not
+    # leak into resolved configs — `slicer._write_chain_link` writes them
+    # to disk for `orca-headless` to load via libslic3r's `load_from_json`,
+    # which logs `invalid json type for _manifest` for every chain link
+    # (Config.cpp:1004) and pollutes stderr.
+    merged.pop("_manifest", None)
+
     _resolved_cache[profile_key] = merged
     return merged
 

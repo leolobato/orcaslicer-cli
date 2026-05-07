@@ -191,7 +191,7 @@ int run_dump_profiles_mode(const DumpProfilesRequest& req) {
             {"message", msg},
             {"details", nlohmann::json::object()},
         };
-        std::cout << err.dump() << std::endl;
+        write_envelope_line(err);
         return 1;
     };
 
@@ -265,7 +265,7 @@ int run_dump_profiles_mode(const DumpProfilesRequest& req) {
             }},
         }},
     };
-    std::cout << ok.dump() << std::endl;
+    write_envelope_line(ok);
     return 0;
 }
 
