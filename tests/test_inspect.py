@@ -1,6 +1,8 @@
 """Unit tests for app.inspect.parse_inspect_data."""
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -94,6 +96,56 @@ def test_parse_sliced_output(fixture_01_sliced_bytes):
     assert len(p0["warnings"]) >= 1
     # Per-plate objects from slice_info.config <object> children
     assert p0["objects"] == [{"id": "156", "name": "3DBenchy.stl"}]
+
+
+def test_slice_info_without_gcode_is_not_sliced() -> None:
+    """MakerWorld-style 3MFs ship full ``slice_info.config`` but no ``*.gcode``.
+
+    Treat them as un-sliced so callers (web UI, iOS app) re-slice instead
+    of trying to extract a toolpath that isn't there.
+    """
+    slice_info = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<config>"
+        '<header><header_item key="X-BBL-Client-Type" value="slicer"/></header>'
+        "<plate>"
+        '<metadata key="index" value="1"/>'
+        '<metadata key="prediction" value="5119"/>'
+        '<metadata key="weight" value="38.27"/>'
+        "</plate>"
+        "</config>"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Metadata/slice_info.config", slice_info)
+        zf.writestr("3D/3dmodel.model", "<model/>")
+
+    result = parse_inspect_data(buf.getvalue())
+    assert result["is_sliced"] is False
+
+
+def test_slice_info_with_gcode_is_sliced() -> None:
+    """Companion to the negative case: a ``*.gcode`` entry alongside
+    ``slice_info.config`` keeps ``is_sliced`` ``True``.
+    """
+    slice_info = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<config>"
+        "<plate>"
+        '<metadata key="index" value="1"/>'
+        "</plate>"
+        "</config>"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Metadata/slice_info.config", slice_info)
+        zf.writestr("Metadata/plate_1.gcode", "; G-code\nG1 X0 Y0\n")
+        zf.writestr("3D/3dmodel.model", "<model/>")
+
+    result = parse_inspect_data(buf.getvalue())
+    assert result["is_sliced"] is True
 
 
 def test_inspect_cache_hit_and_miss() -> None:

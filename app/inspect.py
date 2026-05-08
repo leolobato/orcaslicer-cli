@@ -51,6 +51,20 @@ def _read_slice_info(zf: zipfile.ZipFile) -> str | None:
     return xml
 
 
+def _has_embedded_gcode(zf: zipfile.ZipFile) -> bool:
+    """True iff the archive contains at least one G-code toolpath file.
+
+    Some 3MFs (notably MakerWorld downloads) ship ``slice_info.config``
+    with full plate metadata but strip the actual ``*.gcode`` payload.
+    Treat those as un-sliced so callers know to re-slice.
+    """
+    suffixes = (".gcode", ".gco", ".gc", ".g")
+    for name in zf.namelist():
+        if name.lower().endswith(suffixes):
+            return True
+    return False
+
+
 def _parse_per_plate_slice_info(slice_info_xml: str) -> dict[int, dict]:
     """Parse per-plate metadata from slice_info.config XML.
 
@@ -455,7 +469,7 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
 
     with zf:
         slice_info_xml = _read_slice_info(zf)
-        out["is_sliced"] = slice_info_xml is not None
+        out["is_sliced"] = slice_info_xml is not None and _has_embedded_gcode(zf)
         project_settings = _read_project_settings(zf)
         out["plate_count"] = get_plate_count(file_bytes)
 
