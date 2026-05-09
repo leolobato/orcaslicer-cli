@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app import config as cfg
 from app import options
 
 
@@ -110,11 +111,12 @@ def test_filter_layout_preserves_option_order_within_optgroup(
         ["layer_height", "initial_layer_print_height"]
 
 
-async def test_load_into_cache_populates_metadata_and_layout(
+async def test_load_into_cache_filters_when_allowlist_enabled(
     monkeypatch, fake_layout: Path, fake_allowlist: Path, fake_catalogue: dict,
 ) -> None:
     monkeypatch.setattr(options, "_LAYOUT_PATH", fake_layout)
     monkeypatch.setattr(options, "_ALLOWLIST_PATH", fake_allowlist)
+    monkeypatch.setattr(cfg, "PROCESS_ALLOWLIST_ENABLED", True)
 
     fake_client = AsyncMock()
     fake_client.dump_options = AsyncMock(return_value=fake_catalogue)
@@ -131,3 +133,25 @@ async def test_load_into_cache_populates_metadata_and_layout(
     assert page_labels == ["Quality", "Strength"]
     layer_optgroup = layout["pages"][0]["optgroups"][0]
     assert layer_optgroup["options"] == ["layer_height"]
+
+
+async def test_load_into_cache_returns_full_layout_by_default(
+    monkeypatch, fake_layout: Path, fake_catalogue: dict,
+) -> None:
+    monkeypatch.setattr(options, "_LAYOUT_PATH", fake_layout)
+    monkeypatch.setattr(cfg, "PROCESS_ALLOWLIST_ENABLED", False)
+
+    fake_client = AsyncMock()
+    fake_client.dump_options = AsyncMock(return_value=fake_catalogue)
+    cache = await options.load_options_cache(binary_client=fake_client)
+
+    layout = cache.layout
+    assert layout["allowlist_revision"] == ""
+    page_labels = [p["label"] for p in layout["pages"]]
+    assert page_labels == ["Quality", "Strength"]
+    quality_optgroups = layout["pages"][0]["optgroups"]
+    assert [og["label"] for og in quality_optgroups] == ["Layer height", "Seam"]
+    assert quality_optgroups[0]["options"] == \
+        ["layer_height", "initial_layer_print_height"]
+    assert quality_optgroups[1]["options"] == ["seam_position"]
+    assert layout["pages"][1]["optgroups"][0]["options"] == ["wall_loops"]

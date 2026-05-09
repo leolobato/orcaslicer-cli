@@ -705,10 +705,11 @@ async def get_process_options() -> dict[str, Any]:
 async def get_process_options_layout() -> dict[str, Any]:
     """Page → optgroup → option layout for the process editor's All view.
 
-    Filtered server-side by app/process_allowlist.json — only allowlisted
-    keys survive, empty optgroups and pages are dropped. Layout sourced
-    from cpp/src/generated/process_pages.json (extracted at build time
-    from Tab.cpp::TabPrint::build()).
+    Layout sourced from cpp/src/generated/process_pages.json (extracted at
+    build time from Tab.cpp::TabPrint::build()). When PROCESS_ALLOWLIST_ENABLED
+    is set, filtered server-side by app/process_allowlist.json — only
+    allowlisted keys survive, empty optgroups and pages are dropped. Off by
+    default, so iOS/web receive the full GUI layout.
     """
     from app import options as options_module
     payload = options_module.get_layout()

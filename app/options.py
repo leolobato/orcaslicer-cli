@@ -8,14 +8,15 @@ Loads two pieces of data at startup (and on /profiles/reload):
 
   2. The page → optgroup → option layout extracted at build time from
      ``Tab.cpp::TabPrint::build()`` (lives at
-     ``cpp/src/generated/process_pages.json``). Filtered by
-     ``app/process_allowlist.json``: only allowlisted keys survive,
-     empty optgroups and pages are dropped. Served at
-     ``GET /options/process/layout``.
+     ``cpp/src/generated/process_pages.json``). When
+     ``cfg.PROCESS_ALLOWLIST_ENABLED`` is true the layout is filtered by
+     ``app/process_allowlist.json`` (only allowlisted keys survive, empty
+     optgroups and pages are dropped); otherwise the full GUI layout is
+     served verbatim. Reachable at ``GET /options/process/layout``.
 
 Both pieces are cached in module-level state. The metadata catalogue is
-unfiltered so iOS/web can render labels for non-allowlisted modified
-keys (which the editor shows read-only).
+unfiltered so iOS/web can render labels for any modified key (the editor
+shows non-allowlisted ones read-only when filtering is on).
 """
 from __future__ import annotations
 
@@ -88,11 +89,19 @@ def _build_metadata(catalogue: dict[str, Any], api_version: str) -> dict[str, An
 
 def _build_layout(
     layout_doc: dict[str, Any],
-    allowlist_doc: dict[str, Any],
+    allowlist_doc: dict[str, Any] | None,
     api_version: str,
 ) -> dict[str, Any]:
+    pages_in = layout_doc.get("pages", [])
+    if allowlist_doc is None:
+        # Allowlist disabled — return the GUI layout verbatim.
+        return {
+            "version": api_version,
+            "allowlist_revision": "",
+            "pages": pages_in,
+        }
     pages = filter_layout(
-        layout_doc.get("pages", []),
+        pages_in,
         set(allowlist_doc.get("options", [])),
     )
     return {
@@ -114,31 +123,38 @@ async def load_options_cache(*, binary_client: BinaryClient) -> OptionsCache:
             f"process_pages.json missing at {_LAYOUT_PATH}; "
             "run scripts/extract_tab_layout.py")
     layout_doc = json.loads(_LAYOUT_PATH.read_text())
-    if not _ALLOWLIST_PATH.exists():
-        raise RuntimeError(f"process_allowlist.json missing at {_ALLOWLIST_PATH}")
-    allowlist_doc = json.loads(_ALLOWLIST_PATH.read_text())
+
+    allowlist_doc: dict[str, Any] | None = None
+    if cfg.PROCESS_ALLOWLIST_ENABLED:
+        if not _ALLOWLIST_PATH.exists():
+            raise RuntimeError(
+                f"process_allowlist.json missing at {_ALLOWLIST_PATH}")
+        allowlist_doc = json.loads(_ALLOWLIST_PATH.read_text())
 
     layout = _build_layout(layout_doc, allowlist_doc, api_version)
 
-    # Drop a warning for any allowlist key that doesn't appear in the
-    # metadata dump — script check_allowlist.py is the strict gate; here
-    # we only log so a curated allowlist mistake doesn't crash startup.
     metadata_keys = set(metadata["options"].keys())
-    for key in allowlist_doc.get("options", []):
-        if key not in metadata_keys:
-            logger.warning(
-                "allowlist references key %r which is not in dump-options "
-                "(typo, removed upstream, or non-process-domain key)", key)
+    if allowlist_doc is not None:
+        # Drop a warning for any allowlist key that doesn't appear in the
+        # metadata dump — script check_allowlist.py is the strict gate; here
+        # we only log so a curated allowlist mistake doesn't crash startup.
+        for key in allowlist_doc.get("options", []):
+            if key not in metadata_keys:
+                logger.warning(
+                    "allowlist references key %r which is not in dump-options "
+                    "(typo, removed upstream, or non-process-domain key)", key)
 
     _cache.metadata = metadata
     _cache.layout = layout
+    exposed_keys = sum(
+        len(og["options"]) for p in layout["pages"] for og in p["optgroups"])
     logger.info(
-        "options cache loaded: %d metadata entries, %d allowlisted keys "
-        "across %d pages",
+        "options cache loaded: %d metadata entries, %d layout keys across "
+        "%d pages (allowlist %s)",
         len(metadata["options"]),
-        sum(len(og["options"])
-            for p in layout["pages"] for og in p["optgroups"]),
+        exposed_keys,
         len(layout["pages"]),
+        "enabled" if allowlist_doc is not None else "disabled",
     )
     return _cache
 

@@ -26,3 +26,10 @@ CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1
 CACHE_MAX_FILES = int(os.environ.get("CACHE_MAX_FILES", "200"))
 
 ORCA_HEADLESS_BINARY = os.environ.get("ORCA_HEADLESS_BINARY", "/opt/orca-headless/bin/orca-headless")
+
+# Gate the curated process-option allowlist that trims /options/process/layout
+# down to the editor's hand-picked keys. Default off — the iOS app gets the
+# full page/optgroup/option tree from Tab.cpp. Set to ``"true"`` to fall back
+# to ``app/process_allowlist.json`` filtering.
+PROCESS_ALLOWLIST_ENABLED = os.environ.get(
+    "PROCESS_ALLOWLIST_ENABLED", "false").lower() in ("1", "true", "yes")
