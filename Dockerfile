@@ -233,7 +233,14 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements-dev
 
 COPY app/ app/
 COPY tests/ tests/
+COPY scripts/ scripts/
 COPY conftest.py .
+
+# Generated layout for the process parameter editor (built-time extracted
+# from Tab.cpp; read at FastAPI startup by app/options.py). The file is
+# checked into git so neither the cpp-builder stage nor a re-extraction
+# pass needs to run during image build.
+COPY cpp/src/generated/ cpp/src/generated/
 
 # Bake the source commit hash into the image so the running container can
 # log which revision it was built from. Pass via

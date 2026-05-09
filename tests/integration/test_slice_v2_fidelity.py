@@ -77,7 +77,12 @@ def _post_json(url: str, payload: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120.0) as r:
+    # /slice/v2 is synchronous and a cold-cache multi-filament slice
+    # (fixture 06's user-imported filament + 5 slots) can take ~3 min
+    # on the dev container. Set the upper bound generously — any real
+    # slice exceeding this is a separate concern (deadlock, runaway
+    # toolpath, etc.) that should surface as a different signal.
+    with urllib.request.urlopen(req, timeout=300.0) as r:
         return json.loads(r.read().decode())
 
 
@@ -506,5 +511,60 @@ def test_fixture_07_matches_gui_within_tolerance() -> None:
             "enable_prime_tower": "0",
             "print_sequence": "by object",
             "curr_bed_type": "Textured PEI Plate",
+        },
+    )
+
+
+def test_fixture_10_diff_to_system_matches_gui_shape() -> None:
+    """5-filament BagClip authored on A1 mini; only slot 2 (PETG) painted.
+
+    Locks in `different_settings_to_system` GUI-parity for the output 3MF.
+    The 3MF was authored with one process tweak (`prime_tower_infill_gap`),
+    no per-filament tweaks, no printer tweaks — GUI's output therefore has
+    `different_settings_to_system = prime_tower_infill_gap;;;;;;` (one
+    process key + 5 empty filament slots + 1 empty printer slot).
+
+    Pre-fix our binary emitted a bloated diff with ~30 keys per filament
+    and ~30 printer keys: chain links were loaded with `is_system=false`,
+    which makes `PresetCollection::get_preset_base` walk inherits to the
+    common ancestor (e.g. `fdm_bbl_3dp_001_common`) instead of returning
+    the system leaf itself. The export-time diff then reports every key
+    the leaf legitimately overrides over its ancestor — exactly the
+    explicit key set of `Bambu Lab A1 mini 0.4 nozzle.json`.
+
+    Post-fix the diff matches GUI: only the smart-transfer overlay shows
+    in the per-slot allowlist.
+
+    Slot 1 was authored as `Generic ABS @System` (`OGFB99`), but the
+    bambu-gateway's `_resolve_carryover_filaments` substitutes it with
+    `Bambu PLA Basic @BBL A1M` for the A1 mini target (Generic ABS has
+    `compatible_printers: []` upstream and the resolver picks the
+    machine's default filament). We pass the substituted list so the
+    test mirrors the production gateway path; the slice physical
+    output is identical because slot 1 is unpainted.
+    """
+    _slice_and_compare(
+        FIXTURE_DIR / "10" / "reference-bagclip-petg-multiple.3mf",
+        FIXTURE_DIR / "10" / "gui-bagclip-petg-multiple_sliced.3mf",
+        machine_id="GM020",
+        process_id="GP000",  # 0.20mm Standard @BBL A1M
+        filament_settings_ids=[
+            "GFSA00_02",  # Bambu PLA Basic @BBL A1M
+            "GFSA00_02",  # gateway-substituted from "Generic ABS @System"
+            "GFSG02_06",  # Bambu PETG HF @BBL A1M (the painted slot)
+            "GFSA00_02",  # Bambu PLA Basic @BBL A1M
+            "GFSA00_02",  # Bambu PLA Basic @BBL A1M
+        ],
+        plate_type="textured_pei_plate",
+        # Object-traversal start point can shift between layouts;
+        # 20 instances of the same clip means small reorderings.
+        require_xy_match=False,
+        expected_config_block={
+            # The marquee assertion: GUI parity on the per-slot
+            # `different_settings_to_system` allowlist. Pre-fix this
+            # was ~700 chars of bloat; GUI's is 28 chars.
+            "different_settings_to_system": "prime_tower_infill_gap;;;;;;",
+            "curr_bed_type": "Textured PEI Plate",
+            "filament_ids": "GFA00;GFA00;GFG02;GFA00;GFA00",
         },
     )

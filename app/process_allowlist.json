@@ -1,0 +1,17 @@
+{
+  "revision": "2026-05-06.1",
+  "options": [
+    "layer_height",
+    "initial_layer_print_height",
+    "wall_loops",
+    "top_shell_layers",
+    "bottom_shell_layers",
+    "sparse_infill_density",
+    "sparse_infill_pattern",
+    "enable_support",
+    "support_type",
+    "support_threshold_angle",
+    "brim_type",
+    "brim_width"
+  ]
+}

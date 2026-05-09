@@ -90,6 +90,15 @@ SliceRequest parse_slice_request_from_stdin() {
     }
     req.printer_model_id = j.value("printer_model_id", std::string());
     req.plate_type = j.value("plate_type", std::string());
+    if (j.contains("process_overrides") && j["process_overrides"].is_object()) {
+        for (const auto& [k, v] : j["process_overrides"].items()) {
+            if (v.is_string()) {
+                req.process_overrides.emplace(k, v.get<std::string>());
+            }
+            // Non-string values are silently dropped — the contract
+            // requires stringified config values (matches project_settings.config).
+        }
+    }
     return req;
 }
 
@@ -155,6 +164,17 @@ DumpProfilesRequest parse_dump_profiles_request_from_stdin() {
     if (req.profiles_dir.empty() || req.out_path.empty())
         throw std::runtime_error(
             "dump-profiles: profiles_dir and out_path are required");
+    return req;
+}
+
+DumpOptionsRequest parse_dump_options_request_from_stdin() {
+    std::stringstream ss;
+    ss << std::cin.rdbuf();
+    json j = json::parse(ss.str());
+    DumpOptionsRequest req;
+    req.out_path = j.value("out_path", std::string{});
+    if (req.out_path.empty())
+        throw std::runtime_error("dump-options: out_path is required");
     return req;
 }
 

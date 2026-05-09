@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 logger = logging.getLogger(__name__)
@@ -127,6 +129,79 @@ class BinaryClient:
             )
 
         return response
+
+    async def dump_options(self, *, timeout_s: float = 30.0) -> dict[str, Any]:
+        """Invoke ``orca-headless dump-options`` and return the catalogue dict.
+
+        The binary writes the JSON catalogue to a temp file we create here.
+        Unlike ``slice`` and ``use-set``, the ``dump-options`` subcommand
+        emits its success/error envelope on **stderr** (the C++ side wires
+        the dump command through a different logger sink). We therefore
+        try stdout first and fall back to stderr — robust against the
+        binary moving the envelope back to stdout in a future build.
+        Returns the parsed catalogue (``{"options": [...]}``); raises
+        ``BinaryError`` on a non-OK envelope or subprocess failure.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            out_path = tf.name
+        try:
+            request = {"out_path": out_path}
+            proc = await asyncio.create_subprocess_exec(
+                self.binary_path, "dump-options",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(input=json.dumps(request).encode()),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise BinaryError(
+                    code="binary_timeout",
+                    message=f"dump-options timed out after {timeout_s}s",
+                    details={},
+                )
+
+            stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+
+            if proc.returncode != 0 and not stdout.strip() and not stderr.strip():
+                raise BinaryError(
+                    code="binary_crashed",
+                    message=f"dump-options exited {proc.returncode} with no output",
+                    details={},
+                    stderr_tail=stderr_text[-2000:],
+                )
+
+            envelope_source = stdout if stdout.strip() else stderr
+            try:
+                envelope = json.loads(envelope_source)
+            except json.JSONDecodeError as e:
+                raise BinaryError(
+                    code="binary_bad_response",
+                    message=f"could not parse envelope as JSON: {e}",
+                    details={
+                        "stdout_head": stdout[:500].decode("utf-8", errors="replace"),
+                        "stderr_head": stderr[:500].decode("utf-8", errors="replace"),
+                    },
+                    stderr_tail=stderr_text[-2000:],
+                )
+
+            if envelope.get("status") != "ok":
+                raise BinaryError(
+                    code=envelope.get("code", "unknown"),
+                    message=envelope.get("message", ""),
+                    details=envelope.get("details", {}),
+                    stderr_tail=stderr_text[-2000:],
+                )
+
+            with open(out_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        finally:
+            Path(out_path).unlink(missing_ok=True)
 
     async def slice_stream(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         proc = await asyncio.create_subprocess_exec(

@@ -210,6 +210,24 @@ size_t load_chain_dir_into(
         if (auto it = kv.find("setting_id"); it != kv.end()) {
             preset.setting_id = it->second;
         }
+        // Mark vendor-bundle chain links as system presets. The Python
+        // wrapper resolves the inheritance chain against PROFILES_DIR
+        // (the bundled BBL/system catalog) — every link we write here
+        // maps to a preset that the GUI loads via `load_vendor_configs_from_json`
+        // with `is_system=true`. Without this flag,
+        // `PresetCollection::get_preset_base` (Preset.cpp:2650) walks
+        // `inherits` to the common ancestor (e.g. `fdm_bbl_3dp_001_common`)
+        // and `get_selected_preset_parent` (Preset.cpp:2595) returns
+        // that ancestor — so the export-time diff
+        // (`PresetBundle::export_config_3mf`, PresetBundle.cpp:3081-3258)
+        // reports every key the leaf legitimately overrides, bloating
+        // `different_settings_to_system` to ~30 keys per filament + 30
+        // printer keys. With `is_system=true`, `get_preset_base(leaf) ==
+        // &leaf` → parent for diff is self → diff = only the smart-
+        // transfer overlay applied to the edited preset, matching GUI.
+        // The filament-specific code path at PresetBundle.cpp:3158-3168
+        // has the same branch on `is_system`.
+        preset.is_system = true;
         // Step 4: Preset::normalize (parse_subfile:4103).
         // Safe on all three preset types — its set_num_filaments call
         // (Preset.cpp:379) is gated on filament_diameter being present,
@@ -481,6 +499,62 @@ int run_slice_mode(const SliceRequest& req) {
     //    to current `filament_presets.size()` and printer's nozzle count).
     bundle.update_multi_material_filament_presets();
 
+    // 7b. Apply the 3MF's process- and printer-slot customizations to the
+    //     bundle's EDITED presets, BEFORE composing full_config. This
+    //     mirrors the GUI's load_external_preset path
+    //     (vendor/OrcaSlicer/src/libslic3r/Preset.cpp:2173 —
+    //     `get_edited_preset().config.apply_only(cfg, keys, true)`) and
+    //     serves two ends in one apply:
+    //       (a) Value propagation: full_fff_config reads
+    //           `prints.get_edited_preset().config` (PresetBundle.cpp:3043)
+    //           and `printers.get_edited_preset().config` (3046) into
+    //           `out`, so overlays flow into the returned final_cfg
+    //           without a separate post-pass.
+    //       (b) `different_settings_to_system` diff parity: the export
+    //           logic inside full_fff_config (3081-3088 for process,
+    //           3256-3263 for printer) computes
+    //           `dirty_options_without_option_list(edited, parent, ...)`.
+    //           Combined with the `is_system=true` flag set on chain
+    //           links in load_chain_dir_into, the parent for diff is
+    //           the unmodified system preset (`get_preset_base ==
+    //           &selected`), so the diff captures exactly the overlay
+    //           keys we apply here — matching the GUI's sparse output
+    //           instead of bloating with the leaf's legitimate
+    //           inheritance-chain overrides.
+    //
+    //     Per-filament overlays (slots 1..N of `different_settings_to_system`)
+    //     stay on `final_cfg` (step 9 below): multi-filament's diff path
+    //     (PresetBundle.cpp:3158-3173) reads `&(preset->config)` via
+    //     `find_preset`, not edited per-slot, so the GUI's parity
+    //     mechanism for those is `load_project_embedded_presets`'s
+    //     project-local variants (already absorbed in step 4) — not a
+    //     fingerprint-based overlay onto an edited preset.
+    std::vector<std::string> process_override_keys;
+    std::vector<std::string> printer_override_keys;
+    if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
+            "different_settings_to_system", false);
+        fp != nullptr && !fp->values.empty()) {
+        process_override_keys = apply_threemf_slot_overrides(
+            bundle.prints.get_edited_preset().config, threemf_config,
+            fp->values[0],
+            /*exclude_filament_keys=*/true,
+            /*excluded_keys=*/{});
+        emit_progress("process_overrides_applied", 22);
+
+        // Printer slot (last entry of the fingerprint): no name guard —
+        // the machine is fixed by the request. Apply with the topology
+        // blocklist to avoid SIGSEGVs from per-extruder vector mismatches
+        // when the authoring printer's topology differs from ours.
+        if (fp->values.size() >= 2) {
+            printer_override_keys = apply_threemf_slot_overrides(
+                bundle.printers.get_edited_preset().config, threemf_config,
+                fp->values.back(),
+                /*exclude_filament_keys=*/false,
+                /*excluded_keys=*/s_printer_slot_blocklist);
+        }
+        emit_progress("printer_overrides_applied", 24);
+    }
+
     emit_progress("composing_config", 20);
 
     // 8. Compose the final config via the GUI's authoritative path.
@@ -510,33 +584,29 @@ int run_slice_mode(const SliceRequest& req) {
     }
     emit_progress("config_composed", 21);
 
-    // 9. Apply the 3MF's process- and printer-slot customizations on top
-    //    of the bundle's full_config output. The bundle's
-    //    ``load_project_embedded_presets`` only handles filament variants
-    //    (it absorbs project-local Preset objects from the 3MF). Process
-    //    and printer customizations live in the 3MF's project_settings.config
-    //    body — ``threemf_config`` here — and the
-    //    ``different_settings_to_system`` fingerprint lists which keys
-    //    were customized. Layout: ``[process, filament_0, …, filament_{N-1}, printer]``.
+    // 9. Apply the 3MF's PER-FILAMENT-slot customizations on top of the
+    //    bundle's full_config output. Process and printer slot overlays
+    //    were applied earlier (step 7b) directly to the bundle's edited
+    //    presets so they flow through full_config and land in
+    //    `different_settings_to_system` via the export-time diff.
     //
-    //    Without this pass, project-customized process keys (e.g.
-    //    layer_height, bridge_speed, default_acceleration) revert to the
-    //    system preset's defaults and the slice diverges meaningfully
-    //    from the GUI (verified on fixture 01: GUI's layer_height = 0.25
-    //    customization was lost, slice ran 53% slower with default 0.20).
-    std::vector<std::string> process_override_keys;
-    std::vector<std::string> printer_override_keys;
+    //    Per-filament overlays go on `final_cfg` instead because
+    //    multi-filament's diff path (PresetBundle.cpp:3158-3173) reads
+    //    `&(preset->config)` via `find_preset`, not the edited per-slot
+    //    config — modifying the system preset in-place would also bias
+    //    the diff against itself. The GUI's parity mechanism for
+    //    per-filament project tweaks is `load_project_embedded_presets`
+    //    (absorbed in step 4): the 3MF embeds variants like
+    //    `Bambu PLA Basic @BBL A1M(my-project.3mf)` whose `inherits`
+    //    points at the system preset and whose config carries the
+    //    overlay. For 3MFs that list per-slot customizations in the
+    //    fingerprint WITHOUT an embedded variant (rare — the GUI only
+    //    writes the fingerprint when it also creates a project-local
+    //    preset), this overlay is what carries the override through.
+    nlohmann::json process_overrides_report = nlohmann::json::array();
     if (const auto* fp = threemf_config.option<Slic3r::ConfigOptionStrings>(
             "different_settings_to_system", false);
         fp != nullptr && !fp->values.empty()) {
-        // Process slot (index 0): exclude filament-like keys (they belong
-        // to filament slots even when listed under process).
-        process_override_keys = apply_threemf_slot_overrides(
-            final_cfg, threemf_config, fp->values[0],
-            /*exclude_filament_keys=*/true,
-            /*excluded_keys=*/{});
-        emit_progress("process_overrides_applied", 22);
-
         // Per-filament slots (indices 1..N): apply only when the slot's
         // name guard from step 5 said "applied" (project-local variant
         // matched user's pick, or no project-local but the 3MF and user
@@ -545,15 +615,6 @@ int run_slice_mode(const SliceRequest& req) {
         // and we leave it discarded. For "no_customizations", the apply
         // is idempotent (vector already matches threemf_config) but we
         // skip it for clarity.
-        //
-        // Most multi-filament 3MFs ALSO embed a project-local preset for
-        // each customized slot, which load_project_embedded_presets
-        // already stitched into the bundle. For those, this overlay is
-        // idempotent (same values). For 3MFs that list per-slot
-        // customizations in the fingerprint without an embedded preset
-        // (rare; the GUI only writes the fingerprint when it also
-        // creates a project-local preset), this overlay is what carries
-        // the override through.
         const size_t num_filament_slots =
             fp->values.size() >= 2 ? fp->values.size() - 2 : 0;
         for (size_t i = 0; i < num_filament_slots && i < filament_slot_status.size(); ++i) {
@@ -580,17 +641,59 @@ int run_slice_mode(const SliceRequest& req) {
         }
 
         emit_progress("filament_overrides_applied", 23);
+    }
 
-        // Printer slot (last): no name guard — machine is fixed by the
-        // request. Apply with the topology blocklist to avoid SIGSEGVs
-        // from per-extruder vector mismatches.
-        if (fp->values.size() >= 2) {
-            printer_override_keys = apply_threemf_slot_overrides(
-                final_cfg, threemf_config, fp->values.back(),
-                /*exclude_filament_keys=*/false,
-                /*excluded_keys=*/s_printer_slot_blocklist);
+    // 9b. Apply the client-supplied process_overrides on top of the
+    //     resolved process config. Highest-priority overlay: these win
+    //     over both the system process profile and the 3MF's authored
+    //     customisations. Reuses ``final_cfg`` (same destination as the
+    //     3MF overlay above) so downstream Print build sees the merged
+    //     result.
+    //
+    // The "previous" snapshot is read BEFORE deserialize() so the response
+    // can report what the value was immediately before the client override
+    // took effect (3MF-customised value if the 3MF touched the key,
+    // otherwise the resolved system default).
+    if (!req.process_overrides.empty()) {
+        for (const auto& [key, value_str] : req.process_overrides) {
+            // Filter out filament-domain keys defensively (the iOS UI
+            // shouldn't send them, but the same guard the 3MF overlay
+            // applies belongs here too).
+            auto starts_with_ = [](const std::string& s, const char* p) {
+                const size_t n = std::strlen(p);
+                return s.size() >= n && std::memcmp(s.data(), p, n) == 0;
+            };
+            auto ends_with_ = [](const std::string& s, const char* p) {
+                const size_t n = std::strlen(p);
+                return s.size() >= n &&
+                    std::memcmp(s.data() + s.size() - n, p, n) == 0;
+            };
+            if (starts_with_(key, "filament_") || ends_with_(key, "_filament"))
+                continue;
+
+            Slic3r::ConfigOption* dst_opt = final_cfg.option(key, /*create=*/false);
+            if (dst_opt == nullptr) continue;  // unknown key — silently drop
+
+            // Snapshot the value before we overwrite it.
+            std::string previous = dst_opt->serialize();
+
+            // Deserialize the string into the option's typed slot. The
+            // base ConfigOption interface (Config.hpp) declares
+            //   bool deserialize(const std::string& str, bool append=false)
+            // — no substitution context. Vector / percent / enum
+            // encoding round-trip via each subclass's override.
+            if (!dst_opt->deserialize(value_str)) {
+                // Bad value for this option type — drop and move on.
+                continue;
+            }
+
+            nlohmann::json entry;
+            entry["key"]      = key;
+            entry["value"]    = value_str;
+            entry["previous"] = previous;
+            process_overrides_report.push_back(std::move(entry));
         }
-        emit_progress("printer_overrides_applied", 24);
+        emit_progress("client_overrides_applied", 25);
     }
 
     // 10. Build the settings_transfer response. Process and printer keys
@@ -604,11 +707,13 @@ int run_slice_mode(const SliceRequest& req) {
         const bool any =
             !process_override_keys.empty() ||
             !printer_override_keys.empty() ||
-            any_filament_applied;
+            any_filament_applied ||
+            !process_overrides_report.empty();
         transfer_status["status"] = any ? "applied" : "no_customizations";
         transfer_status["process_keys"] = process_override_keys;
         transfer_status["printer_keys"] = printer_override_keys;
         transfer_status["filament_slots"] = filament_slot_status;
+        transfer_status["process_overrides_applied"] = process_overrides_report;
     }
 
     // curr_bed_type lives in the 3MF's project_settings.config but isn't
@@ -653,7 +758,7 @@ int run_slice_mode(const SliceRequest& req) {
     // 11. Auto-center / drop-to-bed. Headless-only knob; GUI relies on
     //     visual adjustment after a printer change.
     if (req.auto_center) {
-        emit_progress("auto_centering", 25);
+        emit_progress("auto_centering", 26);
         try {
             auto_center_on_plate(model, final_cfg);
         } catch (const std::exception& e) {
