@@ -469,7 +469,16 @@ def parse_inspect_data(file_bytes: bytes) -> dict[str, Any]:
 
     with zf:
         slice_info_xml = _read_slice_info(zf)
-        out["is_sliced"] = slice_info_xml is not None and _has_embedded_gcode(zf)
+        if slice_info_xml is not None and not _has_embedded_gcode(zf):
+            # The archive carries slice metadata but no toolpath (MakerWorld
+            # downloads, re-saved projects). Treat it as un-sliced everywhere:
+            # leaving ``slice_info_xml`` populated would surface stale plate
+            # estimates and a filament list whose slot indices come from
+            # ``<filament id="N"/>`` rather than the project's per-slot
+            # vectors, which downstream callers expect to be 0-based and
+            # contiguous.
+            slice_info_xml = None
+        out["is_sliced"] = slice_info_xml is not None
         project_settings = _read_project_settings(zf)
         out["plate_count"] = get_plate_count(file_bytes)
 
