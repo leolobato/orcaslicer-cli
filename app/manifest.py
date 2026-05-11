@@ -85,6 +85,17 @@ def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
     the listing endpoints serve the bundle's data without re-walking
     Python's chain, while the slicer continues to read ``raw`` directly.
 
+    Repair pass for user-imported profiles: libslic3r's JSON preset
+    loader (Bambu's GUI behavior, ``Preset.cpp::load_presets``) does
+    NOT read ``setting_id`` from user JSON files (it treats that field
+    as a cloud-sync identifier), and ``Preset.cpp:1314`` overwrites a
+    user filament's ``filament_id`` with the inherited parent's value
+    whenever an ``inherits`` chain exists. Our import flow stamps both
+    fields onto the on-disk JSON as an orcaslicer-cli convention. The
+    binary stays GUI-aligned (correct); we reconcile here by preferring
+    the on-disk values from ``_raw_profiles`` when they are non-empty.
+    ``ams_assignable`` is recomputed from the repaired entry.
+
     Sub-phase C will collapse the two by having the binary emit full
     resolved presets too, dropping the legacy walk.
     """
@@ -101,6 +112,23 @@ def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
             profile_key = profiles._profile_key(vendor, name)
             raw = profiles._raw_profiles.get(profile_key)
             if raw is None:
+                # Fallback by name across vendors. libslic3r leaves
+                # ``preset.vendor`` null for user-imported profiles
+                # (manifest vendor=""), but the legacy walker indexes
+                # those under ``_profile_key("User", name)``. Match by
+                # name alone so the on-disk setting_id / filament_id
+                # repair below actually finds the raw entry. Prefer a
+                # legacy-walker key of the same category to avoid
+                # cross-category collisions on duplicate names.
+                for candidate_key in profiles._name_index.get(name, []):
+                    if profiles._type_map.get(candidate_key) != category:
+                        continue
+                    candidate = profiles._raw_profiles.get(candidate_key)
+                    if candidate is not None:
+                        raw = candidate
+                        profile_key = candidate_key
+                        break
+            if raw is None:
                 # Bundle saw a preset the legacy walk didn't (e.g. an
                 # OrcaFilamentLibrary variant). Synthesize a minimal raw
                 # so the listing path still surfaces it; slicing won't
@@ -113,4 +141,17 @@ def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
                 if "filament_id" in entry:
                     raw["filament_id"] = entry["filament_id"]
                 profiles._index_profile(profile_key, raw, category, vendor)
+
+            raw_setting_id = str(raw.get("setting_id", "")).strip()
+            if raw_setting_id:
+                entry["setting_id"] = raw_setting_id
+
+            if category == "filament":
+                raw_filament_id = str(raw.get("filament_id", "")).strip()
+                if raw_filament_id:
+                    entry["filament_id"] = raw_filament_id
+                entry["ams_assignable"] = profiles._is_ams_assignable_filament(
+                    raw, entry, setting_id=str(entry.get("setting_id", "")),
+                )
+
             raw["_manifest"] = entry
