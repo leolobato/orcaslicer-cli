@@ -336,17 +336,25 @@ def materialize_filament_import(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Missing or invalid 'setting_id' field.")
     setting_id = setting_id.strip()
 
-    inherits = data.get("inherits")
-    if isinstance(inherits, str) and inherits.strip():
-        parent_name = _resolve_filament_parent_ref(inherits.strip())
-        if not parent_name:
-            raise ProfileNotFoundError(
-                f"Filament parent '{inherits.strip()}' not found"
-            )
-
     result = dict(data)
     result["name"] = name
     result["setting_id"] = setting_id
+
+    inherits = data.get("inherits")
+    if isinstance(inherits, str) and inherits.strip():
+        parent_key = _resolve_filament_parent_ref(inherits.strip())
+        if not parent_key:
+            raise ProfileNotFoundError(
+                f"Filament parent '{inherits.strip()}' not found"
+            )
+        # Canonicalize to the parent's `name`. libslic3r's `find_preset2`
+        # (Preset.cpp:1306) matches `inherits` against preset names only;
+        # callers commonly send the setting_id from a dropdown, which
+        # would orphan the leaf in the binary's bundle (no manifest
+        # entry, missing from listing).
+        parent_name = str(_raw_profiles[parent_key].get("name", "")).strip()
+        if parent_name:
+            result["inherits"] = parent_name
     if "instantiation" not in result:
         result["instantiation"] = "true"
 
@@ -577,19 +585,22 @@ def materialize_process_import(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Missing or invalid 'setting_id' field.")
     setting_id = setting_id.strip()
 
-    inherits = data.get("inherits")
-    if isinstance(inherits, str) and inherits.strip():
-        parent_name = _resolve_process_parent_ref(inherits.strip())
-        if not parent_name:
-            raise ProfileNotFoundError(
-                f"Process parent '{inherits.strip()}' not found"
-            )
-
     result = dict(data)
     result["name"] = name
     result["setting_id"] = setting_id
     if "instantiation" not in result:
         result["instantiation"] = "true"
+
+    inherits = data.get("inherits")
+    if isinstance(inherits, str) and inherits.strip():
+        parent_key = _resolve_process_parent_ref(inherits.strip())
+        if not parent_key:
+            raise ProfileNotFoundError(
+                f"Process parent '{inherits.strip()}' not found"
+            )
+        parent_name = str(_raw_profiles[parent_key].get("name", "")).strip()
+        if parent_name:
+            result["inherits"] = parent_name
     return result
 
 

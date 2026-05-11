@@ -207,6 +207,64 @@ class AnnotateProfileCacheTests(unittest.TestCase):
         self.assertEqual(entry["filament_id"], "P0f56d26")
         self.assertTrue(entry["ams_assignable"])
 
+    def test_stamps_user_vendor_when_manifest_vendor_is_empty(self) -> None:
+        # libslic3r emits ``vendor=""`` for user-imported presets, but the
+        # webui filters with ``vendor === "User"`` and would otherwise miss
+        # them in the User view. The annotator restores the vendor from
+        # the legacy walker's ``_vendor_map`` so the listing shape is
+        # self-describing.
+        self._index_raw_filament(
+            vendor="User",
+            name="DEEPLEE Wood Imported",
+            setting_id="DEEPLEE Wood Imported",
+            filament_id="P0f56d26",
+            inherits="Bambu PLA Basic @BBL A1M",
+        )
+        manifest = {
+            "machines":  [],
+            "processes": [],
+            "filaments": [{
+                "setting_id":          "",
+                "filament_id":         "GFA16",
+                "name":                "DEEPLEE Wood Imported",
+                "vendor":              "",
+                "compatible_printers": ["GM020"],
+                "filament_type":       "PLA",
+                "ams_assignable":      False,
+            }],
+        }
+
+        manifest_mod.annotate_profile_cache(manifest)
+
+        self.assertEqual(manifest["filaments"][0]["vendor"], "User")
+
+    def test_does_not_overwrite_existing_vendor(self) -> None:
+        # BBL system profiles arrive with a populated vendor — the
+        # User-vendor repair must not clobber it.
+        self._index_raw_filament(
+            vendor="BBL",
+            name="Bambu PLA Basic @BBL A1M",
+            setting_id="GFSA00",
+            filament_id="GFA00",
+        )
+        manifest = {
+            "machines":  [],
+            "processes": [],
+            "filaments": [{
+                "setting_id":          "GFSA00",
+                "filament_id":         "GFA00",
+                "name":                "Bambu PLA Basic @BBL A1M",
+                "vendor":              "BBL",
+                "compatible_printers": ["GM020"],
+                "filament_type":       "PLA",
+                "ams_assignable":      True,
+            }],
+        }
+
+        manifest_mod.annotate_profile_cache(manifest)
+
+        self.assertEqual(manifest["filaments"][0]["vendor"], "BBL")
+
     def test_keeps_ams_assignable_false_when_raw_lacks_filament_id(self) -> None:
         # A user filament whose on-disk JSON also lacks a filament_id
         # (degenerate, but possible) must stay non-assignable even

@@ -400,6 +400,44 @@ class FilamentImportRoundTripTests(_ProfileEndpointTestBase):
         self.assertEqual(entry["filament_id"], "LEGFL01")
         self.assertEqual(entry["name"], "Legacy Flat PLA")
 
+    def test_filament_import_canonicalizes_setting_id_inherits_to_name(self) -> None:
+        """`inherits` arriving as a parent's setting_id is canonicalized to the name.
+
+        Callers (e.g. spool-helper) wire dropdown options that expose
+        `setting_id`. The on-disk JSON must store `inherits` as a parent
+        **name** because libslic3r's `find_preset2` (Preset.cpp:1306)
+        and `_resolve_parent_key` only match by name. Without this, the
+        leaf orphans on next bundle load and disappears from the listing.
+        """
+        body = {
+            "name": "Spool-Helper Style PLA",
+            "inherits": "GFA00_A1M",  # setting_id of "Bambu PLA Basic @BBL A1M"
+            "filament_type": ["PLA"],
+        }
+        save = self.client.post("/profiles/filaments", json=body)
+        self.assertEqual(save.status_code, 201)
+        setting_id = save.json()["setting_id"]
+
+        on_disk = json.loads(self._typed_user_path("filament", setting_id).read_text())
+        self.assertEqual(on_disk["inherits"], "Bambu PLA Basic @BBL A1M")
+
+        # Listing must include the new filament (proves chain resolves).
+        listing = self.client.get("/profiles/filaments").json()
+        names = {p["name"] for p in listing}
+        self.assertIn("Spool-Helper Style PLA", names)
+
+    def test_process_import_canonicalizes_setting_id_inherits_to_name(self) -> None:
+        body = {
+            "name": "Spool-Helper Style Process",
+            "inherits": "GP004",  # setting_id of "0.20mm Standard @BBL A1M"
+        }
+        save = self.client.post("/profiles/processes", json=body)
+        self.assertEqual(save.status_code, 201)
+        setting_id = save.json()["setting_id"]
+
+        on_disk = json.loads(self._typed_user_path("process", setting_id).read_text())
+        self.assertEqual(on_disk["inherits"], "0.20mm Standard @BBL A1M")
+
     def test_thin_process_round_trip_resolves_parent_values(self) -> None:
         body = {
             "name": "Round Trip Process",

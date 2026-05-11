@@ -146,6 +146,14 @@ def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
             if raw_setting_id:
                 entry["setting_id"] = raw_setting_id
 
+            # libslic3r emits ``vendor=""`` for user-imported presets. The
+            # webui filters by ``vendor === "User"`` for the User view, so
+            # restore the tag from the legacy walker's index where it was
+            # stamped at load time (`_load_user_profiles`).
+            raw_vendor = profiles._vendor_map.get(profile_key, "")
+            if raw_vendor and not entry.get("vendor"):
+                entry["vendor"] = raw_vendor
+
             if category == "filament":
                 raw_filament_id = str(raw.get("filament_id", "")).strip()
                 if raw_filament_id:
