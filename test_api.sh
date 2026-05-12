@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick smoke tests for the OrcaSlicer CLI API.
+# Quick smoke tests for the OrcaSlicer Headless API.
 # Usage: ./test_api.sh [base_url]
 #
 # Expects the example 3MF files from ../bambu-poc/ to be present.
