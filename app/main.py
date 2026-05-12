@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="OrcaSlicer CLI API",
+    title="OrcaSlicer Headless API",
     version=VERSION,
     description="REST API for headless 3D print slicing powered by OrcaSlicer. "
     "Loads Bambu Lab printer, process, and filament profiles and exposes "

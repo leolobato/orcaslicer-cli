@@ -208,12 +208,12 @@ These don't affect output correctness in any case observed so far, but they're w
 
 ## Related Projects
 
-OrcaSlicer CLI is the **headless slicing engine and profile catalog** in a suite of self-hosted projects that together replace the Bambu Handy app for printers in **Developer Mode** — keeping everything on your LAN, with no Bambu cloud.
+OrcaSlicer Headless is the **headless slicing engine and profile catalog** in a suite of self-hosted projects that together replace the Bambu Handy app for printers in **Developer Mode** — keeping everything on your LAN, with no Bambu cloud.
 
 **Self-hosted services**
 
 - **[bambu-gateway](https://github.com/leolobato/bambu-gateway)** — Printer control plane and slicing web app. Talks to printers over MQTT/FTPS to monitor status, send commands, and upload jobs. Slices and prints 3MF files from the browser using `orcaslicer-headless`.
-- **OrcaSlicer CLI** — this project.
+- **OrcaSlicer Headless** — this project.
 - **[bambu-spool-helper](https://github.com/leolobato/bambu-spool-helper)** — Bridge between [Spoolman](https://github.com/Donkie/Spoolman) and the printer's AMS. Links real spools to Bambu filament profiles (via `orcaslicer-headless`) and pushes the settings to a chosen tray over MQTT.
 
 **iOS apps**
