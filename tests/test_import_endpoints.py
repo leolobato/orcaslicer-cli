@@ -16,7 +16,7 @@ class _ProfileEndpointTestBase(unittest.TestCase):
     """Shared setup: isolated profile dirs with a minimal process + filament parent."""
 
     def setUp(self) -> None:
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-test-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-test-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)

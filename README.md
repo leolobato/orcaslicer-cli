@@ -1,4 +1,4 @@
-# OrcaSlicer CLI API
+# OrcaSlicer Headless
 
 A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to provide headless 3D print slicing. Upload a `.3mf` file with Bambu Lab profile IDs and get back a sliced `.3mf` with generated G-code.
 
@@ -7,15 +7,15 @@ A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to p
 ### Using the pre-built image (recommended)
 
 ```bash
-docker run -d -p 8070:8070 -v ./data:/data ghcr.io/leolobato/orcaslicer-cli:latest
+docker run -d -p 8070:8070 -v ./data:/data ghcr.io/leolobato/orcaslicer-headless:latest
 ```
 
 Or with Docker Compose, create a `docker-compose.yml`:
 
 ```yaml
 services:
-  orcaslicer-cli:
-    image: ghcr.io/leolobato/orcaslicer-cli:latest
+  orcaslicer-headless:
+    image: ghcr.io/leolobato/orcaslicer-headless:latest
     ports:
       - "8070:8070"
     volumes:
@@ -31,8 +31,8 @@ docker compose up
 ### Building from source
 
 ```bash
-git clone https://github.com/leolobato/orcaslicer-cli.git
-cd orcaslicer-cli
+git clone https://github.com/leolobato/orcaslicer-headless.git
+cd orcaslicer-headless
 docker compose up --build
 ```
 
@@ -212,9 +212,9 @@ OrcaSlicer CLI is the **headless slicing engine and profile catalog** in a suite
 
 **Self-hosted services**
 
-- **[bambu-gateway](https://github.com/leolobato/bambu-gateway)** — Printer control plane and slicing web app. Talks to printers over MQTT/FTPS to monitor status, send commands, and upload jobs. Slices and prints 3MF files from the browser using `orcaslicer-cli`.
+- **[bambu-gateway](https://github.com/leolobato/bambu-gateway)** — Printer control plane and slicing web app. Talks to printers over MQTT/FTPS to monitor status, send commands, and upload jobs. Slices and prints 3MF files from the browser using `orcaslicer-headless`.
 - **OrcaSlicer CLI** — this project.
-- **[bambu-spool-helper](https://github.com/leolobato/bambu-spool-helper)** — Bridge between [Spoolman](https://github.com/Donkie/Spoolman) and the printer's AMS. Links real spools to Bambu filament profiles (via `orcaslicer-cli`) and pushes the settings to a chosen tray over MQTT.
+- **[bambu-spool-helper](https://github.com/leolobato/bambu-spool-helper)** — Bridge between [Spoolman](https://github.com/Donkie/Spoolman) and the printer's AMS. Links real spools to Bambu filament profiles (via `orcaslicer-headless`) and pushes the settings to a chosen tray over MQTT.
 
 **iOS apps**
 

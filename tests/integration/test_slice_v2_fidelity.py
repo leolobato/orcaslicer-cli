@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 API = os.environ.get("ORCASLICER_API", "http://localhost:8070")
-# tests/integration/test.py -> tests/integration -> tests -> orcaslicer-cli
+# tests/integration/test.py -> tests/integration -> tests -> orcaslicer-headless
 # -> bambu_workspace, then `_fixture/`
 FIXTURE_DIR = Path(__file__).resolve().parents[2].parent / "_fixture"
 
@@ -43,7 +43,7 @@ def _container_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _container_reachable(),
-    reason=f"orcaslicer-cli not reachable at {API}",
+    reason=f"orcaslicer-headless not reachable at {API}",
 )
 
 

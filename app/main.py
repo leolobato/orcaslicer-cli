@@ -127,7 +127,7 @@ def _ensure_user_profile_dirs() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("orcaslicer-cli %s (commit %s)", VERSION, GIT_COMMIT)
+    logger.info("orcaslicer-headless %s (commit %s)", VERSION, GIT_COMMIT)
     _ensure_user_profile_dirs()
     app.state.token_cache = TokenCache(
         cache_dir=cfg.CACHE_DIR,

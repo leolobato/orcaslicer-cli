@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the integration fidelity suite against a running orcaslicer-cli.
+# Run the integration fidelity suite against a running orcaslicer-headless.
 #
 # Usage:
 #   scripts/run-fidelity.sh                 # runs against http://10.0.1.9:8070

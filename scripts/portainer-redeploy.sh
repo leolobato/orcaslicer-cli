@@ -13,7 +13,7 @@
 # Token resolution (first match wins):
 #   1. $PORTAINER_TOKEN env var
 #   2. file at $PORTAINER_TOKEN_FILE
-#   3. ~/.config/orcaslicer-cli/portainer-token
+#   3. ~/.config/orcaslicer-headless/portainer-token
 #
 # Exits 0 on success, non-zero on failure. Prints a human summary to stderr
 # and the new container ID(s) on stdout if available.
@@ -23,7 +23,7 @@ set -euo pipefail
 PORTAINER_URL="${PORTAINER_URL:-http://10.0.1.9:9002}"
 STACK_ID="${STACK_ID:-39}"
 ENDPOINT_ID="${ENDPOINT_ID:-3}"
-TOKEN_FILE="${PORTAINER_TOKEN_FILE:-$HOME/.config/orcaslicer-cli/portainer-token}"
+TOKEN_FILE="${PORTAINER_TOKEN_FILE:-$HOME/.config/orcaslicer-headless/portainer-token}"
 
 # Resolve token.
 if [ -n "${PORTAINER_TOKEN:-}" ]; then
@@ -73,7 +73,7 @@ print(json.dumps({
     'prune': False,
     # pullImage=false because our images live only on the host (build-and-ship.sh
     # uses `docker save | ssh | docker load`, no registry). With pullImage=true
-    # Portainer tries to pull orcaslicer-cli:latest from Docker Hub and fails.
+    # Portainer tries to pull orcaslicer-headless:latest from Docker Hub and fails.
     # The container still recreates against the new local image because
     # `docker load` already replaced :latest before we got here.
     'pullImage': False,

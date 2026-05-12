@@ -14,7 +14,7 @@ class ProfileListVendorTests(unittest.TestCase):
     get_filament_profiles include a ``vendor`` field."""
 
     def setUp(self) -> None:
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-test-vendor-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-test-vendor-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)

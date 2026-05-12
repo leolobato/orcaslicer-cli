@@ -10,7 +10,7 @@ from tests._profile_test_helpers import reset_profiles_state
 class ResolveChainForPayloadTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_profiles_state()
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-chainpayload-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-chainpayload-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +158,7 @@ class ResolveChainForPayloadTests(unittest.TestCase):
 class CompatiblePrintersSetForPayloadTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_profiles_state()
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-cpset-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-cpset-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +248,7 @@ class CompatiblePrintersSetForPayloadTests(unittest.TestCase):
 class CheckFilamentIdAmsScopeTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_profiles_state()
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-amscope-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-amscope-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)

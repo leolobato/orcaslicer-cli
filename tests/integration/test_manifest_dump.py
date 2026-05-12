@@ -16,7 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT_DIR = REPO_ROOT / "tests" / "_snapshots" / "pre-presetbundle"
-CONTAINER = "orcaslicer-cli-orcaslicer-cli-1"
+CONTAINER = "orcaslicer-headless-orcaslicer-headless-1"
 
 
 def _docker_available() -> bool:

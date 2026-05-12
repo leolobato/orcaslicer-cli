@@ -39,7 +39,7 @@ docker exec orca-dev sh -c "cd /src && cmake --build build --target orca-headles
 #    docker compose restart needed — the FastAPI server spawns the
 #    binary per request and picks up the new file on the next call.
 docker cp orca-dev:/src/build/orca-headless /tmp/orca-headless-dev
-docker cp /tmp/orca-headless-dev orcaslicer-cli-orcaslicer-cli-1:/opt/orca-headless/bin/orca-headless
+docker cp /tmp/orca-headless-dev orcaslicer-headless-orcaslicer-headless-1:/opt/orca-headless/bin/orca-headless
 
 # 4. Run the fidelity suite (or a single fixture).
 ORCASLICER_API=http://localhost:8070 ./scripts/run-fidelity.sh -k fixture_04

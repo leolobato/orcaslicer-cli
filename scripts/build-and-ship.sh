@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build orcaslicer-cli locally, tag, and ship the image to root@10.0.1.9.
+# Build orcaslicer-headless locally, tag, and ship the image to root@10.0.1.9.
 #
 # Why a wrapper instead of inlining `docker compose build | gzip | ssh`:
 # - Streams BuildKit progress so you can see which step is running (the
@@ -22,8 +22,8 @@
 set -uo pipefail
 
 REMOTE="${REMOTE:-root@10.0.1.9}"
-IMAGE="${IMAGE:-orcaslicer-cli:latest}"
-COMPOSE_IMAGE="${COMPOSE_IMAGE:-orcaslicer-cli-orcaslicer-cli:latest}"
+IMAGE="${IMAGE:-orcaslicer-headless:latest}"
+COMPOSE_IMAGE="${COMPOSE_IMAGE:-orcaslicer-headless-orcaslicer-headless:latest}"
 IDLE_TIMEOUT="${IDLE_TIMEOUT:-300}"   # 5 min without any progress line → abort
 HARD_TIMEOUT="${HARD_TIMEOUT:-2700}"  # 45 min total → abort
 SKIP_SHIP="${SKIP_SHIP:-0}"
@@ -41,15 +41,15 @@ notify() {
 }
 
 cleanup_build() {
-    pkill -f "docker compose build orcaslicer-cli" 2>/dev/null || true
+    pkill -f "docker compose build orcaslicer-headless" 2>/dev/null || true
     pkill -f "docker-buildx bake" 2>/dev/null || true
-    pkill -f "docker save orcaslicer-cli" 2>/dev/null || true
+    pkill -f "docker save orcaslicer-headless" 2>/dev/null || true
 }
 
 # 1. Build with streaming progress so we can watchdog idle output.
 #    `--progress=plain` flushes one line per build step.
 echo "[$(date '+%H:%M:%S')] starting build (idle=${IDLE_TIMEOUT}s, hard=${HARD_TIMEOUT}s)" >&2
-docker compose build --progress=plain orcaslicer-cli 2>&1 | tee "$PROGRESS_LOG" &
+docker compose build --progress=plain orcaslicer-headless 2>&1 | tee "$PROGRESS_LOG" &
 BUILD_PID=$!
 
 start_ts=$(date +%s)
@@ -73,7 +73,7 @@ while kill -0 "$BUILD_PID" 2>/dev/null; do
         echo "[$(date '+%H:%M:%S')] no progress for ${idle}s — aborting (last log size=${cur_size})" >&2
         cleanup_build
         wait "$BUILD_PID" 2>/dev/null
-        notify "orcaslicer-cli build" "Hung: no progress for ${idle}s. Aborted." "Basso"
+        notify "orcaslicer-headless build" "Hung: no progress for ${idle}s. Aborted." "Basso"
         exit 124
     fi
 
@@ -81,7 +81,7 @@ while kill -0 "$BUILD_PID" 2>/dev/null; do
         echo "[$(date '+%H:%M:%S')] hard timeout ${HARD_TIMEOUT}s reached — aborting" >&2
         cleanup_build
         wait "$BUILD_PID" 2>/dev/null
-        notify "orcaslicer-cli build" "Wall-clock timeout (${HARD_TIMEOUT}s). Aborted." "Basso"
+        notify "orcaslicer-headless build" "Wall-clock timeout (${HARD_TIMEOUT}s). Aborted." "Basso"
         exit 124
     fi
 done
@@ -89,19 +89,19 @@ done
 wait "$BUILD_PID"
 build_rc=$?
 if [ "$build_rc" -ne 0 ]; then
-    notify "orcaslicer-cli build" "Build failed (exit $build_rc)." "Basso"
+    notify "orcaslicer-headless build" "Build failed (exit $build_rc)." "Basso"
     exit "$build_rc"
 fi
 
 # 2. Tag the compose-built image to the canonical name we ship.
 docker tag "$COMPOSE_IMAGE" "$IMAGE" || {
-    notify "orcaslicer-cli build" "docker tag failed." "Basso"
+    notify "orcaslicer-headless build" "docker tag failed." "Basso"
     exit 1
 }
 echo "[$(date '+%H:%M:%S')] tagged $COMPOSE_IMAGE → $IMAGE" >&2
 
 if [ "$SKIP_SHIP" = "1" ]; then
-    notify "orcaslicer-cli build" "Built locally (ship skipped)." "Glass"
+    notify "orcaslicer-headless build" "Built locally (ship skipped)." "Glass"
     exit 0
 fi
 
@@ -109,11 +109,11 @@ fi
 echo "[$(date '+%H:%M:%S')] shipping image to $REMOTE" >&2
 ship_start=$(date +%s)
 if ! docker save "$IMAGE" | gzip | ssh -o ServerAliveInterval=15 "$REMOTE" 'gunzip | docker load'; then
-    notify "orcaslicer-cli build" "Ship to $REMOTE failed." "Basso"
+    notify "orcaslicer-headless build" "Ship to $REMOTE failed." "Basso"
     exit 1
 fi
 ship_elapsed=$(( $(date +%s) - ship_start ))
-notify "orcaslicer-cli build" "Built + shipped to $REMOTE in $((($(date +%s) - start_ts) / 60))m (ship: ${ship_elapsed}s)." "Glass"
+notify "orcaslicer-headless build" "Built + shipped to $REMOTE in $((($(date +%s) - start_ts) / 60))m (ship: ${ship_elapsed}s)." "Glass"
 
 # 4. Trigger Portainer to recreate the bambu-gateway stack so the running
 #    container flips to the just-shipped image. Without this, `docker load`
@@ -127,9 +127,9 @@ if [ "${SKIP_REDEPLOY:-0}" != "1" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [ -x "$SCRIPT_DIR/portainer-redeploy.sh" ]; then
         if "$SCRIPT_DIR/portainer-redeploy.sh"; then
-            notify "orcaslicer-cli build" "Stack redeployed on $REMOTE — new container live." "Glass"
+            notify "orcaslicer-headless build" "Stack redeployed on $REMOTE — new container live." "Glass"
         else
-            notify "orcaslicer-cli build" "Image shipped but Portainer redeploy failed — recreate manually." "Basso"
+            notify "orcaslicer-headless build" "Image shipped but Portainer redeploy failed — recreate manually." "Basso"
         fi
     fi
 fi

@@ -58,7 +58,7 @@ def _container_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _container_reachable(),
-    reason=f"orcaslicer-cli not reachable at {API}",
+    reason=f"orcaslicer-headless not reachable at {API}",
 )
 
 

@@ -91,7 +91,7 @@ def annotate_profile_cache(manifest: dict[str, list[dict[str, Any]]]) -> None:
     as a cloud-sync identifier), and ``Preset.cpp:1314`` overwrites a
     user filament's ``filament_id`` with the inherited parent's value
     whenever an ``inherits`` chain exists. Our import flow stamps both
-    fields onto the on-disk JSON as an orcaslicer-cli convention. The
+    fields onto the on-disk JSON as an orcaslicer-headless convention. The
     binary stays GUI-aligned (correct); we reconcile here by preferring
     the on-disk values from ``_raw_profiles`` when they are non-empty.
     ``ams_assignable`` is recomputed from the repaired entry.

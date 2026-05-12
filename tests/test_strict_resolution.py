@@ -12,7 +12,7 @@ class StrictResolveProfileByNameTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_profiles_state()
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-strict-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-strict-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +124,7 @@ class ListingIterationTolerantWrapTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_profiles_state()
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-tolerant-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-tolerant-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)

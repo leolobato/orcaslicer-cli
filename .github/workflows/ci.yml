@@ -24,7 +24,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: orcaslicer-cli:ci
+          tags: orcaslicer-headless:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -33,7 +33,7 @@ jobs:
 
       - name: Start container
         run: |
-          docker run -d --name orcaslicer-cli \
+          docker run -d --name orcaslicer-headless \
             -p 8070:8070 \
             -v ${{ github.workspace }}/data:/data \
             -v ${{ github.workspace }}/app:/app/app \
@@ -43,7 +43,7 @@ jobs:
             -v ${{ github.workspace }}/scripts:/app/scripts:ro \
             -v ${{ github.workspace }}/cpp/src/generated:/app/cpp/src/generated:ro \
             -v ${{ github.workspace }}/vendor:/app/vendor:ro \
-            orcaslicer-cli:ci
+            orcaslicer-headless:ci
           # Wait for /health
           for i in $(seq 1 30); do
             if curl -sf http://localhost:8070/health; then echo; break; fi
@@ -52,14 +52,14 @@ jobs:
 
       - name: Run unit tests
         run: |
-          docker exec orcaslicer-cli pytest tests/ -q \
+          docker exec orcaslicer-headless pytest tests/ -q \
             --ignore=tests/integration
 
       - name: Check Tab.cpp layout extraction is fresh
-        run: docker exec orcaslicer-cli python scripts/extract_tab_layout.py --check
+        run: docker exec orcaslicer-headless python scripts/extract_tab_layout.py --check
 
       - name: Check process allowlist drift
-        run: docker exec orcaslicer-cli python scripts/check_allowlist.py
+        run: docker exec orcaslicer-headless python scripts/check_allowlist.py
 
       - name: Smoke health + profiles
         run: |
@@ -71,4 +71,4 @@ jobs:
 
       - name: Container logs on failure
         if: failure()
-        run: docker logs orcaslicer-cli
+        run: docker logs orcaslicer-headless

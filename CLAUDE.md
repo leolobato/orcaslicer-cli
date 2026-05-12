@@ -19,7 +19,7 @@ The API runs via uvicorn at `http://localhost:8070`. There is no local (non-Dock
 
 To ship a new image to the remote production host, use `scripts/build-and-ship.sh`. It builds locally with streamed BuildKit progress, watchdogs against an idle hang (5 min default — covers the OrbStack swap-thrash case where the build sits silent for 30+ minutes burning IO), enforces a 45 min hard cap, then `save | gzip | ssh root@10.0.1.9 'gunzip | docker load'`. After ship it calls `scripts/portainer-redeploy.sh` to flip the running container to the new image via the Portainer API (re-pull + redeploy on the `bambu-gateway` stack, ID 39 on endpoint 3). Sends a macOS notification on completion. `deploy-docker.sh` does NOT work for this repo — the C++ link is too heavy for the remote docker host.
 
-The Portainer API token lives at `~/.config/orcaslicer-cli/portainer-token` (mode 600, NOT in the repo). `portainer-redeploy.sh` also accepts `$PORTAINER_TOKEN` env var, and skips silently if neither is set. Pass `SKIP_REDEPLOY=1` to `build-and-ship.sh` to opt out (e.g. for diagnostic builds you don't want auto-flipped to live).
+The Portainer API token lives at `~/.config/orcaslicer-headless/portainer-token` (mode 600, NOT in the repo). `portainer-redeploy.sh` also accepts `$PORTAINER_TOKEN` env var, and skips silently if neither is set. Pass `SKIP_REDEPLOY=1` to `build-and-ship.sh` to opt out (e.g. for diagnostic builds you don't want auto-flipped to live).
 
 ## Testing
 

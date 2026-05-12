@@ -1,5 +1,7 @@
+name: orcaslicer-headless
+
 services:
-  orcaslicer-cli:
+  orcaslicer-headless:
     build:
       context: .
       args:

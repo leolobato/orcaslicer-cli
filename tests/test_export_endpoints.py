@@ -15,7 +15,7 @@ class _ExportTestBase(unittest.TestCase):
     """Isolated tmpdir + indexed BBL parent + A1 mini machine + user filament."""
 
     def setUp(self) -> None:
-        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-cli-export-test-")
+        self.tempdir = tempfile.mkdtemp(prefix="orcaslicer-headless-export-test-")
         self.profiles_dir = Path(self.tempdir) / "profiles"
         self.user_dir = Path(self.tempdir) / "user"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)

@@ -18,7 +18,7 @@ from pathlib import Path
 VENDOR_DIR = Path(
     "/Users/leolobato/Documents/Projetos/Personal/3d/bambu_workspace/orcaslicer/resources/profiles/BBL"
 )
-USER_DIR = Path("/Volumes/docker/bambu-gateway/orcaslicer-cli")
+USER_DIR = Path("/Volumes/docker/bambu-gateway/orcaslicer-headless")
 
 PARENT_MAP: dict[str, tuple[str, str]] = {
     "DEEPLEE Wood Imported.json": ("filament", "Bambu PLA Wood @BBL A1M"),
