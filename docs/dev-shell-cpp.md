@@ -75,7 +75,7 @@ to `WipeTowerData::height` being uninitialized in upstream OrcaSlicer; see
 ## Cleanup
 
 The dev shell is disposable; nothing it produces ships to prod (the
-production image is built by `scripts/build-and-ship.sh` from a clean
+production image is built by `local/build-and-ship.sh` from a clean
 docker compose build). Tear it down when you're done:
 
 ```bash

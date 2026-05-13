@@ -15,6 +15,9 @@ build/
 .claude/
 .worktrees/
 
+# Workstation-specific scripts (build-and-ship, portainer-redeploy, etc.)
+local/
+
 # Environment
 .env
 *.log
