@@ -1260,6 +1260,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
         "settings_transfer": settings_transfer,
         "thumbnail_urls": [],
         "download_url": f"/3mf/{out_token}",
+        # Echoed so the caller can confirm the server honored the field.
         "copies": body.copies,
     }
 
@@ -1345,6 +1346,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
                     "estimate": ev["payload"]["estimate"],
                     "settings_transfer": settings_transfer,
                     "download_url": f"/3mf/{out_token}",
+                    # Echoed so the caller can confirm the server honored the field.
                     "copies": body.copies,
                 }
             yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
