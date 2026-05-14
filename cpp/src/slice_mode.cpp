@@ -876,7 +876,7 @@ int run_slice_mode(const SliceRequest& req) {
     // 11a. Duplicate instances when the request asked for copies > 1.
     //      Mirrors Plater::increase_instances (Plater.cpp:14255).
     if (req.copies > 1) {
-        emit_progress("duplicating_instances", 24);
+        emit_progress("duplicating_instances", 26);
         try {
             duplicate_instances_for_copies(model, final_cfg, req.copies);
         } catch (const std::exception& e) {
@@ -913,14 +913,25 @@ int run_slice_mode(const SliceRequest& req) {
     //      with copies_dont_fit if any instance can't be placed.
     if (req.copies > 1) {
         emit_progress("arranging_copies", 27);
-        if (!arrange_instances_or_fail(model, final_cfg, req.copies, response)) {
+        bool arranged = false;
+        try {
+            arranged = arrange_instances_or_fail(model, final_cfg, req.copies, response);
+        } catch (const std::exception& e) {
+            return fail("copies_failed",
+                        std::string("arrange_instances: ") + e.what(), response);
+        }
+        if (!arranged) {
             // arrange_instances_or_fail already populated response.
+            // Don't use fail() here — it would overwrite the structured
+            // copies_dont_fit error_code/message that the helper set.
             write_slice_response_to_stdout(response);
             return 1;
         }
-        // Drop to bed after arrange to handle any z-offsets the GUI's
-        // `apply_arrange_result` doesn't touch (rotation can leave
-        // bottoms above z=0 even when xy is correct).
+        // Drop to bed after arrange. `apply_arrange_result` only sets
+        // x/y offset and z-rotation, so any z-offset the duplicate step
+        // copied from the template instance (which was never grounded
+        // because 11b is skipped on the copies > 1 path) carries through
+        // unchanged. ensure_on_bed grounds it.
         for (auto* obj : model.objects) {
             if (!obj) continue;
             obj->ensure_on_bed(/*allow_negative_z=*/false);
