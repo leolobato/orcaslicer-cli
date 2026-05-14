@@ -873,9 +873,23 @@ int run_slice_mode(const SliceRequest& req) {
         opt->values = req.filament_settings_id;
     }
 
-    // 11. Auto-center / drop-to-bed. Headless-only knob; GUI relies on
-    //     visual adjustment after a printer change.
-    if (req.auto_center) {
+    // 11a. Duplicate instances when the request asked for copies > 1.
+    //      Mirrors Plater::increase_instances (Plater.cpp:14255).
+    if (req.copies > 1) {
+        emit_progress("duplicating_instances", 24);
+        try {
+            duplicate_instances_for_copies(model, final_cfg, req.copies);
+        } catch (const std::exception& e) {
+            return fail("copies_failed",
+                        std::string("duplicate_instances: ") + e.what(), response);
+        }
+    }
+
+    // 11b. Auto-center / drop-to-bed. Headless-only knob; GUI relies on
+    //      visual adjustment after a printer change. Suppressed when
+    //      copies > 1 because arrange (step 11c) inherently centers the
+    //      packed result.
+    if (req.auto_center && req.copies <= 1) {
         emit_progress("auto_centering", 26);
         try {
             auto_center_on_plate(model, final_cfg);
@@ -883,12 +897,30 @@ int run_slice_mode(const SliceRequest& req) {
             return fail("auto_center_failed",
                         std::string("auto_center: ") + e.what(), response);
         }
-    } else {
+    } else if (req.copies <= 1) {
         // Drop any model the 3MF saved hovering above (or buried below) z=0
         // onto the bed. Without this, libslic3r's skirt/brim generator throws
         // "Coordinate outside allowed range" when the printable-area polygon
         // is intersected against a model whose instance offset puts it
         // outside the bed in Z.
+        for (auto* obj : model.objects) {
+            if (!obj) continue;
+            obj->ensure_on_bed(/*allow_negative_z=*/false);
+        }
+    }
+
+    // 11c. Pack all instances onto the bed when copies > 1. Hard-fails
+    //      with copies_dont_fit if any instance can't be placed.
+    if (req.copies > 1) {
+        emit_progress("arranging_copies", 27);
+        if (!arrange_instances_or_fail(model, final_cfg, req.copies, response)) {
+            // arrange_instances_or_fail already populated response.
+            write_slice_response_to_stdout(response);
+            return 1;
+        }
+        // Drop to bed after arrange to handle any z-offsets the GUI's
+        // `apply_arrange_result` doesn't touch (rotation can leave
+        // bottoms above z=0 even when xy is correct).
         for (auto* obj : model.objects) {
             if (!obj) continue;
             obj->ensure_on_bed(/*allow_negative_z=*/false);
