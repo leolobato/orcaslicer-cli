@@ -81,6 +81,9 @@ SliceRequest parse_slice_request_from_stdin() {
     req.plate_id           = j.value("plate_id", 1);
     if (j.contains("options")) {
         req.auto_center = j["options"].value("auto_center", true);
+        req.copies = j["options"].value("copies", 1);
+        if (req.copies < 1) req.copies = 1;
+        if (req.copies > 100) req.copies = 100;
     }
     if (j.contains("filament_map") && j["filament_map"].is_array()) {
         req.filament_map = j["filament_map"].get<std::vector<int>>();

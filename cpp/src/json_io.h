@@ -29,6 +29,18 @@ struct SliceRequest {
     int plate_id = 1;
     bool auto_center = true;
 
+    // Number of copies of each ModelObject to slice. 1 = original
+    // behavior (no extra instances created). When > 1, the binary
+    // duplicates each ModelObject's last instance copies-1 times
+    // (mirroring Plater::increase_instances in
+    // OrcaSlicer/src/slic3r/GUI/Plater.cpp:14255), then runs
+    // libslic3r's arrangement::arrange to pack the result on the bed
+    // (mirroring Plater::find_new_position in Plater.cpp:7362). If any
+    // instance can't be placed, slicing fails with copies_dont_fit.
+    // auto_center is suppressed when copies > 1 because arrange
+    // inherently centers the packed result.
+    int copies = 1;
+
     // Optional: explicit AMS slot per filament index. Empty = no override.
     std::vector<int> filament_map;
 
