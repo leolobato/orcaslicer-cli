@@ -310,9 +310,10 @@ bool arrange_instances_or_fail(Slic3r::Model& model,
     bedpts.reserve(area->values.size());
     for (const auto& p : area->values) {
         // Mirrors to_points() in PrintConfig.cpp:10710 — explicit
-        // Slic3r::coord_t cast truncates the double from scale_() to integer.
-        bedpts.emplace_back(Slic3r::coord_t(scale_(p.x())),
-                            Slic3r::coord_t(scale_(p.y())));
+        // coord_t cast truncates the double from scale_() to integer.
+        // coord_t is declared in global scope (libslic3r.h:43), not Slic3r::.
+        bedpts.emplace_back(coord_t(scale_(p.x())),
+                            coord_t(scale_(p.y())));
     }
 
     // Build ArrangePolygons from every instance, with a setter that
