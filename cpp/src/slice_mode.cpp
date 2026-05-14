@@ -1,6 +1,7 @@
 #include "slice_mode.h"
 #include "progress.h"
 
+#include "libslic3r/Arrange.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -284,6 +285,69 @@ void duplicate_instances_for_copies(Slic3r::Model& model,
             obj->add_instance(new_offset, scale, rot, mirror);
         }
     }
+}
+
+// Pack all ModelInstances onto the bed using libslic3r's arrange,
+// mirroring Plater::find_new_position in
+// OrcaSlicer/src/slic3r/GUI/Plater.cpp:7362-7393. Returns true on success
+// (translations applied to each instance). Returns false if any instance
+// could not be placed on bed 0; populates `response` with copies_dont_fit.
+bool arrange_instances_or_fail(Slic3r::Model& model,
+                               const Slic3r::DynamicPrintConfig& cfg,
+                               int copies,
+                               SliceResponse& response) {
+    using namespace Slic3r::arrangement;
+
+    const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
+    if (!area || area->values.size() < 3) {
+        // No bed polygon to arrange against — leave instances where the
+        // duplicate step put them. Validation will catch fit problems.
+        return true;
+    }
+
+    // Build the bed polygon (convert mm doubles to libslic3r Points).
+    Slic3r::Points bedpts;
+    bedpts.reserve(area->values.size());
+    for (const auto& p : area->values) {
+        // Mirrors to_points() in PrintConfig.cpp:10710 — explicit
+        // Slic3r::coord_t cast truncates the double from scale_() to integer.
+        bedpts.emplace_back(Slic3r::coord_t(scale_(p.x())),
+                            Slic3r::coord_t(scale_(p.y())));
+    }
+
+    // Build ArrangePolygons from every instance, with a setter that
+    // applies the result back onto the ModelInstance.
+    ArrangePolygons movable;
+    std::vector<Slic3r::ModelInstance*> instances_in_order;
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        for (auto* inst : obj->instances) {
+            ArrangePolygon ap;
+            inst->get_arrange_polygon(&ap);
+            instances_in_order.push_back(inst);
+            movable.emplace_back(std::move(ap));
+        }
+    }
+
+    ArrangeParams params;
+    arrange(movable, /*fixed=*/{}, bedpts, params);
+
+    // Check placement and apply translations.
+    // Mirrors the is_arranged()/bed_idx == 0 guard in find_new_position
+    // (Plater.cpp:7377).
+    for (size_t i = 0; i < movable.size(); ++i) {
+        const auto& ap = movable[i];
+        if (!ap.is_arranged() || ap.bed_idx != 0) {
+            response.status = "error";
+            response.error_code = "copies_dont_fit";
+            response.error_message =
+                "Cannot place " + std::to_string(copies) + " copies on bed";
+            return false;
+        }
+        Slic3r::Vec2d t = ap.translation.cast<double>();
+        instances_in_order[i]->apply_arrange_result(t, ap.rotation);
+    }
+    return true;
 }
 
 // Anchor the combined instance bounding box at the build plate centre
