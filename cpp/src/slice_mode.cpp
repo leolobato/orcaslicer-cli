@@ -239,6 +239,49 @@ size_t load_chain_dir_into(
     return loaded;
 }
 
+// Duplicate each ModelObject's last instance copies-1 times, mirroring
+// Plater::increase_instances in OrcaSlicer/src/slic3r/GUI/Plater.cpp:14255.
+// Each new instance inherits the template's scaling/rotation/mirror, with
+// a small visual offset stack (5% of the larger bed dimension, accumulated)
+// so the subsequent arrangement::arrange call sees N distinct items
+// rather than one degenerate stack at the same position.
+void duplicate_instances_for_copies(Slic3r::Model& model,
+                                    const Slic3r::DynamicPrintConfig& cfg,
+                                    int copies) {
+    if (copies <= 1) return;
+
+    // Compute offset_base from the printable area's larger dimension.
+    // GUI uses canvas3D()->get_size_proportional_to_max_bed_size(0.05);
+    // headless has no canvas, so we read printable_area directly.
+    const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
+    double offset_base = 5.0;  // mm fallback if printable_area is missing
+    if (area && area->values.size() >= 3) {
+        double min_x = area->values[0].x(), max_x = min_x;
+        double min_y = area->values[0].y(), max_y = min_y;
+        for (const auto& p : area->values) {
+            min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
+            min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
+        }
+        double bed_w = max_x - min_x;
+        double bed_d = max_y - min_y;
+        offset_base = std::max(bed_w, bed_d) * 0.05;
+    }
+
+    for (auto* obj : model.objects) {
+        if (!obj || obj->instances.empty()) continue;
+        Slic3r::ModelInstance* tmpl = obj->instances.back();
+        Slic3r::Vec3d base_offset = tmpl->get_offset();
+        Slic3r::Vec3d scale = tmpl->get_scaling_factor();
+        Slic3r::Vec3d rot = tmpl->get_rotation();
+        Slic3r::Vec3d mirror = tmpl->get_mirror();
+        double offset = offset_base;
+        for (int i = 1; i < copies; ++i, offset += offset_base) {
+            Slic3r::Vec3d new_offset = base_offset + Slic3r::Vec3d(offset, offset, 0.0);
+            obj->add_instance(new_offset, scale, rot, mirror);
+        }
+    }
+}
+
 // Anchor the combined instance bounding box at the build plate centre
 // using libslic3r's `Model::center_instances_around_point` — the same
 // primitive the GUI calls during project import (Plater.cpp:6594) and
