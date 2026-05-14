@@ -45,7 +45,7 @@ logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 from fastapi import FastAPI, File, Query, Request, UploadFile, status as fastapi_status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from .cache import TokenCache
@@ -1101,6 +1101,12 @@ class SliceTokenRequest(BaseModel):
     # and silently drops unknown keys. See
     # docs/superpowers/specs/2026-05-06-process-parameter-editor-design.md.
     process_overrides: dict[str, str] | None = None
+    # Number of copies of each ModelObject to slice. 1 = no extra
+    # instances. When > 1, the binary duplicates each ModelObject's last
+    # instance and runs arrange to pack them on the bed; fails with
+    # copies_dont_fit if anything can't be placed. Bounded 1..100 (the
+    # binary also clamps as defense-in-depth).
+    copies: int = Field(1, ge=1, le=100)
 
 
 def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
@@ -1219,7 +1225,10 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
             "machine_leaf_name": paths["machine_leaf_name"],
             "process_leaf_name": paths["process_leaf_name"],
             "plate_id": body.plate_id,
-            "options": {"auto_center": body.auto_center},
+            "options": {
+                "auto_center": body.auto_center,
+                "copies": body.copies,
+            },
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
@@ -1251,6 +1260,7 @@ async def slice_v2(request: Request, body: SliceTokenRequest):
         "settings_transfer": settings_transfer,
         "thumbnail_urls": [],
         "download_url": f"/3mf/{out_token}",
+        "copies": body.copies,
     }
 
 
@@ -1313,7 +1323,10 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             "machine_leaf_name": paths["machine_leaf_name"],
             "process_leaf_name": paths["process_leaf_name"],
             "plate_id": body.plate_id,
-            "options": {"auto_center": body.auto_center},
+            "options": {
+                "auto_center": body.auto_center,
+                "copies": body.copies,
+            },
             "filament_map": body.filament_map or [],
             "filament_settings_id": paths["filament_leaf_names"],
             "printer_model_id": paths.get("printer_model_id", ""),
@@ -1332,6 +1345,7 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
                     "estimate": ev["payload"]["estimate"],
                     "settings_transfer": settings_transfer,
                     "download_url": f"/3mf/{out_token}",
+                    "copies": body.copies,
                 }
             yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
 
