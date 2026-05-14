@@ -330,6 +330,13 @@ bool arrange_instances_or_fail(Slic3r::Model& model,
     }
 
     ArrangeParams params;
+    // The default `progressind` lambda prints to std::cout for every
+    // item placed (Arrange.hpp:146-148). The repo's stdout-redirect
+    // (json_io.cpp::redirect_libslic3r_stdout_pollution) sends those
+    // writes to stderr, so the JSON pipe is safe — but they still
+    // pollute the subprocess stderr that Python tails for diagnostics.
+    // Silence with a no-op.
+    params.progressind = [](unsigned, std::string) {};
     arrange(movable, /*fixed=*/{}, bedpts, params);
 
     // Check placement and apply translations.
