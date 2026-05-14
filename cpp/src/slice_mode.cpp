@@ -254,7 +254,7 @@ void duplicate_instances_for_copies(Slic3r::Model& model,
     // GUI uses canvas3D()->get_size_proportional_to_max_bed_size(0.05);
     // headless has no canvas, so we read printable_area directly.
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
-    double offset_base = 5.0;  // mm fallback if printable_area is missing
+    double offset_base = 5.0;  // mm fallback for missing or degenerate printable_area (< 3 points)
     if (area && area->values.size() >= 3) {
         double min_x = area->values[0].x(), max_x = min_x;
         double min_y = area->values[0].y(), max_y = min_y;
@@ -267,6 +267,10 @@ void duplicate_instances_for_copies(Slic3r::Model& model,
         offset_base = std::max(bed_w, bed_d) * 0.05;
     }
 
+    // GUI's `increase_instances` operates on the single selected object
+    // (Plater.cpp:14261-14274). Headless has no selection — "copies"
+    // means N copies of the whole plate — so we apply the duplication
+    // to every ModelObject.
     for (auto* obj : model.objects) {
         if (!obj || obj->instances.empty()) continue;
         Slic3r::ModelInstance* tmpl = obj->instances.back();
