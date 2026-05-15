@@ -352,8 +352,8 @@ bool arrange_instances_or_fail(Slic3r::Model& model,
         params.clearance_height_to_lid = cfg.opt_float("extruder_clearance_height_to_lid");
     if (cfg.has("nozzle_height"))
         params.nozzle_height = cfg.opt_float("nozzle_height");
-    if (cfg.has("best_object_pos"))
-        params.align_center = cfg.opt_float("best_object_pos");
+    if (const auto* bop = cfg.option<Slic3r::ConfigOptionPoint>("best_object_pos"))
+        params.align_center = bop->value;
 
     // Default `progressind` writes "st=N, ..." to std::cout for every
     // packed item (Arrange.hpp:146-148). Our stdout-redirect routes that
