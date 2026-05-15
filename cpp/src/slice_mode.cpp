@@ -3,6 +3,7 @@
 
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
@@ -298,51 +299,87 @@ bool arrange_instances_or_fail(Slic3r::Model& model,
                                SliceResponse& response) {
     using namespace Slic3r::arrangement;
 
-    const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
-    if (!area || area->values.size() < 3) {
-        // No bed polygon to arrange against — leave instances where the
-        // duplicate step put them. Validation will catch fit problems.
-        return true;
-    }
+    // Mirrors the GUI's ArrangeJob pipeline (ArrangeJob.cpp:441 +
+    // 536-567) so headless arranging behaves identically to clicking
+    // "Arrange" in OrcaSlicer. The GUI flow is:
+    //   1. init_arrange_params(plater)            — params from print_cfg
+    //   2. prepare_*() builds items via
+    //      get_instance_arrange_poly(inst, cfg)   — sets brim_width, temps
+    //   3. update_arrange_params(params, cfg, items)
+    //   4. update_selected_items_inflation(items, cfg, params)
+    //   5. update_selected_items_axis_align(items, cfg, params)
+    //   6. arrange(selected, unselected, get_shrink_bedpts(cfg, params), params)
+    //
+    // Earlier headless versions skipped 2-5 and used `ArrangeParams{}` with
+    // `allow_rotations=false`, which routinely failed to fit copies the GUI
+    // could place because the packer had no rotation freedom and items had
+    // no brim_width-derived inflation.
 
-    // Build the bed polygon (convert mm doubles to libslic3r Points).
-    Slic3r::Points bedpts;
-    bedpts.reserve(area->values.size());
-    for (const auto& p : area->values) {
-        // Mirrors to_points() in PrintConfig.cpp:10710 — explicit
-        // coord_t cast truncates the double from scale_() to integer.
-        // coord_t is declared in global scope (libslic3r.h:43), not Slic3r::.
-        bedpts.emplace_back(coord_t(scale_(p.x())),
-                            coord_t(scale_(p.y())));
-    }
-
-    // Build ArrangePolygons from every instance, with a setter that
-    // applies the result back onto the ModelInstance.
+    // Step 2: build per-item arrange polygons via the libslic3r helper that
+    // also sets brim_width / temps / extrude_ids — the fields the inflation
+    // step downstream reads (ModelArrange.cpp:119-200).
     ArrangePolygons movable;
     std::vector<Slic3r::ModelInstance*> instances_in_order;
     for (auto* obj : model.objects) {
         if (!obj) continue;
         for (auto* inst : obj->instances) {
-            ArrangePolygon ap;
-            inst->get_arrange_polygon(&ap);
+            ArrangePolygon ap = Slic3r::get_instance_arrange_poly(inst, cfg);
+            ap.itemid = static_cast<int>(movable.size());
             instances_in_order.push_back(inst);
             movable.emplace_back(std::move(ap));
         }
     }
+    if (movable.empty()) return true;
 
+    // Step 1: headless init_arrange_params equivalent. The GUI version
+    // (ArrangeJob.cpp:761) reads canvas-only `ArrangeSettings` for
+    // `enable_rotation`, `allow_multi_materials_on_same_plate`,
+    // `is_seq_print`, etc. — we substitute reasonable headless defaults.
+    // Critical default: `allow_rotations = true` matches the GUI's
+    // out-of-box state and is what lets the packer fit objects that
+    // wouldn't fit in their authored orientation.
     ArrangeParams params;
-    // The default `progressind` lambda prints to std::cout for every
-    // item placed (Arrange.hpp:146-148). The repo's stdout-redirect
-    // (json_io.cpp::redirect_libslic3r_stdout_pollution) sends those
-    // writes to stderr, so the JSON pipe is safe — but they still
-    // pollute the subprocess stderr that Python tails for diagnostics.
-    // Silence with a no-op.
+    params.allow_rotations = true;
+    params.is_seq_print    = false;
+    params.min_obj_distance = 0;
+    if (cfg.has("printable_height"))
+        params.printable_height = cfg.opt_float("printable_height");
+    if (cfg.has("extruder_clearance_radius"))
+        params.clearance_radius = cfg.opt_float("extruder_clearance_radius");
+    if (cfg.has("extruder_clearance_height_to_rod"))
+        params.clearance_height_to_rod = cfg.opt_float("extruder_clearance_height_to_rod");
+    if (cfg.has("extruder_clearance_height_to_lid"))
+        params.clearance_height_to_lid = cfg.opt_float("extruder_clearance_height_to_lid");
+    if (cfg.has("nozzle_height"))
+        params.nozzle_height = cfg.opt_float("nozzle_height");
+    if (cfg.has("best_object_pos"))
+        params.align_center = cfg.opt_float("best_object_pos");
+
+    // Default `progressind` writes "st=N, ..." to std::cout for every
+    // packed item (Arrange.hpp:146-148). Our stdout-redirect routes that
+    // to stderr where it pollutes the supervisor's diagnostic tail.
     params.progressind = [](unsigned, std::string) {};
+
+    // Steps 3-4: refine params + per-item inflation from the print config.
+    update_arrange_params(params, &cfg, movable);
+    update_selected_items_inflation(movable, &cfg, params);
+    // Step 5: axis alignment is a no-op when align_to_y_axis is false (our
+    // headless default) — call it anyway so future config changes flow
+    // through.
+    update_selected_items_axis_align(movable, &cfg, params);
+
+    // Step 6: shrunk bed polygon (incorporates skirt distance + seq-print
+    // bed shrink set by update_arrange_params).
+    Slic3r::Points bedpts = get_shrink_bedpts(&cfg, params);
+    if (bedpts.size() < 3) {
+        // No usable bed polygon — let validation downstream complain.
+        return true;
+    }
+
     arrange(movable, /*fixed=*/{}, bedpts, params);
 
-    // Check placement and apply translations.
-    // Mirrors the is_arranged()/bed_idx == 0 guard in find_new_position
-    // (Plater.cpp:7377).
+    // Check placement and apply translations. Mirrors the
+    // is_arranged()/bed_idx == 0 guard in find_new_position (Plater.cpp:7377).
     for (size_t i = 0; i < movable.size(); ++i) {
         const auto& ap = movable[i];
         if (!ap.is_arranged() || ap.bed_idx != 0) {
