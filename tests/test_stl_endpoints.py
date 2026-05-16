@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app.binary_client import BinaryError
 from app.stl_drafts import StlDraftCache
 
 
@@ -56,6 +57,14 @@ class FakeBinary:
             Path(request["output_3mf"]).write_bytes(b"materialized-3mf")
             return {"status": "ok"}
         raise AssertionError(op)
+
+
+class FailingImportBinary(FakeBinary):
+    async def stl_draft(self, request, timeout_s=120.0):
+        self.requests.append(request)
+        if request["operation"] == "import":
+            raise BinaryError(code="invalid_stl", message="bad STL", details={})
+        return await super().stl_draft(request, timeout_s=timeout_s)
 
 
 class FakeTokenCache:
@@ -201,3 +210,102 @@ def test_stl_import_uses_machine_process_only_materialization(
     resp = _import_stl(TestClient(main.app))
 
     assert resp.status_code == 200, resp.text
+
+
+def test_stl_import_binary_failure_deletes_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_binary = FailingImportBinary()
+    drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    profile_root = tmp_path / "orca-headless-stl-profiles-fail"
+    (profile_root / "machine").mkdir(parents=True)
+    (profile_root / "process").mkdir()
+    main.app.state.stl_drafts = drafts
+    main.app.state.token_cache = FakeTokenCache()
+
+    async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
+        return {
+            "machine_chain_dir": str(profile_root / "machine"),
+            "machine_leaf_name": "Machine",
+            "process_chain_dir": str(profile_root / "process"),
+            "process_leaf_name": "Process",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "materialize_machine_process_for_binary",
+        fake_materialize_machine_process_for_binary,
+    )
+    monkeypatch.setattr(main, "BinaryClient", lambda binary_path: fake_binary)
+
+    resp = _import_stl(TestClient(main.app))
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["code"] == "invalid_stl"
+    assert drafts._drafts == {}
+    assert list((tmp_path / "stl-drafts").iterdir()) == []
+
+
+def test_stl_import_cleans_profile_temp_dirs_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_binary = FakeBinary()
+    profile_root = tmp_path / "orca-headless-stl-profiles-success"
+    (profile_root / "machine").mkdir(parents=True)
+    (profile_root / "process").mkdir()
+    main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.token_cache = FakeTokenCache()
+
+    async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
+        return {
+            "machine_chain_dir": str(profile_root / "machine"),
+            "machine_leaf_name": "Machine",
+            "process_chain_dir": str(profile_root / "process"),
+            "process_leaf_name": "Process",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "materialize_machine_process_for_binary",
+        fake_materialize_machine_process_for_binary,
+    )
+    monkeypatch.setattr(main, "BinaryClient", lambda binary_path: fake_binary)
+
+    resp = _import_stl(TestClient(main.app))
+
+    assert resp.status_code == 200, resp.text
+    assert not profile_root.exists()
+
+
+def test_stl_import_cleans_profile_temp_dirs_on_binary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_binary = FailingImportBinary()
+    profile_root = tmp_path / "orca-headless-stl-profiles-binary-fail"
+    (profile_root / "machine").mkdir(parents=True)
+    (profile_root / "process").mkdir()
+    main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.token_cache = FakeTokenCache()
+
+    async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
+        return {
+            "machine_chain_dir": str(profile_root / "machine"),
+            "machine_leaf_name": "Machine",
+            "process_chain_dir": str(profile_root / "process"),
+            "process_leaf_name": "Process",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "materialize_machine_process_for_binary",
+        fake_materialize_machine_process_for_binary,
+    )
+    monkeypatch.setattr(main, "BinaryClient", lambda binary_path: fake_binary)
+
+    resp = _import_stl(TestClient(main.app))
+
+    assert resp.status_code == 400, resp.text
+    assert not profile_root.exists()

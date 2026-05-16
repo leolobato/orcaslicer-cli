@@ -2,11 +2,13 @@
 
 import io
 import json
+import shutil
 import zipfile
 from datetime import datetime, timezone
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
@@ -1134,6 +1136,33 @@ def _draft_error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"code": code, "message": message})
 
 
+def _profile_temp_root(paths: dict[str, Any]) -> Path | None:
+    """Return the temp profile root derived from sibling chain dirs.
+
+    ``materialize_machine_process_for_binary`` creates a private
+    ``orca-headless-stl-profiles-*`` root with ``machine/`` and ``process/``
+    children. Keep this cleanup guarded so tests or future callers returning
+    non-temp profile directories are not deleted accidentally.
+    """
+    try:
+        machine_dir = Path(str(paths["machine_chain_dir"])).resolve()
+        process_dir = Path(str(paths["process_chain_dir"])).resolve()
+        common = Path(os.path.commonpath([str(machine_dir), str(process_dir)]))
+    except (KeyError, TypeError, ValueError, OSError):
+        return None
+    if common.name.startswith("orca-headless-stl-profiles-"):
+        return common
+    return None
+
+
+def _cleanup_profile_temp_root(paths: dict[str, Any] | None) -> None:
+    if not paths:
+        return
+    root = _profile_temp_root(paths)
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
     """Map an API plate_type value (snake_case) to its OrcaSlicer label.
 
@@ -1399,33 +1428,41 @@ async def import_stl(
     drafts: StlDraftCache = request.app.state.stl_drafts
     draft = drafts.put_source(payload, file.filename)
 
-    paths = await materialize_machine_process_for_binary(
-        machine_id=machine_id,
-        process_id=process_id,
-    )
-    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    paths: dict[str, Any] | None = None
+    import_succeeded = False
     try:
-        result = await binary.stl_draft({
-            "operation": "import",
-            "draft_token": draft.token,
-            "input_stl": str(draft.source_path),
-            "output_3mf": str(draft.current_3mf_path),
-            "machine_chain_dir": paths["machine_chain_dir"],
-            "process_chain_dir": paths["process_chain_dir"],
-            "machine_leaf_name": paths["machine_leaf_name"],
-            "process_leaf_name": paths["process_leaf_name"],
-            "plate_type": _resolve_plate_type_label(machine_id, plate_type),
-            "options": {
-                "auto_orient": auto_orient,
-                "arrange": arrange,
-                "center": center,
-            },
-        })
-    except BinaryError as e:
-        return _draft_error(400 if e.code == "invalid_stl" else 500, e.code, e.message)
+        paths = await materialize_machine_process_for_binary(
+            machine_id=machine_id,
+            process_id=process_id,
+        )
+        binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+        try:
+            result = await binary.stl_draft({
+                "operation": "import",
+                "draft_token": draft.token,
+                "input_stl": str(draft.source_path),
+                "output_3mf": str(draft.current_3mf_path),
+                "machine_chain_dir": paths["machine_chain_dir"],
+                "process_chain_dir": paths["process_chain_dir"],
+                "machine_leaf_name": paths["machine_leaf_name"],
+                "process_leaf_name": paths["process_leaf_name"],
+                "plate_type": _resolve_plate_type_label(machine_id, plate_type),
+                "options": {
+                    "auto_orient": auto_orient,
+                    "arrange": arrange,
+                    "center": center,
+                },
+            })
+        except BinaryError as e:
+            return _draft_error(400 if e.code == "invalid_stl" else 500, e.code, e.message)
 
-    draft.scene_path.write_text(json.dumps(result["scene"]))
-    return _scene_with_token(result["scene"], draft.token)
+        draft.scene_path.write_text(json.dumps(result["scene"]))
+        import_succeeded = True
+        return _scene_with_token(result["scene"], draft.token)
+    finally:
+        _cleanup_profile_temp_root(paths)
+        if not import_succeeded:
+            drafts.delete(draft.token)
 
 
 @app.post("/stl/{draft_token}/layout", tags=["STL"])
