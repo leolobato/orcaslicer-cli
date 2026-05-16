@@ -181,4 +181,42 @@ DumpOptionsRequest parse_dump_options_request_from_stdin() {
     return req;
 }
 
+StlDraftRequest parse_stl_draft_request_from_stdin() {
+    std::stringstream ss;
+    ss << std::cin.rdbuf();
+    json j = json::parse(ss.str());
+
+    StlDraftRequest req;
+    req.operation = j.value("operation", std::string{});
+    req.draft_token = j.value("draft_token", std::string{});
+    req.input_stl = j.value("input_stl", std::string{});
+    req.input_3mf = j.value("input_3mf", std::string{});
+    req.output_3mf = j.value("output_3mf", std::string{});
+    req.action = j.value("action", std::string{});
+    req.machine_chain_dir = j.value("machine_chain_dir", std::string{});
+    req.process_chain_dir = j.value("process_chain_dir", std::string{});
+    req.machine_leaf_name = j.value("machine_leaf_name", std::string{});
+    req.process_leaf_name = j.value("process_leaf_name", std::string{});
+    req.plate_type = j.value("plate_type", std::string{});
+    if (j.contains("options") && j["options"].is_object()) {
+        req.auto_orient = j["options"].value("auto_orient", false);
+        req.arrange = j["options"].value("arrange", true);
+        req.center = j["options"].value("center", true);
+    }
+    return req;
+}
+
+void write_stl_draft_response_to_stdout(const StlDraftResponse& r) {
+    json out;
+    out["status"] = r.status;
+    if (r.status == "ok") {
+        out["scene"] = r.scene;
+    } else {
+        out["code"] = r.error_code;
+        out["message"] = r.error_message;
+        out["details"] = r.error_details;
+    }
+    write_envelope_line(out);
+}
+
 }  // namespace orca_headless

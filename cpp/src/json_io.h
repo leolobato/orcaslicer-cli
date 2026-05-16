@@ -145,6 +145,33 @@ struct DumpOptionsRequest {
     std::string out_path;       // /tmp/options-manifest.json
 };
 
+struct StlDraftRequest {
+    std::string operation;       // import | layout | export_3mf
+    std::string draft_token;
+    std::string input_stl;
+    std::string input_3mf;
+    std::string output_3mf;
+    std::string action;
+
+    std::string machine_chain_dir;
+    std::string process_chain_dir;
+    std::string machine_leaf_name;
+    std::string process_leaf_name;
+    std::string plate_type;
+
+    bool auto_orient = false;
+    bool arrange = true;
+    bool center = true;
+};
+
+struct StlDraftResponse {
+    std::string status;          // "ok" or "error"
+    nlohmann::json scene = nlohmann::json::object();
+    std::string error_code;
+    std::string error_message;
+    nlohmann::json error_details = nlohmann::json::object();
+};
+
 SliceRequest parse_slice_request_from_stdin();
 void write_slice_response_to_stdout(const SliceResponse& r);
 
@@ -153,6 +180,9 @@ void write_use_set_response_to_stdout(const UseSetResponse& r);
 
 DumpProfilesRequest parse_dump_profiles_request_from_stdin();
 DumpOptionsRequest parse_dump_options_request_from_stdin();
+
+StlDraftRequest parse_stl_draft_request_from_stdin();
+void write_stl_draft_response_to_stdout(const StlDraftResponse& r);
 
 // Save the real stdout fd and redirect fd 1 to stderr at process start.
 //
