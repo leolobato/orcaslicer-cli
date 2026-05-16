@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):
         max_files=cfg.CACHE_MAX_FILES,
     )
     app.state.stl_drafts = StlDraftCache(
-        root=cfg.STL_DRAFT_CACHE_DIR,
+        root=Path(os.environ.get("STL_DRAFT_CACHE_DIR", str(cfg.CACHE_DIR / "stl-drafts"))),
         ttl_seconds=cfg.STL_DRAFT_TTL_SECONDS,
     )
     app.state.inspect_cache = InspectCache()
