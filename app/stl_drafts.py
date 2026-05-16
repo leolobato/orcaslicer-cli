@@ -88,7 +88,11 @@ class StlDraftCache:
             created_at=now,
             last_access=now,
         )
-        draft.source_path.write_bytes(payload)
+        try:
+            draft.source_path.write_bytes(payload)
+        except Exception:
+            shutil.rmtree(root)
+            raise
         self._drafts[token] = draft
         return draft
 
@@ -100,6 +104,7 @@ class StlDraftCache:
         if now - draft.created_at > self.ttl_seconds:
             self.delete(token)
             raise StlDraftExpired(token)
+        # last_access is observability/LRU metadata; TTL is fixed from created_at.
         refreshed = StlDraft(
             token=draft.token,
             root=draft.root,
@@ -111,8 +116,9 @@ class StlDraftCache:
         return refreshed
 
     def delete(self, token: str) -> bool:
-        draft = self._drafts.pop(token, None)
+        draft = self._drafts.get(token)
         if draft is None:
             return False
-        shutil.rmtree(draft.root, ignore_errors=True)
+        shutil.rmtree(draft.root)
+        self._drafts.pop(token)
         return True
