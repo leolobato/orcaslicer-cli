@@ -189,6 +189,7 @@ StlDraftRequest parse_stl_draft_request_from_stdin() {
     StlDraftRequest req;
     req.operation = j.value("operation", std::string{});
     req.draft_token = j.value("draft_token", std::string{});
+    req.source_filename = j.value("source_filename", std::string{});
     req.input_stl = j.value("input_stl", std::string{});
     req.input_3mf = j.value("input_3mf", std::string{});
     req.output_3mf = j.value("output_3mf", std::string{});

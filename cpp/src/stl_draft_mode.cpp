@@ -1,7 +1,9 @@
 #include "stl_draft_mode.h"
+#include "profile_chain.h"
 
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
@@ -62,6 +64,13 @@ Slic3r::Vec2d bed_center(const Slic3r::DynamicPrintConfig& cfg) {
     return {(min_x + max_x) / 2.0, (min_y + max_y) / 2.0};
 }
 
+std::string source_filename_for(const StlDraftRequest& req) {
+    if (!req.source_filename.empty()) {
+        return std::filesystem::path(req.source_filename).filename().string();
+    }
+    return std::filesystem::path(req.input_stl).filename().string();
+}
+
 void ground_all(Slic3r::Model& model) {
     for (auto* obj : model.objects) {
         if (!obj) continue;
@@ -69,11 +78,100 @@ void ground_all(Slic3r::Model& model) {
     }
 }
 
-void apply_gui_import_name_fallbacks(Slic3r::Model& model) {
+void apply_gui_import_name_fallbacks(Slic3r::Model& model,
+                                     const StlDraftRequest& req) {
+    const std::string source_filename = source_filename_for(req);
+    const std::string input_filename =
+        std::filesystem::path(req.input_stl).filename().string();
     for (auto* obj : model.objects) {
-        if (!obj || !obj->name.empty()) continue;
-        obj->name = std::filesystem::path(obj->input_file).filename().string();
+        if (!obj) continue;
+        if (!obj->name.empty()
+            && (source_filename.empty() || obj->name != input_filename)) {
+            continue;
+        }
+        obj->name = source_filename.empty() ? input_filename : source_filename;
     }
+}
+
+bool apply_plate_type_override(const StlDraftRequest& req,
+                               Slic3r::DynamicPrintConfig& cfg,
+                               StlDraftResponse& response) {
+    if (req.plate_type.empty()) return true;
+    try {
+        Slic3r::ConfigSubstitutionContext ctxt{
+            Slic3r::ForwardCompatibilitySubstitutionRule::Disable};
+        cfg.set_deserialize("curr_bed_type", req.plate_type, ctxt);
+    } catch (const std::exception& e) {
+        fail("invalid_plate_type",
+             std::string("plate_type=\"") + req.plate_type + "\" is not a "
+                "valid OrcaSlicer bed type for this machine: " + e.what(),
+             response);
+        return false;
+    }
+    return true;
+}
+
+bool has_profile_context(const StlDraftRequest& req) {
+    return !req.machine_chain_dir.empty()
+        || !req.process_chain_dir.empty()
+        || !req.machine_leaf_name.empty()
+        || !req.process_leaf_name.empty();
+}
+
+bool configure_import_profile_context(const StlDraftRequest& req,
+                                      Slic3r::DynamicPrintConfig& cfg,
+                                      StlDraftResponse& response) {
+    if (!has_profile_context(req)) {
+        cfg = minimal_bed_config();
+        return apply_plate_type_override(req, cfg, response);
+    }
+    if (req.machine_chain_dir.empty()
+        || req.process_chain_dir.empty()
+        || req.machine_leaf_name.empty()
+        || req.process_leaf_name.empty()) {
+        fail("invalid_request",
+             "machine/process chain dirs and leaf names are required together",
+             response);
+        return false;
+    }
+
+    Slic3r::PresetBundle bundle;
+    try {
+        load_chain_dir_into(bundle.printers, req.machine_chain_dir);
+        load_chain_dir_into(bundle.prints, req.process_chain_dir);
+    } catch (const std::exception& e) {
+        fail("invalid_profile",
+             std::string("load chain dir: ") + e.what(),
+             response);
+        return false;
+    }
+
+    if (!bundle.printers.select_preset_by_name(req.machine_leaf_name, true)) {
+        fail("invalid_profile",
+             "machine leaf '" + req.machine_leaf_name +
+                "' not found in chain dir",
+             response);
+        return false;
+    }
+    if (!bundle.prints.select_preset_by_name(req.process_leaf_name, true)) {
+        fail("invalid_profile",
+             "process leaf '" + req.process_leaf_name +
+                "' not found in chain dir",
+             response);
+        return false;
+    }
+
+    // GUI parity: compose the preview draft config from the same edited
+    // presets full_fff_config reads (PresetBundle.cpp:3039-3047), but omit
+    // filament because STL preview placement only needs process + printer
+    // context. The chain files themselves are loaded through parse_subfile's
+    // default-fill pattern in load_chain_dir_into.
+    cfg = Slic3r::DynamicPrintConfig();
+    cfg.apply(Slic3r::FullPrintConfig::defaults());
+    cfg.apply(bundle.prints.get_edited_preset().config);
+    cfg.apply(bundle.printers.get_edited_preset().config);
+
+    return apply_plate_type_override(req, cfg, response);
 }
 
 bool store_draft_3mf(const std::string& path,
@@ -92,8 +190,7 @@ nlohmann::json scene_for_model(const StlDraftRequest& req,
                                const Slic3r::DynamicPrintConfig& cfg) {
     nlohmann::json scene;
     scene["draft_token"] = req.draft_token;
-    scene["source_filename"] =
-        std::filesystem::path(req.input_stl).filename().string();
+    scene["source_filename"] = source_filename_for(req);
 
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
     nlohmann::json printable = nlohmann::json::array();
@@ -169,7 +266,11 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
                     response);
     }
 
-    Slic3r::DynamicPrintConfig cfg = minimal_bed_config();
+    Slic3r::DynamicPrintConfig cfg;
+    if (!configure_import_profile_context(req, cfg, response)) {
+        return 1;
+    }
+
     Slic3r::ConfigSubstitutionContext substitutions(
         Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
     Slic3r::Model model;
@@ -196,7 +297,7 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
 
     // GUI parity: Plater backfills empty imported object names from the
     // source filename (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6430-6433).
-    apply_gui_import_name_fallbacks(model);
+    apply_gui_import_name_fallbacks(model, req);
 
     if (req.center) {
         // GUI parity: non-project import placement uses

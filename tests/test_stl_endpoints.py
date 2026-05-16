@@ -23,7 +23,7 @@ class FakeBinary:
                 "status": "ok",
                 "scene": {
                     "draft_token": request.get("draft_token", "token-from-api"),
-                    "source_filename": "part.stl",
+                    "source_filename": request.get("source_filename", "part.stl"),
                     "bed": {
                         "width": 180,
                         "depth": 180,
@@ -32,7 +32,7 @@ class FakeBinary:
                     "objects": [
                         {
                             "id": "0",
-                            "name": "part.stl",
+                            "name": request.get("source_filename", "part.stl"),
                             "transform": {
                                 "offset": [90, 90, 0],
                                 "rotation": [0, 0, 0],
@@ -138,6 +138,7 @@ def test_stl_import_returns_scene_and_writes_draft(stl_client) -> None:
     assert body["draft_token"]
     assert body["objects"][0]["printable"] is True
     assert fake_binary.requests[0]["operation"] == "import"
+    assert fake_binary.requests[0]["source_filename"] == "part.stl"
     assert Path(fake_binary.requests[0]["output_3mf"]).read_bytes() == b"fake-3mf"
 
 

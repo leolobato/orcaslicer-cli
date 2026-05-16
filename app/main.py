@@ -1440,6 +1440,7 @@ async def import_stl(
             result = await binary.stl_draft({
                 "operation": "import",
                 "draft_token": draft.token,
+                "source_filename": draft.filename,
                 "input_stl": str(draft.source_path),
                 "output_3mf": str(draft.current_3mf_path),
                 "machine_chain_dir": paths["machine_chain_dir"],

@@ -148,6 +148,7 @@ struct DumpOptionsRequest {
 struct StlDraftRequest {
     std::string operation;       // import | layout | export_3mf
     std::string draft_token;
+    std::string source_filename;
     std::string input_stl;
     std::string input_3mf;
     std::string output_3mf;

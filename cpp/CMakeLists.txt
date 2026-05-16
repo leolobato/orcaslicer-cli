@@ -36,6 +36,7 @@ endif()
 add_executable(orca-headless
     src/orca_headless.cpp
     src/json_io.cpp
+    src/profile_chain.cpp
     src/progress.cpp
     src/slice_mode.cpp
     src/use_set_mode.cpp
