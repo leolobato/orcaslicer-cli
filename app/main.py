@@ -42,7 +42,7 @@ class _DropSuccessfulGetAccessLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropSuccessfulGetAccessLog())
 
-from fastapi import FastAPI, File, Query, Request, UploadFile, status as fastapi_status
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, status as fastapi_status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -96,6 +96,12 @@ from .inspect import (
 )
 from .threemf import list_plate_thumbnails, read_plate_thumbnail
 from .binary_client import BinaryClient, BinaryError
+from .stl_drafts import (
+    StlDraftCache,
+    StlDraftExpired,
+    StlDraftUnknown,
+    validate_stl_action,
+)
 from .slicer import (
     PLATE_TYPE_API_TO_ORCA,
     SUPPORTED_PLATE_TYPES,
@@ -106,6 +112,7 @@ from .slicer import (
     IncompatibleFilamentError,
     ModelTooBigError,
     SlicingError,
+    materialize_machine_process_for_binary,
     materialize_profiles_for_binary,
     pad_filament_settings_for_sparse_3mf,
 )
@@ -133,6 +140,10 @@ async def lifespan(app: FastAPI):
         cache_dir=cfg.CACHE_DIR,
         max_bytes=cfg.CACHE_MAX_BYTES,
         max_files=cfg.CACHE_MAX_FILES,
+    )
+    app.state.stl_drafts = StlDraftCache(
+        root=cfg.STL_DRAFT_CACHE_DIR,
+        ttl_seconds=cfg.STL_DRAFT_TTL_SECONDS,
     )
     app.state.inspect_cache = InspectCache()
     await load_all_profiles()
@@ -1109,6 +1120,20 @@ class SliceTokenRequest(BaseModel):
     copies: int = Field(1, ge=1, le=100)
 
 
+class StlLayoutRequest(BaseModel):
+    action: str
+
+
+def _scene_with_token(scene: dict[str, Any], token: str) -> dict[str, Any]:
+    out = dict(scene)
+    out["draft_token"] = token
+    return out
+
+
+def _draft_error(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"code": code, "message": message})
+
+
 def _resolve_plate_type_label(machine_id: str, plate_type: str | None) -> str:
     """Map an API plate_type value (snake_case) to its OrcaSlicer label.
 
@@ -1352,6 +1377,116 @@ async def slice_stream_v2(request: Request, body: SliceTokenRequest):
             yield f"event: {ev['type']}\ndata: {json.dumps(ev['payload'])}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@app.post("/stl/import", tags=["STL"])
+async def import_stl(
+    request: Request,
+    file: UploadFile = File(...),
+    machine_id: str = Form(...),
+    process_id: str = Form(...),
+    plate_type: str | None = Form(None),
+    auto_orient: bool = Form(False),
+    arrange: bool = Form(True),
+    center: bool = Form(True),
+):
+    if not file.filename or not file.filename.lower().endswith(".stl"):
+        return _draft_error(400, "invalid_stl", "File must be a .stl file")
+    payload = await file.read()
+    if not payload:
+        return _draft_error(400, "invalid_stl", "STL file is empty")
+
+    drafts: StlDraftCache = request.app.state.stl_drafts
+    draft = drafts.put_source(payload, file.filename)
+
+    paths = await materialize_machine_process_for_binary(
+        machine_id=machine_id,
+        process_id=process_id,
+    )
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    try:
+        result = await binary.stl_draft({
+            "operation": "import",
+            "draft_token": draft.token,
+            "input_stl": str(draft.source_path),
+            "output_3mf": str(draft.current_3mf_path),
+            "machine_chain_dir": paths["machine_chain_dir"],
+            "process_chain_dir": paths["process_chain_dir"],
+            "machine_leaf_name": paths["machine_leaf_name"],
+            "process_leaf_name": paths["process_leaf_name"],
+            "plate_type": _resolve_plate_type_label(machine_id, plate_type),
+            "options": {
+                "auto_orient": auto_orient,
+                "arrange": arrange,
+                "center": center,
+            },
+        })
+    except BinaryError as e:
+        return _draft_error(400 if e.code == "invalid_stl" else 500, e.code, e.message)
+
+    draft.scene_path.write_text(json.dumps(result["scene"]))
+    return _scene_with_token(result["scene"], draft.token)
+
+
+@app.post("/stl/{draft_token}/layout", tags=["STL"])
+async def layout_stl(draft_token: str, body: StlLayoutRequest, request: Request):
+    try:
+        action = validate_stl_action(body.action)
+    except ValueError as e:
+        return _draft_error(400, "invalid_stl_layout_action", str(e))
+    try:
+        draft = request.app.state.stl_drafts.get(draft_token)
+    except StlDraftUnknown:
+        return _draft_error(404, "draft_unknown", "STL draft token is unknown")
+    except StlDraftExpired:
+        return _draft_error(410, "draft_expired", "STL draft token has expired")
+
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    next_path = draft.next_3mf_path()
+    try:
+        result = await binary.stl_draft({
+            "operation": "layout",
+            "draft_token": draft.token,
+            "input_3mf": str(draft.current_3mf_path),
+            "output_3mf": str(next_path),
+            "action": action.value,
+        })
+    except BinaryError as e:
+        return _draft_error(
+            409 if e.code in {"arrange_failed", "auto_orient_failed"} else 500,
+            e.code,
+            e.message,
+        )
+
+    next_path.replace(draft.current_3mf_path)
+    draft.scene_path.write_text(json.dumps(result["scene"]))
+    return _scene_with_token(result["scene"], draft.token)
+
+
+@app.post("/stl/{draft_token}/3mf", tags=["STL"])
+async def materialize_stl_3mf(draft_token: str, request: Request):
+    try:
+        draft = request.app.state.stl_drafts.get(draft_token)
+    except StlDraftUnknown:
+        return _draft_error(404, "draft_unknown", "STL draft token is unknown")
+    except StlDraftExpired:
+        return _draft_error(410, "draft_expired", "STL draft token has expired")
+
+    output_path = draft.root / "materialized.3mf"
+    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+    try:
+        await binary.stl_draft({
+            "operation": "export_3mf",
+            "draft_token": draft.token,
+            "input_3mf": str(draft.current_3mf_path),
+            "output_3mf": str(output_path),
+        })
+    except BinaryError as e:
+        return _draft_error(500, e.code, e.message)
+
+    cache: TokenCache = request.app.state.token_cache
+    token, _sha, _size, _evicted = cache.put(output_path.read_bytes())
+    return {"input_token": token, "draft_token": draft.token}
 
 
 # Mount web UI — must be last so API routes take priority

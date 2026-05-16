@@ -24,6 +24,8 @@ ORCA_RESOURCES_DIR = os.environ.get("ORCA_RESOURCES_DIR", "/opt/resources")
 CACHE_DIR = Path(os.environ.get("CACHE_DIR", "/data/cache"))
 CACHE_MAX_BYTES = int(os.environ.get("CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))  # 10 GB
 CACHE_MAX_FILES = int(os.environ.get("CACHE_MAX_FILES", "200"))
+STL_DRAFT_CACHE_DIR = Path(os.environ.get("STL_DRAFT_CACHE_DIR", str(CACHE_DIR / "stl-drafts")))
+STL_DRAFT_TTL_SECONDS = int(os.environ.get("STL_DRAFT_TTL_SECONDS", str(60 * 60)))
 
 ORCA_HEADLESS_BINARY = os.environ.get("ORCA_HEADLESS_BINARY", "/opt/orca-headless/bin/orca-headless")
 

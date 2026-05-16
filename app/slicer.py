@@ -318,6 +318,52 @@ async def materialize_profiles_for_binary(
     }
 
 
+async def materialize_machine_process_for_binary(
+    machine_id: str,
+    process_id: str,
+) -> dict[str, Any]:
+    """Write only machine/process chain dirs for STL draft import.
+
+    STL draft preview does not compose a final print config and does not
+    need filament profiles. Keeping this separate avoids inventing a fake
+    filament slot solely to satisfy the slice path's materializer.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="orca-headless-stl-profiles-"))
+    machine_dir = tmp_dir / "machine"
+    process_dir = tmp_dir / "process"
+    for d in (machine_dir, process_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    machine = get_profile("machine", machine_id)
+    machine_leaf_name = machine.get("name", machine_id)
+    machine_written: set[str] = set()
+    for link_name, _raw in iter_inheritance_chain(machine_leaf_name):
+        _write_chain_link(
+            machine_dir,
+            link_name,
+            is_filament=False,
+            written_names=machine_written,
+        )
+
+    process = get_profile("process", process_id)
+    process_leaf_name = process.get("name", process_id)
+    process_written: set[str] = set()
+    for link_name, _raw in iter_inheritance_chain(process_leaf_name):
+        _write_chain_link(
+            process_dir,
+            link_name,
+            is_filament=False,
+            written_names=process_written,
+        )
+
+    return {
+        "machine_chain_dir": str(machine_dir),
+        "machine_leaf_name": machine_leaf_name,
+        "process_chain_dir": str(process_dir),
+        "process_leaf_name": process_leaf_name,
+    }
+
+
 def validate_3mf_preset_references(file_bytes: bytes) -> list[dict[str, str]]:
     """Return 3MF-referenced presets that don't resolve in the catalog.
 
