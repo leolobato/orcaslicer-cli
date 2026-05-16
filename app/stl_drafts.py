@@ -102,7 +102,10 @@ class StlDraftCache:
             raise StlDraftUnknown(token)
         now = time.time()
         if now - draft.created_at > self.ttl_seconds:
-            self.delete(token)
+            try:
+                self.delete(token)
+            except Exception as exc:
+                raise StlDraftExpired(token) from exc
             raise StlDraftExpired(token)
         # last_access is observability/LRU metadata; TTL is fixed from created_at.
         refreshed = StlDraft(

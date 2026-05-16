@@ -61,6 +61,24 @@ def test_expired_draft_is_deleted(tmp_path, monkeypatch):
     assert not draft.root.exists()
 
 
+def test_expired_draft_cleanup_failure_raises_expired_and_keeps_draft_known(
+    tmp_path, monkeypatch
+):
+    cache = StlDraftCache(root=tmp_path, ttl_seconds=10)
+    draft = cache.put_source(b"solid test\nendsolid test\n", "part.stl")
+    monkeypatch.setattr("app.stl_drafts.time.time", lambda: draft.created_at + 11)
+
+    def fail_rmtree(path, *args, **kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr("app.stl_drafts.shutil.rmtree", fail_rmtree)
+
+    with pytest.raises(StlDraftExpired) as exc:
+        cache.get(draft.token)
+    assert isinstance(exc.value.__cause__, OSError)
+    assert cache._drafts[draft.token].root == draft.root
+
+
 def test_delete_removes_directory_and_forgets_token(tmp_path):
     cache = StlDraftCache(root=tmp_path, ttl_seconds=3600)
     draft = cache.put_source(b"solid test\nendsolid test\n", "part.stl")
