@@ -119,6 +119,9 @@ mounts so subsequent rebuilds only recompile what changed.
 | DELETE | `/3mf/{token}` | Drop a cached upload |
 | GET | `/3mf/{token}/inspect` | Structured summary (plates, filaments, used-filament dispatch, estimate, thumbnails) |
 | GET | `/3mf/{token}/plates/{n}/thumbnail` | PNG bytes of the plate thumbnail (`?kind=main\|small\|top\|pick\|no_light`) |
+| POST | `/stl/import` | Import an STL into a preview draft session and return bed/object scene metadata |
+| POST | `/stl/{draft_token}/layout` | Apply a draft layout action (`auto_orient`, `rotate_z_90`, `rotate_z_minus_90`, `center`, `arrange`, `reset`) |
+| POST | `/stl/{draft_token}/3mf` | Materialize an accepted STL draft as a normal cached 3MF token |
 | POST | `/slice/v2` | Slice a cached `.3mf`, returns `{output_token, estimate, settings_transfer}` |
 | POST | `/slice-stream/v2` | Same as `/slice/v2` but streams progress via SSE |
 
@@ -148,6 +151,12 @@ curl -s -o sliced.3mf http://localhost:8070/3mf/$OUT
 ```
 
 The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `auto_center=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
+
+### STL draft preview API
+
+STL support is preview-first. Upload an STL with `POST /stl/import`, apply optional layout actions through `POST /stl/{draft_token}/layout`, then materialize the accepted draft with `POST /stl/{draft_token}/3mf`. The materialized token is a normal 3MF token and can be used with `GET /3mf/{token}/inspect` and `POST /slice/v2`.
+
+The gateway/browser renders the original STL using the scene transform returned by these endpoints. `orcaslicer-headless` remains the source of truth for import, orientation, arrange, and 3MF generation.
 
 ### Custom filament import
 
