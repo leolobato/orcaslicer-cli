@@ -2,8 +2,11 @@
 #include "profile_chain.h"
 
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Arrange.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/Orient.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
@@ -11,6 +14,7 @@
 #include <exception>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace orca_headless {
@@ -36,6 +40,7 @@ int fail(const std::string& code, const std::string& message, StlDraftResponse& 
 
 Slic3r::DynamicPrintConfig minimal_bed_config() {
     Slic3r::DynamicPrintConfig cfg;
+    cfg.apply(Slic3r::FullPrintConfig::defaults());
     auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area", true);
     area->values = {
         Slic3r::Vec2d(0.0, 0.0),
@@ -46,12 +51,28 @@ Slic3r::DynamicPrintConfig minimal_bed_config() {
     return cfg;
 }
 
+void ensure_defaulted_config(Slic3r::DynamicPrintConfig& cfg) {
+    Slic3r::DynamicPrintConfig defaults;
+    defaults.apply(Slic3r::FullPrintConfig::defaults());
+    defaults.apply(cfg);
+    cfg = std::move(defaults);
+}
+
 void ensure_printable_area_fallback(Slic3r::DynamicPrintConfig& cfg) {
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
-    if (area && !area->values.empty()) return;
+    const bool has_printable_area = area && !area->values.empty();
 
-    Slic3r::DynamicPrintConfig fallback = minimal_bed_config();
-    cfg.apply(fallback);
+    ensure_defaulted_config(cfg);
+    if (has_printable_area) return;
+
+    auto* fallback_area = cfg.opt<Slic3r::ConfigOptionPoints>(
+        "printable_area", true);
+    fallback_area->values = {
+        Slic3r::Vec2d(0.0, 0.0),
+        Slic3r::Vec2d(180.0, 0.0),
+        Slic3r::Vec2d(180.0, 180.0),
+        Slic3r::Vec2d(0.0, 180.0),
+    };
 }
 
 Slic3r::Vec2d bed_center(const Slic3r::DynamicPrintConfig& cfg) {
@@ -85,6 +106,122 @@ void ground_all(Slic3r::Model& model) {
         if (!obj) continue;
         obj->ensure_on_bed(/*allow_negative_z=*/false);
     }
+}
+
+void auto_orient_all(Slic3r::Model& model,
+                     const Slic3r::DynamicPrintConfig& cfg) {
+    Slic3r::orientation::OrientMeshs selected;
+    Slic3r::orientation::OrientMeshs unselected;
+
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        for (auto* inst : obj->instances) {
+            if (!inst) continue;
+
+            Slic3r::orientation::OrientMesh om;
+            om.name = obj->name;
+            om.mesh = obj->mesh();
+            // GUI parity: OrientJob::get_orient_mesh reads the object-local
+            // support threshold first, then falls back to full_config
+            // (../OrcaSlicer/src/slic3r/GUI/Jobs/OrientJob.cpp:225-242).
+            if (obj->config.has("support_threshold_angle")) {
+                om.overhang_angle = obj->config.opt_int("support_threshold_angle");
+            } else if (cfg.has("support_threshold_angle")) {
+                om.overhang_angle = cfg.opt_int("support_threshold_angle");
+            }
+            om.setter = [inst](const Slic3r::orientation::OrientMesh& p) {
+                inst->rotate(p.rotation_matrix);
+                inst->get_object()->invalidate_bounding_box();
+                inst->get_object()->ensure_on_bed();
+            };
+            selected.emplace_back(std::move(om));
+        }
+    }
+
+    if (selected.empty()) return;
+
+    Slic3r::orientation::OrientParams params;
+    // GUI parity: OrientJob uses min-volume mode unless the canvas
+    // OrientSettings.min_area flag is enabled
+    // (../OrcaSlicer/src/slic3r/GUI/Jobs/OrientJob.cpp:163-170).
+    params.min_volume = true;
+    params.progressind = [](unsigned, std::string) {};
+
+    Slic3r::orientation::orient(selected, unselected, params);
+    for (auto& mesh : selected) mesh.apply();
+    ground_all(model);
+}
+
+bool arrange_draft_instances(Slic3r::Model& model,
+                             const Slic3r::DynamicPrintConfig& cfg,
+                             std::string& error) {
+    using namespace Slic3r::arrangement;
+
+    ArrangePolygons movable;
+    std::vector<Slic3r::ModelInstance*> instances;
+
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        for (auto* inst : obj->instances) {
+            if (!inst) continue;
+
+            // GUI parity: ArrangeJob::prepare_arrange_polygon delegates to
+            // get_instance_arrange_poly (../OrcaSlicer/src/slic3r/GUI/Jobs/ArrangeJob.cpp:99-108),
+            // then ArrangeJob::process runs the same param update and
+            // inflation pipeline before arrangement
+            // (../OrcaSlicer/src/slic3r/GUI/Jobs/ArrangeJob.cpp:536-567).
+            ArrangePolygon ap = Slic3r::get_instance_arrange_poly(inst, cfg);
+            ap.itemid = static_cast<int>(movable.size());
+            instances.push_back(inst);
+            movable.emplace_back(std::move(ap));
+        }
+    }
+    if (movable.empty()) return true;
+
+    ArrangeParams params;
+    params.allow_rotations = true;
+    params.is_seq_print = false;
+    params.min_obj_distance = 0;
+    if (cfg.has("printable_height"))
+        params.printable_height = cfg.opt_float("printable_height");
+    if (cfg.has("extruder_clearance_radius"))
+        params.clearance_radius = cfg.opt_float("extruder_clearance_radius");
+    if (cfg.has("extruder_clearance_height_to_rod"))
+        params.clearance_height_to_rod =
+            cfg.opt_float("extruder_clearance_height_to_rod");
+    if (cfg.has("extruder_clearance_height_to_lid"))
+        params.clearance_height_to_lid =
+            cfg.opt_float("extruder_clearance_height_to_lid");
+    if (cfg.has("nozzle_height"))
+        params.nozzle_height = cfg.opt_float("nozzle_height");
+    if (const auto* bop = cfg.option<Slic3r::ConfigOptionPoint>("best_object_pos"))
+        params.align_center = bop->value;
+    params.progressind = [](unsigned, std::string) {};
+
+    update_arrange_params(params, &cfg, movable);
+    update_selected_items_inflation(movable, &cfg, params);
+    update_selected_items_axis_align(movable, &cfg, params);
+
+    Slic3r::Points bedpts = get_shrink_bedpts(&cfg, params);
+    if (bedpts.size() < 3) {
+        error = "printable area has fewer than 3 points";
+        return false;
+    }
+
+    arrange(movable, /*fixed=*/{}, bedpts, params);
+
+    for (size_t i = 0; i < movable.size(); ++i) {
+        const auto& ap = movable[i];
+        if (!ap.is_arranged() || ap.bed_idx != 0) {
+            error = "Cannot place STL draft on bed";
+            return false;
+        }
+        instances[i]->apply_arrange_result(ap.translation.cast<double>(),
+                                           ap.rotation);
+    }
+
+    ground_all(model);
+    return true;
 }
 
 struct DraftModel {
@@ -411,6 +548,21 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
     // (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6572-6573).
     ground_all(model);
 
+    if (req.auto_orient) {
+        try {
+            auto_orient_all(model, cfg);
+        } catch (const std::exception& e) {
+            return fail("auto_orient_failed", e.what(), response);
+        }
+    }
+    if (req.arrange) {
+        std::string error;
+        if (!arrange_draft_instances(model, cfg, error)) {
+            return fail("arrange_failed", error, response);
+        }
+    }
+    ground_all(model);
+
     try {
         if (!store_draft_3mf(req.output_3mf, model, cfg)) {
             return fail("export_failed",
@@ -462,13 +614,16 @@ int run_layout(const StlDraftRequest& req, StlDraftResponse& response) {
     } else if (req.action == "reset") {
         reset_layout(draft.model, draft.config);
     } else if (req.action == "auto_orient") {
-        return fail("auto_orient_failed",
-                    "auto_orient requires orientation support",
-                    response);
+        try {
+            auto_orient_all(draft.model, draft.config);
+        } catch (const std::exception& e) {
+            return fail("auto_orient_failed", e.what(), response);
+        }
     } else if (req.action == "arrange") {
-        return fail("arrange_failed",
-                    "arrange requires arrange support",
-                    response);
+        std::string error;
+        if (!arrange_draft_instances(draft.model, draft.config, error)) {
+            return fail("arrange_failed", error, response);
+        }
     } else {
         return fail("invalid_request", "unknown action: " + req.action, response);
     }
