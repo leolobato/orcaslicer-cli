@@ -2,6 +2,7 @@
 #include "profile_chain.h"
 
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -45,6 +46,14 @@ Slic3r::DynamicPrintConfig minimal_bed_config() {
     return cfg;
 }
 
+void ensure_printable_area_fallback(Slic3r::DynamicPrintConfig& cfg) {
+    const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
+    if (area && !area->values.empty()) return;
+
+    Slic3r::DynamicPrintConfig fallback = minimal_bed_config();
+    cfg.apply(fallback);
+}
+
 Slic3r::Vec2d bed_center(const Slic3r::DynamicPrintConfig& cfg) {
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
     if (!area || area->values.empty()) {
@@ -76,6 +85,90 @@ void ground_all(Slic3r::Model& model) {
         if (!obj) continue;
         obj->ensure_on_bed(/*allow_negative_z=*/false);
     }
+}
+
+struct DraftModel {
+    Slic3r::Model model;
+    Slic3r::DynamicPrintConfig config;
+};
+
+DraftModel read_draft_3mf(const std::string& path) {
+    DraftModel draft;
+    Slic3r::ConfigSubstitutionContext substitutions(
+        Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    Slic3r::PlateDataPtrs plate_data;
+    std::vector<Slic3r::Preset*> project_presets;
+
+    // GUI parity: project 3MF loading asks Model::read_from_file for model,
+    // config, and auxiliary data together
+    // (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:5825-5848), which bottoms
+    // out in load_bbs_3mf for .3mf files
+    // (../OrcaSlicer/src/libslic3r/Model.cpp:320-325). Keeping LoadConfig
+    // here preserves the draft's stored printer bed instead of reverting to
+    // the fallback bed on layout-only requests.
+    draft.model = Slic3r::Model::read_from_file(
+        path,
+        &draft.config,
+        &substitutions,
+        Slic3r::LoadStrategy::LoadModel
+            | Slic3r::LoadStrategy::LoadConfig
+            | Slic3r::LoadStrategy::LoadAuxiliary,
+        &plate_data,
+        &project_presets);
+    ensure_printable_area_fallback(draft.config);
+    return draft;
+}
+
+void rotate_z(Slic3r::Model& model, double radians) {
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        for (size_t i = 0; i < obj->instances.size(); ++i) {
+            auto* inst = obj->instances[i];
+            if (!inst) continue;
+
+            const Slic3r::Vec3d center_before =
+                obj->instance_bounding_box(i, false).center();
+            // GUI parity: the rotate gizmo ultimately copies the updated
+            // rotation into ModelInstance state
+            // (../OrcaSlicer/src/slic3r/GUI/Gizmos/GizmoObjectManipulation.cpp:350-389).
+            inst->set_rotation(
+                Slic3r::Z,
+                inst->get_rotation(Slic3r::Z) + radians);
+            obj->invalidate_bounding_box();
+
+            const Slic3r::Vec3d center_after =
+                obj->instance_bounding_box(i, false).center();
+            inst->set_offset(inst->get_offset() + center_before - center_after);
+            obj->invalidate_bounding_box();
+        }
+    }
+    ground_all(model);
+}
+
+void reset_layout(Slic3r::Model& model,
+                  const Slic3r::DynamicPrintConfig& cfg) {
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        for (auto* inst : obj->instances) {
+            if (!inst) continue;
+            // GUI parity: reset rotation zeroes ModelInstance transform
+            // rotation before the GL canvas syncs it back to the model
+            // (../OrcaSlicer/src/slic3r/GUI/Gizmos/GizmoObjectManipulation.cpp:554-589).
+            inst->set_rotation(Slic3r::Vec3d::Zero());
+            inst->set_scaling_factor(Slic3r::Vec3d::Ones());
+            inst->set_mirror(Slic3r::Vec3d::Ones());
+        }
+        obj->invalidate_bounding_box();
+    }
+    model.center_instances_around_point(bed_center(cfg));
+    ground_all(model);
+}
+
+void copy_file_or_throw(const std::string& src, const std::string& dst) {
+    std::filesystem::copy_file(
+        src,
+        dst,
+        std::filesystem::copy_options::overwrite_existing);
 }
 
 void apply_gui_import_name_fallbacks(Slic3r::Model& model,
@@ -190,7 +283,16 @@ nlohmann::json scene_for_model(const StlDraftRequest& req,
                                const Slic3r::DynamicPrintConfig& cfg) {
     nlohmann::json scene;
     scene["draft_token"] = req.draft_token;
-    scene["source_filename"] = source_filename_for(req);
+    std::string source_filename = source_filename_for(req);
+    if (source_filename.empty()) {
+        for (const auto* obj : model.objects) {
+            if (obj && !obj->name.empty()) {
+                source_filename = obj->name;
+                break;
+            }
+        }
+    }
+    scene["source_filename"] = source_filename;
 
     const auto* area = cfg.opt<Slic3r::ConfigOptionPoints>("printable_area");
     nlohmann::json printable = nlohmann::json::array();
@@ -327,6 +429,87 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
     return 0;
 }
 
+int run_layout(const StlDraftRequest& req, StlDraftResponse& response) {
+    if (req.input_3mf.empty() || req.output_3mf.empty() || req.action.empty()) {
+        return fail("invalid_request",
+                    "input_3mf, output_3mf, and action are required",
+                    response);
+    }
+
+    DraftModel draft;
+    try {
+        draft = read_draft_3mf(req.input_3mf);
+    } catch (const std::exception& e) {
+        return fail("invalid_draft",
+                    std::string("read_from_file: ") + e.what(),
+                    response);
+    }
+
+    if (draft.model.objects.empty()) {
+        return fail("invalid_draft", "draft 3MF contains no objects", response);
+    }
+
+    if (req.action == "center") {
+        // GUI parity: centering uses Model::center_instances_around_point
+        // (../OrcaSlicer/src/libslic3r/Model.cpp:699-716) followed by
+        // ensure_on_bed (../OrcaSlicer/src/libslic3r/Model.cpp:1717-1735).
+        draft.model.center_instances_around_point(bed_center(draft.config));
+        ground_all(draft.model);
+    } else if (req.action == "rotate_z_90") {
+        rotate_z(draft.model, Slic3r::Geometry::deg2rad(90.0));
+    } else if (req.action == "rotate_z_minus_90") {
+        rotate_z(draft.model, Slic3r::Geometry::deg2rad(-90.0));
+    } else if (req.action == "reset") {
+        reset_layout(draft.model, draft.config);
+    } else if (req.action == "auto_orient") {
+        return fail("auto_orient_failed",
+                    "auto_orient requires orientation support",
+                    response);
+    } else if (req.action == "arrange") {
+        return fail("arrange_failed",
+                    "arrange requires arrange support",
+                    response);
+    } else {
+        return fail("invalid_request", "unknown action: " + req.action, response);
+    }
+
+    try {
+        if (!store_draft_3mf(req.output_3mf, draft.model, draft.config)) {
+            return fail("export_failed",
+                        "store_bbs_3mf returned false",
+                        response);
+        }
+    } catch (const std::exception& e) {
+        return fail("export_failed",
+                    std::string("store_bbs_3mf: ") + e.what(),
+                    response);
+    }
+
+    response.status = "ok";
+    response.scene = scene_for_model(req, draft.model, draft.config);
+    write_stl_draft_response_to_stdout(response);
+    return 0;
+}
+
+int run_export_3mf(const StlDraftRequest& req, StlDraftResponse& response) {
+    if (req.input_3mf.empty() || req.output_3mf.empty()) {
+        return fail("invalid_request",
+                    "input_3mf and output_3mf are required",
+                    response);
+    }
+    try {
+        copy_file_or_throw(req.input_3mf, req.output_3mf);
+    } catch (const std::exception& e) {
+        return fail("export_failed",
+                    std::string("copy export draft: ") + e.what(),
+                    response);
+    }
+
+    response.status = "ok";
+    write_stl_draft_response_to_stdout(response);
+    return 0;
+}
+
 }  // namespace
 
 int run_stl_draft_mode(const StlDraftRequest& req) {
@@ -334,10 +517,11 @@ int run_stl_draft_mode(const StlDraftRequest& req) {
     if (req.operation == "import") {
         return run_import(req, response);
     }
-    if (req.operation == "layout" || req.operation == "export_3mf") {
-        return fail("unsupported_operation",
-                    req.operation + " is unavailable in this build",
-                    response);
+    if (req.operation == "layout") {
+        return run_layout(req, response);
+    }
+    if (req.operation == "export_3mf") {
+        return run_export_3mf(req, response);
     }
     return fail("invalid_request",
                 "operation must be import, layout, or export_3mf",
