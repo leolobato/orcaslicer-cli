@@ -323,6 +323,32 @@ void apply_gui_import_name_fallbacks(Slic3r::Model& model,
     }
 }
 
+void apply_gui_stl_import_normalization(
+    Slic3r::Model& model,
+    const Slic3r::DynamicPrintConfig& cfg) {
+    double preferred_orientation = 0.0;
+    if (cfg.has("preferred_orientation")) {
+        preferred_orientation = cfg.opt_float("preferred_orientation");
+    }
+
+    for (auto* obj : model.objects) {
+        if (!obj) continue;
+        // GUI parity: STL import applies the printer/process preferred Z
+        // orientation immediately after name fallback
+        // (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6430-6434).
+        if (preferred_orientation != 0.0) {
+            obj->rotate(
+                Slic3r::Geometry::deg2rad(preferred_orientation),
+                Slic3r::Z);
+        }
+
+        // GUI parity: non-3MF/non-AMF imports normalize object geometry
+        // around the origin before placement
+        // (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6557-6560).
+        obj->center_around_origin(false);
+    }
+}
+
 bool apply_plate_type_override(const StlDraftRequest& req,
                                Slic3r::DynamicPrintConfig& cfg,
                                StlDraftResponse& response) {
@@ -537,6 +563,7 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
     // GUI parity: Plater backfills empty imported object names from the
     // source filename (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6430-6433).
     apply_gui_import_name_fallbacks(model, req);
+    apply_gui_stl_import_normalization(model, cfg);
 
     if (req.center) {
         // GUI parity: non-project import placement uses
