@@ -149,6 +149,10 @@ def test_put_source_write_failure_removes_orphan_directory(tmp_path, monkeypatch
 
 def test_validate_stl_action_accepts_known_actions():
     assert validate_stl_action("auto_orient") == StlDraftAction.AUTO_ORIENT
+    assert validate_stl_action("rotate_x_90") == StlDraftAction.ROTATE_X_90
+    assert validate_stl_action("rotate_x_minus_90") == StlDraftAction.ROTATE_X_MINUS_90
+    assert validate_stl_action("rotate_y_90") == StlDraftAction.ROTATE_Y_90
+    assert validate_stl_action("rotate_y_minus_90") == StlDraftAction.ROTATE_Y_MINUS_90
     assert validate_stl_action("rotate_z_90") == StlDraftAction.ROTATE_Z_90
     assert validate_stl_action("rotate_z_minus_90") == StlDraftAction.ROTATE_Z_MINUS_90
     assert validate_stl_action("center") == StlDraftAction.CENTER

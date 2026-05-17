@@ -120,7 +120,7 @@ mounts so subsequent rebuilds only recompile what changed.
 | GET | `/3mf/{token}/inspect` | Structured summary (plates, filaments, used-filament dispatch, estimate, thumbnails) |
 | GET | `/3mf/{token}/plates/{n}/thumbnail` | PNG bytes of the plate thumbnail (`?kind=main\|small\|top\|pick\|no_light`) |
 | POST | `/stl/import` | Import an STL into a preview draft session and return bed/object scene metadata |
-| POST | `/stl/{draft_token}/layout` | Apply a draft layout action (`auto_orient`, `rotate_z_90`, `rotate_z_minus_90`, `center`, `arrange`, `reset`) |
+| POST | `/stl/{draft_token}/layout` | Apply a draft layout action (`auto_orient`, `rotate_x_90`, `rotate_x_minus_90`, `rotate_y_90`, `rotate_y_minus_90`, `rotate_z_90`, `rotate_z_minus_90`, `center`, `arrange`, `reset`) |
 | POST | `/stl/{draft_token}/3mf` | Materialize an accepted STL draft as a normal cached 3MF token |
 | POST | `/slice/v2` | Slice a cached `.3mf`, returns `{output_token, estimate, settings_transfer}` |
 | POST | `/slice-stream/v2` | Same as `/slice/v2` but streams progress via SSE |

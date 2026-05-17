@@ -51,6 +51,10 @@ class FakeBinary:
                     "warnings": [],
                     "actions": [
                         "auto_orient",
+                        "rotate_x_90",
+                        "rotate_x_minus_90",
+                        "rotate_y_90",
+                        "rotate_y_minus_90",
                         "rotate_z_90",
                         "rotate_z_minus_90",
                         "center",
@@ -171,14 +175,14 @@ def test_stl_layout_updates_scene(stl_client) -> None:
     client, fake_binary = stl_client
     draft_token = _import_stl(client).json()["draft_token"]
 
-    resp = client.post(f"/stl/{draft_token}/layout", json={"action": "center"})
+    resp = client.post(f"/stl/{draft_token}/layout", json={"action": "rotate_x_90"})
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["draft_token"] == draft_token
     assert body["objects"][0]["mesh_transform"]["offset"] == [1, 2, 3]
     assert fake_binary.requests[-1]["operation"] == "layout"
-    assert fake_binary.requests[-1]["action"] == "center"
+    assert fake_binary.requests[-1]["action"] == "rotate_x_90"
 
 
 def test_stl_export_returns_3mf_token(stl_client) -> None:

@@ -22,6 +22,10 @@ class StlDraftExpired(KeyError):
 
 class StlDraftAction(StrEnum):
     AUTO_ORIENT = "auto_orient"
+    ROTATE_X_90 = "rotate_x_90"
+    ROTATE_X_MINUS_90 = "rotate_x_minus_90"
+    ROTATE_Y_90 = "rotate_y_90"
+    ROTATE_Y_MINUS_90 = "rotate_y_minus_90"
     ROTATE_Z_90 = "rotate_z_90"
     ROTATE_Z_MINUS_90 = "rotate_z_minus_90"
     CENTER = "center"

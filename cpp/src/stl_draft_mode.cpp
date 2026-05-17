@@ -23,6 +23,10 @@ namespace {
 
 const std::vector<std::string> k_actions{
     "auto_orient",
+    "rotate_x_90",
+    "rotate_x_minus_90",
+    "rotate_y_90",
+    "rotate_y_minus_90",
     "rotate_z_90",
     "rotate_z_minus_90",
     "center",
@@ -256,7 +260,7 @@ DraftModel read_draft_3mf(const std::string& path) {
     return draft;
 }
 
-void rotate_z(Slic3r::Model& model, double radians) {
+void rotate_axis(Slic3r::Model& model, Slic3r::Axis axis, double radians) {
     for (auto* obj : model.objects) {
         if (!obj) continue;
         for (size_t i = 0; i < obj->instances.size(); ++i) {
@@ -269,8 +273,8 @@ void rotate_z(Slic3r::Model& model, double radians) {
             // rotation into ModelInstance state
             // (../OrcaSlicer/src/slic3r/GUI/Gizmos/GizmoObjectManipulation.cpp:350-389).
             inst->set_rotation(
-                Slic3r::Z,
-                inst->get_rotation(Slic3r::Z) + radians);
+                axis,
+                inst->get_rotation(axis) + radians);
             obj->invalidate_bounding_box();
 
             const Slic3r::Vec3d center_after =
@@ -678,10 +682,18 @@ int run_layout(const StlDraftRequest& req, StlDraftResponse& response) {
         // ensure_on_bed (../OrcaSlicer/src/libslic3r/Model.cpp:1717-1735).
         draft.model.center_instances_around_point(bed_center(draft.config));
         ground_all(draft.model);
+    } else if (req.action == "rotate_x_90") {
+        rotate_axis(draft.model, Slic3r::X, Slic3r::Geometry::deg2rad(90.0));
+    } else if (req.action == "rotate_x_minus_90") {
+        rotate_axis(draft.model, Slic3r::X, Slic3r::Geometry::deg2rad(-90.0));
+    } else if (req.action == "rotate_y_90") {
+        rotate_axis(draft.model, Slic3r::Y, Slic3r::Geometry::deg2rad(90.0));
+    } else if (req.action == "rotate_y_minus_90") {
+        rotate_axis(draft.model, Slic3r::Y, Slic3r::Geometry::deg2rad(-90.0));
     } else if (req.action == "rotate_z_90") {
-        rotate_z(draft.model, Slic3r::Geometry::deg2rad(90.0));
+        rotate_axis(draft.model, Slic3r::Z, Slic3r::Geometry::deg2rad(90.0));
     } else if (req.action == "rotate_z_minus_90") {
-        rotate_z(draft.model, Slic3r::Geometry::deg2rad(-90.0));
+        rotate_axis(draft.model, Slic3r::Z, Slic3r::Geometry::deg2rad(-90.0));
     } else if (req.action == "reset") {
         reset_layout(draft.model, draft.config);
     } else if (req.action == "auto_orient") {
