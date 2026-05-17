@@ -156,7 +156,7 @@ The token cache is content-addressed (sha256-keyed): repeated uploads of the sam
 
 STL support is preview-first. Upload an STL with `POST /stl/import`, apply optional layout actions through `POST /stl/{draft_token}/layout`, then materialize the accepted draft with `POST /stl/{draft_token}/3mf`. The materialized token is a normal 3MF token and can be used with `GET /3mf/{token}/inspect` and `POST /slice/v2`.
 
-The gateway/browser renders the original STL using the scene transform returned by these endpoints. `orcaslicer-headless` remains the source of truth for import, orientation, arrange, and 3MF generation.
+The gateway/browser renders the original STL using the scene transforms returned by these endpoints. Apply each object's `mesh_transform` in STL-local space first, then apply `transform` for the Orca instance placement. `orcaslicer-headless` remains the source of truth for import, orientation, arrange, and 3MF generation.
 
 ### Custom filament import
 

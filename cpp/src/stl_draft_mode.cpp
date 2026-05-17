@@ -443,7 +443,8 @@ bool store_draft_3mf(const std::string& path,
 
 nlohmann::json scene_for_model(const StlDraftRequest& req,
                                const Slic3r::Model& model,
-                               const Slic3r::DynamicPrintConfig& cfg) {
+                               const Slic3r::DynamicPrintConfig& cfg,
+                               const nlohmann::json& warnings) {
     nlohmann::json scene;
     scene["draft_token"] = req.draft_token;
     std::string source_filename = source_filename_for(req);
@@ -481,6 +482,12 @@ nlohmann::json scene_for_model(const StlDraftRequest& req,
         {"printable_area", printable},
     };
 
+    double preferred_orientation = 0.0;
+    if (cfg.has("preferred_orientation")) {
+        preferred_orientation = Slic3r::Geometry::deg2rad(
+            cfg.opt_float("preferred_orientation"));
+    }
+
     nlohmann::json objects = nlohmann::json::array();
     for (size_t obj_idx = 0; obj_idx < model.objects.size(); ++obj_idx) {
         const auto* obj = model.objects[obj_idx];
@@ -508,6 +515,23 @@ nlohmann::json scene_for_model(const StlDraftRequest& req,
                     inst->get_scaling_factor().z(),
                 }},
             }},
+            {"mesh_transform", {
+                // GUI parity: non-project STL import mutates object-local
+                // geometry with ModelObject::rotate and
+                // center_around_origin(false)
+                // (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6430-6434,
+                // 6557-6560). ModelObject::origin_translation records the
+                // accumulated local translation for callers that need to
+                // reproduce that normalization
+                // (../OrcaSlicer/src/libslic3r/Model.hpp:389-394).
+                {"offset", {
+                    obj->origin_translation.x(),
+                    obj->origin_translation.y(),
+                    obj->origin_translation.z(),
+                }},
+                {"rotation", {0.0, 0.0, preferred_orientation}},
+                {"scale", {1.0, 1.0, 1.0}},
+            }},
             {"bbox", {
                 {"min", {bb.min.x(), bb.min.y(), bb.min.z()}},
                 {"max", {bb.max.x(), bb.max.y(), bb.max.z()}},
@@ -519,7 +543,7 @@ nlohmann::json scene_for_model(const StlDraftRequest& req,
     }
 
     scene["objects"] = objects;
-    scene["warnings"] = nlohmann::json::array();
+    scene["warnings"] = warnings;
     scene["actions"] = k_actions;
     return scene;
 }
@@ -556,8 +580,22 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
                     response);
     }
 
+    nlohmann::json warnings = nlohmann::json::array();
+    // GUI parity: non-project imports remove zero-volume objects before
+    // placement/normalization (../OrcaSlicer/src/slic3r/GUI/Plater.cpp:6479).
+    const int deleted_objects = model.removed_objects_with_zero_volume();
+    if (deleted_objects > 0) {
+        warnings.push_back({
+            {"code", "zero_volume_removed"},
+            {"message", "Objects with zero volume were removed"},
+            {"count", deleted_objects},
+        });
+    }
+
     if (model.objects.empty()) {
-        return fail("invalid_stl", "STL file contains no objects", response);
+        return fail("invalid_stl",
+                    "STL file contains no printable-volume objects",
+                    response);
     }
 
     // GUI parity: Plater backfills empty imported object names from the
@@ -579,13 +617,19 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
         try {
             auto_orient_all(model, cfg);
         } catch (const std::exception& e) {
-            return fail("auto_orient_failed", e.what(), response);
+            warnings.push_back({
+                {"code", "auto_orient_failed"},
+                {"message", e.what()},
+            });
         }
     }
     if (req.arrange) {
         std::string error;
         if (!arrange_draft_instances(model, cfg, error)) {
-            return fail("arrange_failed", error, response);
+            warnings.push_back({
+                {"code", "arrange_failed"},
+                {"message", error},
+            });
         }
     }
     ground_all(model);
@@ -603,7 +647,7 @@ int run_import(const StlDraftRequest& req, StlDraftResponse& response) {
     }
 
     response.status = "ok";
-    response.scene = scene_for_model(req, model, cfg);
+    response.scene = scene_for_model(req, model, cfg, warnings);
     write_stl_draft_response_to_stdout(response);
     return 0;
 }
@@ -668,7 +712,8 @@ int run_layout(const StlDraftRequest& req, StlDraftResponse& response) {
     }
 
     response.status = "ok";
-    response.scene = scene_for_model(req, draft.model, draft.config);
+    response.scene = scene_for_model(
+        req, draft.model, draft.config, nlohmann::json::array());
     write_stl_draft_response_to_stdout(response);
     return 0;
 }

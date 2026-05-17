@@ -6,6 +6,7 @@ import re
 import secrets
 import shutil
 import time
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -70,13 +71,17 @@ class StlDraft:
 
 
 class StlDraftCache:
+    _METADATA_FILE = "draft.json"
+
     def __init__(self, root: Path, ttl_seconds: int) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.ttl_seconds = ttl_seconds
         self._drafts: dict[str, StlDraft] = {}
+        self.sweep_expired()
 
     def put_source(self, payload: bytes, filename: str | None) -> StlDraft:
+        self.sweep_expired()
         token = secrets.token_urlsafe(16)
         now = time.time()
         root = self.root / token
@@ -90,6 +95,7 @@ class StlDraftCache:
         )
         try:
             draft.source_path.write_bytes(payload)
+            self._write_metadata(draft)
         except Exception:
             shutil.rmtree(root)
             raise
@@ -116,6 +122,7 @@ class StlDraftCache:
             last_access=now,
         )
         self._drafts[token] = refreshed
+        self._write_metadata(refreshed)
         return refreshed
 
     def delete(self, token: str) -> bool:
@@ -125,3 +132,38 @@ class StlDraftCache:
         shutil.rmtree(draft.root)
         self._drafts.pop(token)
         return True
+
+    def sweep_expired(self) -> None:
+        now = time.time()
+        for token, draft in list(self._drafts.items()):
+            if now - draft.created_at <= self.ttl_seconds:
+                continue
+            self.delete(token)
+
+        for child in self.root.iterdir():
+            if not child.is_dir() or child.name in self._drafts:
+                continue
+            created_at = self._created_at_from_disk(child)
+            if now - created_at > self.ttl_seconds:
+                shutil.rmtree(child)
+
+    def _write_metadata(self, draft: StlDraft) -> None:
+        (draft.root / self._METADATA_FILE).write_text(
+            json.dumps({
+                "token": draft.token,
+                "filename": draft.filename,
+                "created_at": draft.created_at,
+                "last_access": draft.last_access,
+            })
+        )
+
+    def _created_at_from_disk(self, root: Path) -> float:
+        metadata = root / self._METADATA_FILE
+        try:
+            raw = json.loads(metadata.read_text())
+            created_at = raw.get("created_at")
+            if isinstance(created_at, (int, float)):
+                return float(created_at)
+        except Exception:
+            pass
+        return root.stat().st_mtime

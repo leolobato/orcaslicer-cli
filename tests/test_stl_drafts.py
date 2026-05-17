@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,9 @@ def test_put_creates_source_and_current_paths(tmp_path):
     assert draft.source_path.read_bytes().startswith(b"solid")
     assert draft.current_3mf_path.name == "current.3mf"
     assert draft.next_3mf_path().name == "next.3mf"
+    metadata = json.loads((draft.root / "draft.json").read_text())
+    assert metadata["token"] == draft.token
+    assert metadata["filename"] == "part.stl"
 
 
 def test_get_unknown_raises(tmp_path):
@@ -109,6 +113,22 @@ def test_delete_failure_keeps_draft_known(tmp_path, monkeypatch):
     known_draft = cache.get(draft.token)
     assert known_draft.token == draft.token
     assert known_draft.root == draft.root
+
+
+def test_sweep_expired_removes_stale_disk_dirs_after_restart(tmp_path, monkeypatch):
+    stale_root = tmp_path / "stale-token"
+    stale_root.mkdir()
+    (stale_root / "draft.json").write_text(json.dumps({
+        "token": "stale-token",
+        "filename": "part.stl",
+        "created_at": 1000.0,
+        "last_access": 1000.0,
+    }))
+    monkeypatch.setattr("app.stl_drafts.time.time", lambda: 2000.0)
+
+    StlDraftCache(root=tmp_path, ttl_seconds=10)
+
+    assert not stale_root.exists()
 
 
 def test_put_source_write_failure_removes_orphan_directory(tmp_path, monkeypatch):

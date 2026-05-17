@@ -1,5 +1,6 @@
 """FastAPI app exposing OrcaSlicer as a REST API."""
 
+import asyncio
 import io
 import json
 import shutil
@@ -147,6 +148,7 @@ async def lifespan(app: FastAPI):
         root=Path(os.environ.get("STL_DRAFT_CACHE_DIR", str(cfg.CACHE_DIR / "stl-drafts"))),
         ttl_seconds=cfg.STL_DRAFT_TTL_SECONDS,
     )
+    app.state.stl_draft_locks = {}
     app.state.inspect_cache = InspectCache()
     await load_all_profiles()
     # Load process-option metadata catalogue + allowlist-filtered layout.
@@ -1132,8 +1134,77 @@ def _scene_with_token(scene: dict[str, Any], token: str) -> dict[str, Any]:
     return out
 
 
+def _read_draft_scene(draft: Any) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(draft.scene_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _preserve_mesh_transforms(
+    previous_scene: dict[str, Any] | None,
+    next_scene: dict[str, Any],
+) -> dict[str, Any]:
+    if not previous_scene:
+        return next_scene
+    previous_objects = previous_scene.get("objects")
+    next_objects = next_scene.get("objects")
+    if not isinstance(previous_objects, list) or not isinstance(next_objects, list):
+        return next_scene
+
+    previous_by_id = {
+        obj.get("id"): obj.get("mesh_transform")
+        for obj in previous_objects
+        if isinstance(obj, dict) and "mesh_transform" in obj
+    }
+    if not previous_by_id:
+        return next_scene
+
+    out = dict(next_scene)
+    preserved_objects = []
+    for obj in next_objects:
+        if not isinstance(obj, dict):
+            preserved_objects.append(obj)
+            continue
+        preserved = previous_by_id.get(obj.get("id"))
+        if preserved is None:
+            preserved_objects.append(obj)
+            continue
+        replaced = dict(obj)
+        # Orca's non-project STL import normalizes object-local geometry before
+        # storing the draft 3MF. That local origin shift is not round-tripped by
+        # load_bbs_3mf, so the API session carries it forward for gateway
+        # previews that render the original STL bytes.
+        replaced["mesh_transform"] = preserved
+        preserved_objects.append(replaced)
+    out["objects"] = preserved_objects
+    return out
+
+
 def _draft_error(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"code": code, "message": message})
+
+
+def _stl_draft_locks(request: Request) -> dict[str, asyncio.Lock]:
+    locks = getattr(request.app.state, "stl_draft_locks", None)
+    if locks is None:
+        locks = {}
+        request.app.state.stl_draft_locks = locks
+    return locks
+
+
+def _stl_draft_lock(request: Request, token: str) -> asyncio.Lock:
+    locks = _stl_draft_locks(request)
+    lock = locks.get(token)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[token] = lock
+    return lock
+
+
+def _forget_stl_draft_lock(request: Request, token: str) -> None:
+    _stl_draft_locks(request).pop(token, None)
 
 
 def _profile_temp_root(paths: dict[str, Any]) -> Path | None:
@@ -1455,7 +1526,13 @@ async def import_stl(
                 },
             })
         except BinaryError as e:
-            return _draft_error(400 if e.code == "invalid_stl" else 500, e.code, e.message)
+            if e.code == "invalid_stl":
+                status_code = 400
+            elif e.code in {"arrange_failed", "auto_orient_failed"}:
+                status_code = 409
+            else:
+                status_code = 500
+            return _draft_error(status_code, e.code, e.message)
 
         draft.scene_path.write_text(json.dumps(result["scene"]))
         import_succeeded = True
@@ -1472,58 +1549,77 @@ async def layout_stl(draft_token: str, body: StlLayoutRequest, request: Request)
         action = validate_stl_action(body.action)
     except ValueError as e:
         return _draft_error(400, "invalid_stl_layout_action", str(e))
-    try:
-        draft = request.app.state.stl_drafts.get(draft_token)
-    except StlDraftUnknown:
-        return _draft_error(404, "draft_unknown", "STL draft token is unknown")
-    except StlDraftExpired:
-        return _draft_error(410, "draft_expired", "STL draft token has expired")
 
-    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
-    next_path = draft.next_3mf_path()
-    try:
-        result = await binary.stl_draft({
-            "operation": "layout",
-            "draft_token": draft.token,
-            "input_3mf": str(draft.current_3mf_path),
-            "output_3mf": str(next_path),
-            "action": action.value,
-        })
-    except BinaryError as e:
-        return _draft_error(
-            409 if e.code in {"arrange_failed", "auto_orient_failed"} else 500,
-            e.code,
-            e.message,
-        )
+    lock = _stl_draft_lock(request, draft_token)
+    async with lock:
+        try:
+            draft = request.app.state.stl_drafts.get(draft_token)
+        except StlDraftUnknown:
+            _forget_stl_draft_lock(request, draft_token)
+            return _draft_error(404, "draft_unknown", "STL draft token is unknown")
+        except StlDraftExpired:
+            _forget_stl_draft_lock(request, draft_token)
+            return _draft_error(410, "draft_expired", "STL draft token has expired")
 
-    next_path.replace(draft.current_3mf_path)
-    draft.scene_path.write_text(json.dumps(result["scene"]))
-    return _scene_with_token(result["scene"], draft.token)
+        previous_scene = _read_draft_scene(draft)
+        binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+        next_path = draft.next_3mf_path()
+        try:
+            result = await binary.stl_draft({
+                "operation": "layout",
+                "draft_token": draft.token,
+                "input_3mf": str(draft.current_3mf_path),
+                "output_3mf": str(next_path),
+                "action": action.value,
+            })
+        except BinaryError as e:
+            return _draft_error(
+                409 if e.code in {"arrange_failed", "auto_orient_failed"} else 500,
+                e.code,
+                e.message,
+            )
+
+        next_path.replace(draft.current_3mf_path)
+        scene = _preserve_mesh_transforms(previous_scene, result["scene"])
+        draft.scene_path.write_text(json.dumps(scene))
+        return _scene_with_token(scene, draft.token)
 
 
 @app.post("/stl/{draft_token}/3mf", tags=["STL"])
 async def materialize_stl_3mf(draft_token: str, request: Request):
-    try:
-        draft = request.app.state.stl_drafts.get(draft_token)
-    except StlDraftUnknown:
-        return _draft_error(404, "draft_unknown", "STL draft token is unknown")
-    except StlDraftExpired:
-        return _draft_error(410, "draft_expired", "STL draft token has expired")
+    lock = _stl_draft_lock(request, draft_token)
+    deleted = False
+    async with lock:
+        try:
+            draft = request.app.state.stl_drafts.get(draft_token)
+        except StlDraftUnknown:
+            _forget_stl_draft_lock(request, draft_token)
+            return _draft_error(404, "draft_unknown", "STL draft token is unknown")
+        except StlDraftExpired:
+            _forget_stl_draft_lock(request, draft_token)
+            return _draft_error(410, "draft_expired", "STL draft token has expired")
 
-    output_path = draft.root / "materialized.3mf"
-    binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
-    try:
-        await binary.stl_draft({
-            "operation": "export_3mf",
-            "draft_token": draft.token,
-            "input_3mf": str(draft.current_3mf_path),
-            "output_3mf": str(output_path),
-        })
-    except BinaryError as e:
-        return _draft_error(500, e.code, e.message)
+        output_path = draft.root / "materialized.3mf"
+        binary = BinaryClient(binary_path=cfg.ORCA_HEADLESS_BINARY)
+        try:
+            await binary.stl_draft({
+                "operation": "export_3mf",
+                "draft_token": draft.token,
+                "input_3mf": str(draft.current_3mf_path),
+                "output_3mf": str(output_path),
+            })
+        except BinaryError as e:
+            return _draft_error(500, e.code, e.message)
 
-    cache: TokenCache = request.app.state.token_cache
-    token, _sha, _size, _evicted = cache.put(output_path.read_bytes())
+        cache: TokenCache = request.app.state.token_cache
+        token, _sha, _size, _evicted = cache.put(output_path.read_bytes())
+        try:
+            request.app.state.stl_drafts.delete(draft.token)
+            deleted = True
+        except Exception:
+            logger.warning("failed to delete accepted STL draft %s", draft.token, exc_info=True)
+    if deleted:
+        _forget_stl_draft_lock(request, draft_token)
     return {"input_token": token, "draft_token": draft.token}
 
 

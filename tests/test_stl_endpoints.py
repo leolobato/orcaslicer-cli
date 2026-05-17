@@ -19,6 +19,7 @@ class FakeBinary:
         op = request["operation"]
         if op in {"import", "layout"}:
             Path(request["output_3mf"]).write_bytes(b"fake-3mf")
+            mesh_offset = [1, 2, 3] if op == "import" else [0, 0, 0]
             return {
                 "status": "ok",
                 "scene": {
@@ -35,6 +36,11 @@ class FakeBinary:
                             "name": request.get("source_filename", "part.stl"),
                             "transform": {
                                 "offset": [90, 90, 0],
+                                "rotation": [0, 0, 0],
+                                "scale": [1, 1, 1],
+                            },
+                            "mesh_transform": {
+                                "offset": mesh_offset,
                                 "rotation": [0, 0, 0],
                                 "scale": [1, 1, 1],
                             },
@@ -67,6 +73,14 @@ class FailingImportBinary(FakeBinary):
         return await super().stl_draft(request, timeout_s=timeout_s)
 
 
+class FailingArrangeImportBinary(FakeBinary):
+    async def stl_draft(self, request, timeout_s=120.0):
+        self.requests.append(request)
+        if request["operation"] == "import":
+            raise BinaryError(code="arrange_failed", message="does not fit", details={})
+        return await super().stl_draft(request, timeout_s=timeout_s)
+
+
 class FakeTokenCache:
     def __init__(self) -> None:
         self.payloads: list[bytes] = []
@@ -80,6 +94,7 @@ class FakeTokenCache:
 def stl_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake_binary = FakeBinary()
     main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_draft_locks = {}
     main.app.state.token_cache = FakeTokenCache()
 
     async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
@@ -161,6 +176,7 @@ def test_stl_layout_updates_scene(stl_client) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["draft_token"] == draft_token
+    assert body["objects"][0]["mesh_transform"]["offset"] == [1, 2, 3]
     assert fake_binary.requests[-1]["operation"] == "layout"
     assert fake_binary.requests[-1]["action"] == "center"
 
@@ -174,6 +190,9 @@ def test_stl_export_returns_3mf_token(stl_client) -> None:
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"input_token": "tok3mf", "draft_token": draft_token}
     assert fake_binary.requests[-1]["operation"] == "export_3mf"
+    assert main.app.state.stl_drafts._drafts == {}
+    assert list((main.app.state.stl_drafts.root).iterdir()) == []
+    assert main.app.state.stl_draft_locks == {}
 
 
 def test_stl_import_uses_machine_process_only_materialization(
@@ -182,6 +201,7 @@ def test_stl_import_uses_machine_process_only_materialization(
 ) -> None:
     fake_binary = FakeBinary()
     main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_draft_locks = {}
     main.app.state.token_cache = FakeTokenCache()
 
     async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
@@ -223,6 +243,7 @@ def test_stl_import_binary_failure_deletes_draft(
     (profile_root / "machine").mkdir(parents=True)
     (profile_root / "process").mkdir()
     main.app.state.stl_drafts = drafts
+    main.app.state.stl_draft_locks = {}
     main.app.state.token_cache = FakeTokenCache()
 
     async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
@@ -248,6 +269,38 @@ def test_stl_import_binary_failure_deletes_draft(
     assert list((tmp_path / "stl-drafts").iterdir()) == []
 
 
+def test_stl_import_arrange_failure_is_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_binary = FailingArrangeImportBinary()
+    drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_drafts = drafts
+    main.app.state.stl_draft_locks = {}
+    main.app.state.token_cache = FakeTokenCache()
+
+    async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
+        return {
+            "machine_chain_dir": str(tmp_path / "machine"),
+            "machine_leaf_name": "Machine",
+            "process_chain_dir": str(tmp_path / "process"),
+            "process_leaf_name": "Process",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "materialize_machine_process_for_binary",
+        fake_materialize_machine_process_for_binary,
+    )
+    monkeypatch.setattr(main, "BinaryClient", lambda binary_path: fake_binary)
+
+    resp = _import_stl(TestClient(main.app))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "arrange_failed"
+    assert drafts._drafts == {}
+
+
 def test_stl_import_cleans_profile_temp_dirs_on_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -257,6 +310,7 @@ def test_stl_import_cleans_profile_temp_dirs_on_success(
     (profile_root / "machine").mkdir(parents=True)
     (profile_root / "process").mkdir()
     main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_draft_locks = {}
     main.app.state.token_cache = FakeTokenCache()
 
     async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
@@ -289,6 +343,7 @@ def test_stl_import_cleans_profile_temp_dirs_on_binary_failure(
     (profile_root / "machine").mkdir(parents=True)
     (profile_root / "process").mkdir()
     main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_draft_locks = {}
     main.app.state.token_cache = FakeTokenCache()
 
     async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):

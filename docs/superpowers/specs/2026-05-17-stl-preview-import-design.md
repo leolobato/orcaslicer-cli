@@ -65,6 +65,11 @@ Response:
         "rotation": [0.0, 0.0, 0.0],
         "scale": [1.0, 1.0, 1.0]
       },
+      "mesh_transform": {
+        "offset": [-38.0, -33.0, -21.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
       "bbox": {
         "min": [90.0, 95.0, 0.0],
         "max": [166.0, 161.0, 42.0]
@@ -157,7 +162,7 @@ Add a preview surface for STL imports:
 - Install Three.js.
 - Use `STLLoader` to render the stored source STL.
 - Draw a simple bed plane and printable area outline from scene metadata.
-- Apply the authoritative transform returned by `orcaslicer-headless`.
+- Apply the authoritative mesh and instance transforms returned by `orcaslicer-headless`.
 - Provide preset controls:
   - Auto-orient
   - Rotate 90 degrees
@@ -168,14 +173,14 @@ Add a preview surface for STL imports:
 - Disable final slicing until a preview scene is loaded.
 - Show warnings returned by `orcaslicer-headless`, especially non-printable/out-of-bed geometry and arrange failures.
 
-The browser may animate camera/orbit controls for inspection, but it does not author arbitrary transforms in v1.
+The browser applies `mesh_transform` to the original STL in object-local space before applying the instance-level `transform`. The browser may animate camera/orbit controls for inspection, but it does not author arbitrary transforms in v1.
 
 ## Data Flow
 
 1. User uploads STL in gateway.
 2. Gateway creates an STL draft session and forwards the STL to `orcaslicer-headless`.
 3. `orcaslicer-headless` imports, grounds, optionally centers/arranges/auto-orients, and returns scene metadata.
-4. Gateway web renders the original STL with the returned transform.
+4. Gateway web renders the original STL with the returned mesh and instance transforms.
 5. User applies preset controls as needed.
 6. Gateway forwards each control to `orcaslicer-headless` and re-renders the returned scene.
 7. User accepts preview.
