@@ -11,6 +11,7 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -145,10 +146,13 @@ void auto_orient_all(Slic3r::Model& model,
     if (selected.empty()) return;
 
     Slic3r::orientation::OrientParams params;
-    // GUI parity: OrientJob uses min-volume mode unless the canvas
-    // OrientSettings.min_area flag is enabled
-    // (../OrcaSlicer/src/slic3r/GUI/Jobs/OrientJob.cpp:163-170).
-    params.min_volume = true;
+    Slic3r::orientation::OrientParamsArea params_area;
+    // GUI parity: GLCanvas3D::OrientSettings defaults min_area=true
+    // (../OrcaSlicer/src/slic3r/GUI/GLCanvas3D.hpp:501-506), so
+    // OrientJob copies OrientParamsArea and disables min-volume mode
+    // (../OrcaSlicer/src/slic3r/GUI/Jobs/OrientJob.cpp:163-168).
+    std::memcpy(&params, &params_area, sizeof(params));
+    params.min_volume = false;
     params.progressind = [](unsigned, std::string) {};
 
     Slic3r::orientation::orient(selected, unselected, params);
