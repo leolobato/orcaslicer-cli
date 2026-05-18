@@ -252,7 +252,7 @@ Environment variables (set in `docker-compose.yml`):
 | `CACHE_MAX_BYTES` | `10737418240` (10 GB) | Token cache size cap; oldest evicted first |
 | `CACHE_MAX_FILES` | `200` | Token cache entry-count cap |
 | `STL_DRAFT_CACHE_DIR` | `/data/cache/stl-drafts` | Path for in-progress STL draft sessions |
-| `STL_DRAFT_TTL_SECONDS` | `3600` | Fixed lifetime for STL draft sessions before cleanup |
+| `STL_DRAFT_TTL_SECONDS` | `86400` | Fixed lifetime for STL draft sessions before cleanup |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 ## Known Caveats
