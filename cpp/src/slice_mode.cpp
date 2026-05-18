@@ -3,6 +3,7 @@
 #include "progress.h"
 
 #include "libslic3r/Arrange.hpp"
+#include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Preset.hpp"
@@ -800,6 +801,146 @@ int run_slice_mode(const SliceRequest& req) {
         auto* opt = final_cfg.opt<Slic3r::ConfigOptionStrings>(
             "filament_settings_id", true);
         opt->values = req.filament_settings_id;
+    }
+
+    // 10b. Multi-plate plate isolation. The GUI's "slice plate N" path:
+    //   1. computes plate_origin via PartPlateList::compute_origin (GUI
+    //      formula at vendor/OrcaSlicer/src/slic3r/GUI/PartPlate.cpp:3765
+    //      — col*bed_w*(1+gap), -row*bed_d*(1+gap); gap = LOGICAL_PART_PLATE_GAP = 1/5;
+    //      cols = compute_colum_count(N) at PartPlate.hpp:38),
+    //   2. builds a BuildVolume positioned at that origin,
+    //   3. calls Model::update_print_volume_state(build_volume)
+    //      (libslic3r/Model.cpp:687) — marks on-plate instances Inside,
+    //      off-plate Outside, and PrintApply.cpp:145
+    //      (print_objects_from_model_object) filters via is_printable()
+    //      (Model.hpp:1335) so only Inside instances flow into the Print.
+    //
+    // Headless adjustment: after the libslic3r filter marks instances, we
+    // also (a) physically drop off-plate instances/objects so our
+    // headless-only copies/arrange/auto_center paths — which iterate over
+    // model.objects without consulting is_printable() — don't touch them,
+    // and (b) translate surviving instances by -plate_origin to bed-local
+    // coords so the existing single-plate machinery downstream
+    // (auto_center, arrange, set_plate_origin(Zero)) keeps working
+    // unchanged. The end result is the same gcode the GUI would produce
+    // for that plate: the Print's instance coordinates are bed-local and
+    // print_origin is (0,0,0).
+    if (plate_data.size() > 1) {
+        const int plate_idx_0 = std::max(0, req.plate_id - 1);
+        if (plate_idx_0 >= static_cast<int>(plate_data.size())) {
+            return fail("invalid_plate_id",
+                        "plate_id=" + std::to_string(req.plate_id) +
+                            " out of range (3mf has " +
+                            std::to_string(plate_data.size()) + " plates)",
+                        response);
+        }
+
+        const auto* area = final_cfg.opt<Slic3r::ConfigOptionPoints>(
+            "printable_area");
+        if (!area || area->values.size() < 3) {
+            return fail("invalid_machine",
+                        "machine profile is missing printable_area; "
+                        "cannot isolate plate from multi-plate 3MF",
+                        response);
+        }
+        double bed_min_x = area->values[0].x(), bed_max_x = bed_min_x;
+        double bed_min_y = area->values[0].y(), bed_max_y = bed_min_y;
+        for (const auto& p : area->values) {
+            bed_min_x = std::min(bed_min_x, p.x());
+            bed_max_x = std::max(bed_max_x, p.x());
+            bed_min_y = std::min(bed_min_y, p.y());
+            bed_max_y = std::max(bed_max_y, p.y());
+        }
+        const double bed_w = bed_max_x - bed_min_x;
+        const double bed_d = bed_max_y - bed_min_y;
+
+        // compute_colum_count (PartPlate.hpp:38): cols = round(sqrt(N)),
+        // rounded up for non-perfect squares.
+        const int plate_count = static_cast<int>(plate_data.size());
+        const float v = std::sqrt(static_cast<float>(plate_count));
+        const float r = std::round(v);
+        int cols = (v > r) ? static_cast<int>(r) + 1 : static_cast<int>(r);
+        if (cols < 1) cols = 1;
+        const int row = plate_idx_0 / cols;
+        const int col = plate_idx_0 % cols;
+        constexpr double LOGICAL_PART_PLATE_GAP = 1.0 / 5.0;
+        const Slic3r::Vec3d plate_origin(
+            col * bed_w * (1.0 + LOGICAL_PART_PLATE_GAP),
+            -row * bed_d * (1.0 + LOGICAL_PART_PLATE_GAP),
+            0.0);
+
+        // Build a BuildVolume at this plate's position by shifting the
+        // machine's printable area into plater-coords. Mirrors what
+        // PartPlate stores as its `get_shape()` (already shifted by the
+        // plate origin) and feeds to BuildVolume at PartPlate.cpp:2487.
+        std::vector<Slic3r::Vec2d> shifted_bed;
+        shifted_bed.reserve(area->values.size());
+        for (const auto& p : area->values) {
+            shifted_bed.emplace_back(p.x() + plate_origin.x(),
+                                     p.y() + plate_origin.y());
+        }
+        const auto* ph_opt = final_cfg.opt<Slic3r::ConfigOptionFloat>(
+            "printable_height");
+        const double printable_height = ph_opt ? ph_opt->value : 250.0;
+
+        std::vector<std::vector<Slic3r::Vec2d>> extruder_areas;
+        if (const auto* ea = final_cfg.opt<Slic3r::ConfigOptionPointsGroups>(
+                "extruder_printable_area")) {
+            extruder_areas = ea->values;
+            for (auto& a : extruder_areas) {
+                for (auto& p : a) {
+                    p.x() += plate_origin.x();
+                    p.y() += plate_origin.y();
+                }
+            }
+        }
+        std::vector<double> extruder_heights;
+        if (const auto* eh = final_cfg.opt<Slic3r::ConfigOptionFloats>(
+                "extruder_printable_height")) {
+            extruder_heights = eh->values;
+        }
+
+        const Slic3r::BuildVolume build_volume(
+            shifted_bed, printable_height, extruder_areas, extruder_heights);
+
+        // libslic3r filter: marks each instance's print_volume_state to
+        // Inside / Partly_Outside / Fully_Outside based on whether its
+        // geometry intersects the build volume.
+        model.update_print_volume_state(build_volume);
+
+        // Drop off-plate instances and translate survivors to bed-local
+        // coords. is_printable() checks print_volume_state == Inside
+        // (Model.hpp:1335).
+        for (auto* obj : model.objects) {
+            if (!obj) continue;
+            for (size_t i = obj->instances.size(); i-- > 0;) {
+                if (!obj->instances[i]->is_printable()) {
+                    obj->delete_instance(i);
+                }
+            }
+            for (auto* inst : obj->instances) {
+                inst->set_offset(inst->get_offset() - plate_origin);
+                // After translation, the instance sits in the machine's
+                // bed-local volume. Reset the flag explicitly so a later
+                // is_printable() check (PrintApply.cpp:145) still passes
+                // — we won't re-run update_print_volume_state.
+                inst->print_volume_state =
+                    Slic3r::ModelInstancePVS_Inside;
+            }
+        }
+        for (size_t i = model.objects.size(); i-- > 0;) {
+            if (!model.objects[i] || model.objects[i]->instances.empty()) {
+                model.delete_object(i);
+            }
+        }
+        if (model.objects.empty()) {
+            return fail("empty_plate",
+                        "plate_id=" + std::to_string(req.plate_id) +
+                            " has no printable instances within its "
+                            "build volume",
+                        response);
+        }
+        emit_progress("plate_isolated", 25);
     }
 
     // 11a. Duplicate instances when the request asked for copies > 1.
