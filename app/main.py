@@ -1,6 +1,8 @@
 """FastAPI app exposing OrcaSlicer as a REST API."""
 
 import asyncio
+import base64
+import binascii
 import io
 import json
 import shutil
@@ -97,7 +99,11 @@ from .profiles import (
 from .inspect import (
     INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
 )
-from .threemf import list_plate_thumbnails, read_plate_thumbnail
+from .threemf import (
+    list_plate_thumbnails,
+    read_plate_thumbnail,
+    write_plate_thumbnail,
+)
 from .binary_client import BinaryClient, BinaryError
 from .stl_drafts import (
     StlDraftCache,
@@ -1587,6 +1593,25 @@ async def layout_stl(draft_token: str, body: StlLayoutRequest, request: Request)
 
 @app.post("/stl/{draft_token}/3mf", tags=["STL"])
 async def materialize_stl_3mf(draft_token: str, request: Request):
+    body: dict = {}
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return _draft_error(400, "invalid_body", "request body must be JSON")
+    thumbnail_b64 = body.get("thumbnail_png_base64") if isinstance(body, dict) else None
+    thumbnail_png: bytes | None = None
+    if thumbnail_b64:
+        try:
+            thumbnail_png = base64.b64decode(thumbnail_b64, validate=True)
+        except (binascii.Error, ValueError):
+            return _draft_error(
+                400,
+                "invalid_thumbnail",
+                "thumbnail_png_base64 must be valid base64",
+            )
+
     lock = _stl_draft_lock(request, draft_token)
     deleted = False
     async with lock:
@@ -1611,8 +1636,20 @@ async def materialize_stl_3mf(draft_token: str, request: Request):
         except BinaryError as e:
             return _draft_error(500, e.code, e.message)
 
+        materialized_bytes = output_path.read_bytes()
+        if thumbnail_png:
+            try:
+                materialized_bytes = write_plate_thumbnail(
+                    materialized_bytes, plate=1, png_bytes=thumbnail_png,
+                )
+            except zipfile.BadZipFile:
+                logger.warning(
+                    "materialized 3MF for draft %s is not a valid ZIP; skipping thumbnail embed",
+                    draft.token,
+                )
+
         cache: TokenCache = request.app.state.token_cache
-        token, _sha, _size, _evicted = cache.put(output_path.read_bytes())
+        token, _sha, _size, _evicted = cache.put(materialized_bytes)
         try:
             request.app.state.stl_drafts.delete(draft.token)
             deleted = True

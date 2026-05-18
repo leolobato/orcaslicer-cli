@@ -1097,3 +1097,34 @@ def read_plate_thumbnail(
             return zf.read(target)
     except (zipfile.BadZipFile, KeyError):
         return None
+
+
+def write_plate_thumbnail(
+    file_bytes: bytes, plate: int, png_bytes: bytes, kind: str = "main",
+) -> bytes:
+    """Return a new 3MF with the given PNG written as the plate thumbnail.
+
+    Replaces any existing entry of the same name; passes other entries
+    through verbatim (including compression mode). Raises ``BadZipFile``
+    if ``file_bytes`` is not a valid ZIP — the caller is expected to feed
+    in the bytes produced by ``orca-headless export_3mf``.
+    """
+    name_for_kind: dict[str, str] = {
+        "main": f"Metadata/plate_{plate}.png",
+        "small": f"Metadata/plate_{plate}_small.png",
+        "no_light": f"Metadata/plate_no_light_{plate}.png",
+        "top": f"Metadata/top_{plate}.png",
+        "pick": f"Metadata/pick_{plate}.png",
+    }
+    target = name_for_kind.get(kind)
+    if target is None:
+        raise ValueError(f"unsupported thumbnail kind: {kind!r}")
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as src, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            if info.filename == target:
+                continue
+            dst.writestr(info, src.read(info.filename))
+        dst.writestr(target, png_bytes)
+    return out.getvalue()

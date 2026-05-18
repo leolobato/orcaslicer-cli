@@ -199,6 +199,78 @@ def test_stl_export_returns_3mf_token(stl_client) -> None:
     assert main.app.state.stl_draft_locks == {}
 
 
+def test_stl_export_embeds_thumbnail_when_supplied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+    import io
+    import zipfile
+
+    from app.threemf import read_plate_thumbnail
+
+    def _empty_3mf_bytes() -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", "<Types/>")
+        return out.getvalue()
+
+    class ZipWritingBinary(FakeBinary):
+        async def stl_draft(self, request, timeout_s=120.0):
+            self.requests.append(request)
+            op = request["operation"]
+            if op == "export_3mf":
+                Path(request["output_3mf"]).write_bytes(_empty_3mf_bytes())
+                return {"status": "ok"}
+            return await super().stl_draft(request, timeout_s=timeout_s)
+
+    fake_binary = ZipWritingBinary()
+    main.app.state.stl_drafts = StlDraftCache(tmp_path / "stl-drafts", ttl_seconds=3600)
+    main.app.state.stl_draft_locks = {}
+
+    captured: list[bytes] = []
+
+    class CapturingTokenCache:
+        def put(self, payload: bytes):
+            captured.append(payload)
+            return "tok3mf", "sha", len(payload), []
+
+    main.app.state.token_cache = CapturingTokenCache()
+
+    async def fake_materialize_machine_process_for_binary(machine_id: str, process_id: str):
+        machine_dir = tmp_path / "machine"
+        process_dir = tmp_path / "process"
+        machine_dir.mkdir()
+        process_dir.mkdir()
+        return {
+            "machine_chain_dir": str(machine_dir),
+            "machine_leaf_name": "Mock Machine",
+            "process_chain_dir": str(process_dir),
+            "process_leaf_name": "Mock Process",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "materialize_machine_process_for_binary",
+        fake_materialize_machine_process_for_binary,
+        raising=False,
+    )
+    monkeypatch.setattr(main, "BinaryClient", lambda binary_path: fake_binary)
+
+    client = TestClient(main.app)
+    draft_token = _import_stl(client).json()["draft_token"]
+
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png-payload"
+    resp = client.post(
+        f"/stl/{draft_token}/3mf",
+        json={"thumbnail_png_base64": base64.b64encode(png_bytes).decode("ascii")},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert len(captured) == 1
+    assert read_plate_thumbnail(captured[0], plate=1, kind="main") == png_bytes
+
+
 def test_stl_import_uses_machine_process_only_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
