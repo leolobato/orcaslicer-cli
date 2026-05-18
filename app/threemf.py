@@ -1,6 +1,7 @@
 """Parse 3MF archives to extract object bounding boxes."""
 
 import io
+import json
 import logging
 import math
 import re
@@ -1097,6 +1098,59 @@ def read_plate_thumbnail(
             return zf.read(target)
     except (zipfile.BadZipFile, KeyError):
         return None
+
+
+def apply_prepared_settings(
+    file_bytes: bytes,
+    *,
+    printer_settings_id: str,
+    print_settings_id: str,
+    curr_bed_type: str = "",
+    process_overrides: dict[str, str] | None = None,
+) -> bytes:
+    """Return a new 3MF whose ``Metadata/project_settings.config`` has been
+    rewritten to advertise the supplied preset names + per-key overrides,
+    without re-running the slicer binary.
+
+    Replaces `printer_settings_id`, `print_settings_id` and (when supplied)
+    `curr_bed_type`. Each override key is written as a plain string value
+    and added to the first entry of ``different_settings_to_system`` (the
+    process-domain group), so re-imports surface those settings as edits.
+
+    Other entries pass through verbatim.
+    """
+    PROJECT_SETTINGS = "Metadata/project_settings.config"
+    out = io.BytesIO()
+    settings_bytes: bytes | None = None
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as src, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            if info.filename == PROJECT_SETTINGS:
+                settings_bytes = src.read(info.filename)
+                continue
+            dst.writestr(info, src.read(info.filename))
+
+        settings: dict[str, Any] = (
+            json.loads(settings_bytes.decode("utf-8")) if settings_bytes else {}
+        )
+        settings["printer_settings_id"] = printer_settings_id
+        settings["print_settings_id"] = print_settings_id
+        if curr_bed_type:
+            settings["curr_bed_type"] = curr_bed_type
+        overrides = process_overrides or {}
+        for key, value in overrides.items():
+            settings[key] = value
+        if overrides:
+            groups = list(settings.get("different_settings_to_system") or [])
+            if not groups:
+                groups = [""]
+            existing = set(filter(None, str(groups[0]).split(";")))
+            for key in overrides:
+                existing.add(key)
+            groups[0] = ";".join(sorted(existing))
+            settings["different_settings_to_system"] = groups
+        dst.writestr(PROJECT_SETTINGS, json.dumps(settings).encode("utf-8"))
+    return out.getvalue()
 
 
 def write_plate_thumbnail(

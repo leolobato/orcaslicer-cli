@@ -100,6 +100,7 @@ from .inspect import (
     INSPECT_SCHEMA_VERSION, InspectCache, parse_inspect_data,
 )
 from .threemf import (
+    apply_prepared_settings,
     list_plate_thumbnails,
     read_plate_thumbnail,
     write_plate_thumbnail,
@@ -1105,6 +1106,99 @@ async def delete_token(request: Request, token: str):
     if sha256:
         request.app.state.inspect_cache.invalidate(sha256)
     return None
+
+
+class Prepare3mfRequest(BaseModel):
+    machine_id: str
+    process_id: str
+    plate_type: str | None = None
+    process_overrides: dict[str, str] | None = None
+    thumbnail_png_base64: str | None = None
+
+
+@app.post("/3mf/{token}/prepare", tags=["3MF"])
+async def prepare_3mf(token: str, body: Prepare3mfRequest, request: Request):
+    """Bake the supplied machine / process / plate / overrides + optional
+    preview thumbnail into a 3MF without slicing, and return a fresh token
+    pointing at the prepared bytes.
+
+    Used by the gateway to persist a “prepared original” for every slice
+    job so re-imports surface the exact settings the slicer received.
+    """
+    cache: TokenCache = request.app.state.token_cache
+    try:
+        input_path = cache.path(token)
+    except KeyError:
+        return JSONResponse(
+            status_code=404,
+            content={"code": "token_unknown", "token": token},
+        )
+
+    try:
+        machine = get_profile("machine", body.machine_id)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "machine_unknown",
+                "message": f"unknown machine_id: {body.machine_id} ({e})",
+            },
+        )
+    try:
+        process = get_profile("process", body.process_id)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "process_unknown",
+                "message": f"unknown process_id: {body.process_id} ({e})",
+            },
+        )
+
+    printer_settings_id = str(machine.get("name") or body.machine_id)
+    print_settings_id = str(process.get("name") or body.process_id)
+    bed_label = _resolve_plate_type_label(body.machine_id, body.plate_type)
+
+    thumbnail_png: bytes | None = None
+    if body.thumbnail_png_base64:
+        try:
+            thumbnail_png = base64.b64decode(body.thumbnail_png_base64, validate=True)
+        except (binascii.Error, ValueError):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": "invalid_thumbnail",
+                    "message": "thumbnail_png_base64 must be valid base64",
+                },
+            )
+
+    file_bytes = input_path.read_bytes()
+    try:
+        prepared_bytes = apply_prepared_settings(
+            file_bytes,
+            printer_settings_id=printer_settings_id,
+            print_settings_id=print_settings_id,
+            curr_bed_type=bed_label,
+            process_overrides=body.process_overrides or {},
+        )
+    except zipfile.BadZipFile:
+        return JSONResponse(
+            status_code=400,
+            content={"code": "invalid_3mf", "message": "input token is not a 3MF ZIP"},
+        )
+    if thumbnail_png:
+        try:
+            prepared_bytes = write_plate_thumbnail(
+                prepared_bytes, plate=1, png_bytes=thumbnail_png,
+            )
+        except zipfile.BadZipFile:
+            logger.warning(
+                "prepared 3MF for token %s is not a valid ZIP; skipping thumbnail embed",
+                token,
+            )
+
+    prepared_token, _sha, _size, _evicted = cache.put(prepared_bytes)
+    return {"input_token": prepared_token}
 
 
 class SliceTokenRequest(BaseModel):
