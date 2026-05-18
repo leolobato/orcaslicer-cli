@@ -1,6 +1,6 @@
 # OrcaSlicer Headless
 
-A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to provide headless 3D print slicing. Upload a `.3mf` file with Bambu Lab profile IDs and get back a sliced `.3mf` with generated G-code.
+A REST API that wraps [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) to provide headless 3D print slicing. Upload a `.3mf` file with Bambu Lab profile IDs and get back a sliced `.3mf` with generated G-code, or import an `.stl` into a preview draft, adjust its layout, materialize it to `.3mf`, and slice it through the same pipeline.
 
 ## Quick Start
 
@@ -53,9 +53,13 @@ GUI uses.
 - **`app/`** — FastAPI app, profile resolution, token cache (`/data/cache`),
   request adapters into `orca-headless`.
 - **`cpp/orca-headless`** — compiled from `vendor/OrcaSlicer` (pinned at
-  v2.3.2). Two subcommands: `slice` and `use-set`.
+  v2.3.2). Subcommands include `slice`, `use-set`, `stl-draft`,
+  `dump-profiles`, and `dump-options`.
 - **Token cache** — every uploaded `.3mf` is stored once by sha256;
   subsequent calls (inspect, slice, thumbnail) reference the token.
+- **STL draft cache** — preview-first STL imports keep the original STL,
+  current draft `.3mf`, and scene metadata together until the draft is
+  accepted or expires.
 
 ### Why a custom binary instead of OrcaSlicer's built-in CLI
 
@@ -152,6 +156,47 @@ curl -s -o sliced.3mf http://localhost:8070/3mf/$OUT
 
 The token cache is content-addressed (sha256-keyed): repeated uploads of the same bytes resolve to the same token. `auto_center=false` keeps the model in its 3MF-stored position, matching the GUI's behaviour on import.
 
+### STL slicing example
+
+`/slice/v2` slices cached `.3mf` tokens. STL files first go through a draft
+session so callers can preview and adjust the same Orca model placement that
+will be sliced. A draft becomes sliceable only after `POST /stl/{draft}/3mf`
+returns a normal 3MF cache token.
+
+```bash
+# 1. Import the STL into a draft session
+DRAFT=$(curl -s -X POST http://localhost:8070/stl/import \
+  -F "machine_id=GM020" \
+  -F "process_id=GP000" \
+  -F "center=true" \
+  -F "arrange=true" \
+  -F "auto_orient=false" \
+  -F "file=@part.stl;type=model/stl" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['draft_token'])")
+
+# 2. Optional: apply the same layout actions exposed in the preview UI
+curl -s -X POST http://localhost:8070/stl/$DRAFT/layout \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"auto_orient"}' >/dev/null
+
+# 3. Accept/materialize the draft into the normal 3MF token cache
+TOK=$(curl -s -X POST http://localhost:8070/stl/$DRAFT/3mf \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['input_token'])")
+
+# 4. Slice the materialized 3MF
+OUT=$(curl -s -X POST http://localhost:8070/slice/v2 \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"input_token\": \"$TOK\",
+    \"machine_id\": \"GM020\",
+    \"process_id\": \"GP000\",
+    \"filament_settings_ids\": [\"GFL99\"],
+    \"auto_center\": false
+  }" | python3 -c "import json,sys; print(json.load(sys.stdin)['output_token'])")
+
+curl -s -o sliced-from-stl.3mf http://localhost:8070/3mf/$OUT
+```
+
 ### STL draft preview API
 
 STL support is preview-first. Upload an STL with `POST /stl/import`, apply optional layout actions through `POST /stl/{draft_token}/layout`, then materialize the accepted draft with `POST /stl/{draft_token}/3mf`. The materialized token is a normal 3MF token and can be used with `GET /3mf/{token}/inspect` and `POST /slice/v2`.
@@ -206,6 +251,8 @@ Environment variables (set in `docker-compose.yml`):
 | `CACHE_DIR` | `/data/cache` | Path for the token cache (uploaded + sliced 3MFs) |
 | `CACHE_MAX_BYTES` | `10737418240` (10 GB) | Token cache size cap; oldest evicted first |
 | `CACHE_MAX_FILES` | `200` | Token cache entry-count cap |
+| `STL_DRAFT_CACHE_DIR` | `/data/cache/stl-drafts` | Path for in-progress STL draft sessions |
+| `STL_DRAFT_TTL_SECONDS` | `3600` | Fixed lifetime for STL draft sessions before cleanup |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 ## Known Caveats
